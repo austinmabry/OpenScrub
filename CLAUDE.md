@@ -101,14 +101,22 @@ landed — partial silent misses have happened repeatedly.
 ## Brand / assets
 
 - Canonical badge: `assets/badge_master.png` (hexagon, bucket-hat figure,
-  mosaic face + red corner brackets). Alternate blur+box style preserved.
+  mosaic face + red corner brackets), cut from the full-bleed key art in
+  `assets/social_preview_master.png` (navy background keyed to alpha).
+  When new key art arrives: re-cut the badge, replace both masters,
+  re-run make_icons, and re-embed the web header/favicon base64
+  (icon-32 → the `<link rel="icon">` data URI, icon-128 → the `<header>`
+  img data URI in openscrub_web.py). Alternate blur+box style preserved.
+- `social_preview.png` is `social_preview_master.png` resized to 1280x640
+  by make_icons; the composited badge+wordmark layout is only a fallback
+  when no master exists.
 - Wordmark: typeset Poppins Bold (fonts in `assets/fonts/`, OFL). "Open"+"ub"
   sharp, "Scr" Gaussian-blurred at alpha 168, red corner brackets.
   **Never ask an image generator for wordmark text — it reliably mangles
   letterforms. Badge art = AI; wordmark = typesetting.**
 - Regenerate everything: `python tools/make_icons.py` and
   `python tools/make_wordmark.py`.
-- `icon-512`/`icon-1024` are upscales of the 414px badge master; if a
+- `icon-512`/`icon-1024` are upscales of the ~410px badge master; if a
   ≥2048px badge render ever becomes available, drop it in as
   `badge_master.png` and re-run make_icons.
 

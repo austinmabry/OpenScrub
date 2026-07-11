@@ -39,6 +39,14 @@ def main():
     square(badge, 256).save(os.path.join(A, "logo.png"))
     square(badge, 256).save(os.path.join(A, "logo_dark.png"))
 
+    # social preview: prefer the hand-made full-bleed master art; fall back
+    # to compositing badge + white wordmark on a navy field.
+    master = os.path.join(A, "social_preview_master.png")
+    if os.path.exists(master):
+        Image.open(master).convert("RGB").resize(
+            (1280, 640), Image.LANCZOS).save(
+            os.path.join(A, "social_preview.png"))
+
     # lockup: badge + navy wordmark on white
     wm = Image.open(os.path.join(A, "wordmark_navy.png"))
     bh = int(wm.height * 2.1)
@@ -50,16 +58,18 @@ def main():
     lock.paste(wm, (bs.width + 95, (H - wm.height) // 2), wm)
     lock.save(os.path.join(A, "lockup_light.png"))
 
-    # social preview: navy field, badge + white wordmark, centered pair
-    wmw = Image.open(os.path.join(A, "wordmark_white.png"))
-    sp = Image.new("RGBA", (1280, 640), (15, 23, 42, 255))
-    bd = square(badge, 430)
-    tw = 700
-    wr = wmw.resize((tw, int(wmw.height * tw / wmw.width)), Image.LANCZOS)
-    x0 = (1280 - (bd.width + 60 + wr.width)) // 2
-    sp.paste(bd, (x0, (640 - bd.height) // 2), bd)
-    sp.paste(wr, (x0 + bd.width + 60, (640 - wr.height) // 2), wr)
-    sp.convert("RGB").save(os.path.join(A, "social_preview.png"))
+    # social preview fallback when no master art exists: navy field,
+    # badge + white wordmark, centered pair
+    if not os.path.exists(master):
+        wmw = Image.open(os.path.join(A, "wordmark_white.png"))
+        sp = Image.new("RGBA", (1280, 640), (15, 23, 42, 255))
+        bd = square(badge, 430)
+        tw = 700
+        wr = wmw.resize((tw, int(wmw.height * tw / wmw.width)), Image.LANCZOS)
+        x0 = (1280 - (bd.width + 60 + wr.width)) // 2
+        sp.paste(bd, (x0, (640 - bd.height) // 2), bd)
+        sp.paste(wr, (x0 + bd.width + 60, (640 - wr.height) // 2), wr)
+        sp.convert("RGB").save(os.path.join(A, "social_preview.png"))
 
     print("assets regenerated from badge_master.png")
     print("NOTE: the web header/favicon are base64-embedded in openscrub_web.py;")
