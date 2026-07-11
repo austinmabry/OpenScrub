@@ -1,0 +1,56 @@
+# .github/workflows/publish.yml
+# Builds OpenScrub and publishes it to PyPI via Trusted Publishing (OIDC).
+# No API tokens or secrets: PyPI trusts this specific repo + workflow + env.
+#
+# The workflow filename (publish.yml) and the environment name (pypi) below MUST
+# exactly match what you entered in the PyPI "pending publisher" form.
+#
+# To cut a release: bump VERSION in openscrub.py, commit, tag, and push the tag:
+#     git tag v4.2.0 && git push origin v4.2.0
+# then create a GitHub Release for that tag (Releases -> Draft a new release).
+
+name: Publish to PyPI
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  build:
+    name: Build distributions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Install build tooling
+        run: python -m pip install --upgrade build
+      - name: Build sdist and wheel
+        run: python -m build
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: [build]
+    runs-on: ubuntu-latest
+    # Must match the environment name you gave PyPI. If you left PyPI's
+    # environment field BLANK, delete these two lines.
+    environment:
+      name: pypi
+      url: https://pypi.org/p/OpenScrub
+    permissions:
+      # Mandatory for Trusted Publishing: lets the runner fetch an OIDC token.
+      id-token: write
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

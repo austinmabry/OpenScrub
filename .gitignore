@@ -1,0 +1,123 @@
+# ============================================================================
+#  OpenScrub — .gitignore
+#  This tool processes sensitive data (PHI/PII). The entries below are not just
+#  housekeeping — several of them prevent committing files that could LEAK the
+#  very data OpenScrub exists to redact. Do not remove the "sensitive data"
+#  section without a good reason.
+# ============================================================================
+
+# ---- Sensitive: never commit (PHI / PII / secrets) -------------------------
+# Job store: uploaded videos, rendered output, and audit reports that contain
+# the detected PHI text in plaintext.
+openscrub_jobs/
+phi_blur_jobs/
+jobs/
+
+# Audit reports contain the actual detected PHI strings.
+report.json
+*_report.json
+*.report.json
+
+# Rendered videos (input copies and redacted/preview output).
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.webm
+
+# Reference data that identifies real people or real screen layouts.
+allowlist.txt
+patients.csv
+patients_cache.csv
+zones.json
+*.zones.json
+
+# TLS certificates / keys for the HTTPS web server.
+certs/
+*.pem
+*.key
+*.crt
+*.p12
+
+# Local backups.
+backups/
+*.bak
+
+# Generic secret files.
+.env
+.env.*
+*.secret
+secrets.*
+
+# ---- Models & large binaries (download or mount instead of commit) ---------
+*.onnx
+*.caffemodel
+*.pb
+*.pt
+*.pth
+*.weights
+models/
+face_detection_yunet*.onnx
+
+# ---- Python ----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+wheels/
+*.egg
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# Test / tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+
+# PyInstaller build artifacts (from build_installer.bat)
+*.spec.bak
+*.manifest
+__pyinstaller/
+
+# ---- OS / editor -----------------------------------------------------------
+.DS_Store
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ---- Logs & scratch --------------------------------------------------------
+*.log
+web*.log
+*.tmp
+tmp/
+scratch/
+
+# ============================================================================
+#  KEEP (tracked on purpose) — these are NOT ignored:
+#    phi_blur.py, phi_blur_web.py, zones_ui.py, install.py, requirements.txt,
+#    README.md, LICENSE, test_phi_blur.py, and any sample/synthetic assets you
+#    deliberately add. If you want to ship an EXAMPLE zones file or a demo clip,
+#    name it distinctively (e.g. sample_zones.example.json, demo_synthetic.mp4)
+#    and add a matching "!" un-ignore line here, e.g.:
+#        !sample_zones.example.json
+# ============================================================================
+
+# private local context for Claude Code — never commit
+CLAUDE.local.md

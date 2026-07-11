@@ -1,0 +1,4 @@
+Poppins (Bold, SemiBold) — copyright Indian Type Foundry.
+Licensed under the SIL Open Font License 1.1 (OFL).
+Source: github.com/google/fonts/tree/main/ofl/poppins
+Included solely to regenerate the OpenScrub wordmark (tools/make_wordmark.py).

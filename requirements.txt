@@ -1,0 +1,9 @@
+opencv-python
+rapidfuzz
+pytesseract
+pillow
+spacy
+flask
+pyyaml
+cryptography
+cheroot>=10.0

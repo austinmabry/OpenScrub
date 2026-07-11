@@ -1,0 +1,44 @@
+{
+  "_comment": "Curated license-plate models. download_url values are taken directly from the open-image-models package source (hub.py) and existence-verified. sha256 empty = trust-on-first-use: the first download computes the hash and PINS it here; later downloads must match it.",
+  "models": [
+    {
+      "id": "oim-yolov9-t-640",
+      "label": "Open Image Models - YOLOv9-T 640 (balanced)",
+      "license": "MIT",
+      "family": "yolov9-end2end",
+      "input_size": 640,
+      "source_url": "https://github.com/ankandrew/open-image-models",
+      "attribution": "Model: ankandrew/open-image-models (MIT). Training data derived from a Roboflow license-plate dataset (CC BY 4.0).",
+      "download_url": "https://github.com/ankandrew/open-image-models/releases/download/assets/yolo-v9-t-640-license-plates-end2end.onnx",
+      "sha256": "",
+      "notes": "mAP50 0.958. Good default: strong accuracy, 640px input matches OpenScrub's face-detection size.",
+      "recommended": true
+    },
+    {
+      "id": "oim-yolov9-s-608",
+      "label": "Open Image Models - YOLOv9-S 608 (most accurate)",
+      "license": "MIT",
+      "family": "yolov9-end2end",
+      "input_size": 608,
+      "source_url": "https://github.com/ankandrew/open-image-models",
+      "attribution": "Model: ankandrew/open-image-models (MIT). Training data derived from a Roboflow license-plate dataset (CC BY 4.0).",
+      "download_url": "https://github.com/ankandrew/open-image-models/releases/download/assets/yolo-v9-s-608-license-plates-end2end.onnx",
+      "sha256": "",
+      "notes": "mAP50 0.966 (highest). Slightly slower; best for stills or when accuracy matters most.",
+      "recommended": false
+    },
+    {
+      "id": "oim-yolov9-t-256",
+      "label": "Open Image Models - YOLOv9-T 256 (fastest)",
+      "license": "MIT",
+      "family": "yolov9-end2end",
+      "input_size": 256,
+      "source_url": "https://github.com/ankandrew/open-image-models",
+      "attribution": "Model: ankandrew/open-image-models (MIT). Training data derived from a Roboflow license-plate dataset (CC BY 4.0).",
+      "download_url": "https://github.com/ankandrew/open-image-models/releases/download/assets/yolo-v9-t-256-license-plates-end2end.onnx",
+      "sha256": "",
+      "notes": "mAP50 0.858. Fastest; use for real-time-ish passes or lower-power machines. Lower recall on small/distant plates.",
+      "recommended": false
+    }
+  ]
+}
