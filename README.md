@@ -1,3 +1,15 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/austinmabry/OpenScrub/main/assets/social_preview.png"
+       alt="OpenScrub — the bucket-hat figure behind a fence, face pixelated, next to the OpenScrub wordmark"
+       width="830">
+</p>
+
+<p align="center">
+  <a href="https://pypi.org/project/OpenScrub/"><img src="https://img.shields.io/pypi/v/OpenScrub?color=1f2a44&label=PyPI" alt="PyPI version"></a>
+  <a href="https://pypi.org/project/OpenScrub/"><img src="https://img.shields.io/pypi/pyversions/OpenScrub?color=1f2a44" alt="Python versions"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-e0432f" alt="License: Apache-2.0"></a>
+</p>
+
 # OpenScrub — local video & screen-recording redaction
 
 **A local, GPU-accelerated tool that blurs faces and any on-screen text —
