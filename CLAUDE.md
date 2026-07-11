@@ -145,6 +145,10 @@ landed — partial silent misses have happened repeatedly.
 4. `.github/workflows/publish.yml` builds and publishes to PyPI via Trusted
    Publishing (environment name `pypi` — must exist in repo settings and
    match the PyPI pending publisher exactly). First publish claims the name.
+5. `.github/workflows/windows-installer.yml` builds the native installer on
+   a Windows runner (same `windows\build_installer.bat` as a local build)
+   and attaches `OpenScrub-Setup-<version>.exe` to the release automatically
+   — no manual exe build or upload needed.
 
 ## Hard rules
 
