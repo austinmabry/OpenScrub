@@ -195,6 +195,27 @@ created shortcut, or `python openscrub_web.py` — the web interface is the
 primary interface. (`openscrub_gui.py`, the desktop Tk interface, still
 works but is legacy: new features land in the web app.)
 
+## Updating
+
+```
+openscrub-update            # interactive: shows versions, asks, updates
+openscrub-update --check    # just report whether an update exists
+```
+
+It detects how OpenScrub was installed: pip installs upgrade via
+`pip install --upgrade OpenScrub`; folder deploys download the latest
+release from PyPI, **verify its SHA-256** against the hash PyPI
+publishes, and replace only the released files — your jobs, certificates,
+zones, models, allowlist, and locally pinned plate-model hashes are
+never touched, and every replaced file is backed up to
+`backups/pre-update-<version>/` first. Git checkouts are left to
+`git pull`.
+
+The web interface checks for updates too: when a newer release exists,
+the footer shows an update link — one click runs the same updater (only
+while no job is running), then asks you to restart the server. Restart
+after any update to run the new version.
+
 ## Web interface (LAN)
 
 Run `python openscrub_web.py` on an always-on machine and open the printed

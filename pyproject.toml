@@ -63,6 +63,7 @@ Issues = "https://github.com/austinmabry/OpenScrub/issues"
 openscrub = "openscrub:main"
 openscrub-web = "openscrub_web:main"
 openscrub-setup = "openscrub_setup:main"
+openscrub-update = "openscrub_update:main"
 
 [tool.hatch.version]
 # Single source of truth: the VERSION = "x.y.z" line in openscrub.py. A release
@@ -79,6 +80,7 @@ include = [
     "openscrub_web.py",
     "zones_ui.py",
     "openscrub_setup.py",
+    "openscrub_update.py",
 ]
 
 [tool.hatch.build.targets.sdist]
@@ -86,6 +88,7 @@ include = [
     "plate_models.json",
     "openscrub.py",
     "openscrub_setup.py",
+    "openscrub_update.py",
     "openscrub_web.py",
     "zones_ui.py",
     "install.py",

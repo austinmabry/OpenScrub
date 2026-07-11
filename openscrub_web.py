@@ -950,7 +950,7 @@ placeholder="e.g. provider or app names to always keep visible&#10;one per line"
 <div id="detail"></div>
 </main>
 <footer style="text-align:center;color:#9ca3af;font-size:12px;padding:18px 12px 26px">
-OpenScrub v4.2.0 · <a href="license" style="color:#6b7280">Apache-2.0 license</a>
+OpenScrub v%%VERSION%% <span id="upd"></span>· <a href="license" style="color:#6b7280">Apache-2.0 license</a>
 · best-effort redaction — always review output before sharing PHI</footer>
 <script>
 const CATS=["name","dob","phone","ssn","mrn","email","address","card","apikey","ipaddr","plate","face"];
@@ -1580,12 +1580,110 @@ async function zoneStatus(){
  document.getElementById("zstat").textContent=
   n?(n+" class"+(n>1?"es":"")+" zoned — outside them nothing is blurred"):"none configured (full frame)";
 }
+async function updCheck(){
+ try{
+  const d=await (await fetch("/api/update_check")).json();
+  if(d.available)document.getElementById("upd").innerHTML=
+   '· <a href="#" style="color:#b45309" onclick="updRun();return false">v'
+   +d.latest+' available — update</a> ';
+ }catch(e){}
+}
+async function updRun(){
+ if(!confirm("Update OpenScrub to the newest release now?\n\nJobs must be idle, and the server needs a restart afterwards to run the new version."))return;
+ const r=await fetch("/api/update_run",{method:"POST"});
+ if(!r.ok){alert(await r.text());return;}
+ const el=document.getElementById("upd");
+ el.textContent="· updating… ";
+ const t=setInterval(async()=>{
+  const s=await (await fetch("/api/update_status")).json();
+  if(!s.running&&s.ok!==null){
+   clearInterval(t);
+   el.textContent=s.ok?"· updated — restart the server to finish ":"· update failed ";
+   alert((s.ok?"Update installed.\nRestart the OpenScrub server to run the new version.":"Update failed:")+"\n\n"+s.log.slice(-8).join("\n"));
+  }
+ },2000);
+}
 zoneStatus();loadPersist();loadCertInfo();loadJobs();setInterval(loadJobs,5000);
+updCheck();
 </script></body></html>"""
 
 
 ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+# ----------------------------------------------------------------------------
+# Self-update (openscrub_update.py does the heavy lifting). The update
+# endpoints refuse to run while any job is queued or processing, and an
+# installed update only takes effect after the server restarts.
+# ----------------------------------------------------------------------------
+try:
+    import openscrub_update
+except Exception:                       # module missing: endpoints degrade
+    openscrub_update = None
+
+UPD = {"running": False, "log": [], "ok": None, "cache": (0.0, None)}
+UPD_LOCK = threading.Lock()
+
+
+@app.route("/api/update_check")
+def update_check():
+    if openscrub_update is None:
+        return jsonify({"current": openscrub.VERSION, "latest": None,
+                        "available": False})
+    now = time.time()
+    with UPD_LOCK:
+        ts, latest = UPD["cache"]
+        if now - ts > 6 * 3600 or request.args.get("force"):
+            try:
+                latest = openscrub_update.get_latest(timeout=6)
+            except Exception:
+                latest = None       # offline / PyPI down: just no notice
+            UPD["cache"] = (now, latest)
+    avail = bool(latest and openscrub_update.is_newer(latest["version"],
+                                                      openscrub.VERSION))
+    return jsonify({"current": openscrub.VERSION,
+                    "latest": latest["version"] if latest else None,
+                    "available": avail})
+
+
+@app.route("/api/update_run", methods=["POST"])
+def update_run():
+    if openscrub_update is None:
+        abort(400, "updater module not available")
+    with JOBS_LOCK:
+        busy = any(j.get("phase") in ("queued", "scanning", "rendering",
+                                      "queued_render")
+                   for j in JOBS.values())
+    if busy:
+        abort(409, "a job is queued or running — update after it finishes")
+    with UPD_LOCK:
+        if UPD["running"]:
+            return jsonify({"started": False, "reason": "already running"})
+        UPD["running"], UPD["log"], UPD["ok"] = True, [], None
+
+    def _go():
+        def log(msg):
+            with UPD_LOCK:
+                UPD["log"].append(str(msg))
+        try:
+            openscrub_update.run_update(log=log)
+            ok = True
+        except Exception as e:
+            log("update failed: %s" % e)
+            ok = False
+        with UPD_LOCK:
+            UPD["ok"], UPD["running"] = ok, False
+
+    threading.Thread(target=_go, daemon=True).start()
+    return jsonify({"started": True})
+
+
+@app.route("/api/update_status")
+def update_status():
+    with UPD_LOCK:
+        return jsonify({"running": UPD["running"], "ok": UPD["ok"],
+                        "log": list(UPD["log"])})
 
 
 @app.route("/license")
@@ -1630,7 +1728,7 @@ def favicon():
 
 @app.route("/")
 def index():
-    return PAGE
+    return PAGE.replace("%%VERSION%%", openscrub.VERSION)
 
 
 @app.route("/zones")

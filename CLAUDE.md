@@ -18,7 +18,8 @@ target is Windows 10 + NVIDIA RTX 3060.
 | `install.py` | Windows-friendly installer (deps, GPU OCR, shortcut, `--with-plates`). |
 | `plate_models.json` | Curated license-plate model registry (see PLATES.md). |
 | `fetch_plate_models.py` | Alt path to fetch plate models via the open-image-models pip package. |
-| `test_openscrub.py` | pytest suite (9 tests). Must stay green. |
+| `openscrub_update.py` | `openscrub-update` command + web self-update backend: PyPI version check, sha256-verified sdist download, data-preserving folder update (PRESERVE set), TOFU pin carry-forward. Ships in the wheel. |
+| `test_openscrub.py` | pytest suite (11 tests). Must stay green. |
 | `tools/make_icons.py` | Regenerates every icon/logo asset from `assets/badge_master.png`. |
 | `tools/make_wordmark.py` | Regenerates the typeset Poppins wordmarks (navy + white). |
 | `assets/` | Brand assets. `badge_master.png` (canonical, mosaic+brackets style) and `badge_master_blurbox_alt.png` (alternate) are the sources; everything else is generated. |
@@ -70,6 +71,11 @@ defined — there was a real UnboundLocalError from ordering once.
   New models are picked up on the next job (detector instantiated per run).
 - Server: cheroot with `BuiltinSSLAdapter` (self-signed or user cert), Flask
   dev server fallback if cheroot missing. `ssl_ctx` is a `(cert, key)` tuple.
+- Self-update: `/api/update_check` (6h-cached PyPI poll, offline-silent),
+  `/api/update_run` (409 while any job is queued/running), `/api/update_status`.
+  Footer shows the version via the `%%VERSION%%` placeholder replaced at
+  serve time in `index()` — never hardcode a version in PAGE again (the
+  v4.2.0 footer went stale once already). Updates need a server restart.
 
 ## The 12-category alignment rule (easy to break!)
 
@@ -87,7 +93,7 @@ no confirmation delay. Verify alignment:
 ```
 python -c "import ast; ast.parse(open('openscrub.py').read())"   # each edited .py
 # extract PAGE's <script> to a file and: node --check that_file.js
-python -m pytest test_openscrub.py -q                             # 9 tests, all green
+python -m pytest test_openscrub.py -q                             # 11 tests, all green
 python -m build          # FULL build (sdist->wheel), NEVER just `-w`:
                          # the wheel is built FROM the sdist in CI, so any
                          # file the wheel force-includes must be in the

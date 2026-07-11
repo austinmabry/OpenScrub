@@ -173,3 +173,34 @@ def test_ignore_region(tmp_path):
     res, dets = run(v, "--ignore-region", "0,650,1280,720")
     assert not any(d["cbox"][1] > 600 for d in dets)         # corner suppressed
     assert any(d["category"] == "name" for d in dets)        # name still caught
+
+
+def test_update_version_compare():
+    import openscrub_update as u
+    assert u.is_newer("1.0.10", "1.0.9")
+    assert u.is_newer("1.1.0", "1.0.99")
+    assert not u.is_newer("1.0.4", "1.0.4")
+    assert not u.is_newer("0.9.9", "1.0.0")
+
+
+def test_update_registry_pin_merge():
+    """Locally pinned TOFU hashes must survive an update — but only when
+    the download URL is unchanged; a moved URL must NOT inherit trust."""
+    import openscrub_update as u
+    old = [
+        {"id": "a", "download_url": "https://x/a.onnx", "sha256": "aaa"},
+        {"id": "b", "download_url": "https://x/b.onnx", "sha256": "bbb"},
+        {"id": "c", "download_url": "https://x/c.onnx", "sha256": ""},
+    ]
+    new = [
+        {"id": "a", "download_url": "https://x/a.onnx", "sha256": ""},
+        {"id": "b", "download_url": "https://MOVED/b.onnx", "sha256": ""},
+        {"id": "c", "download_url": "https://x/c.onnx", "sha256": ""},
+        {"id": "d", "download_url": "https://x/d.onnx", "sha256": "ddd"},
+    ]
+    carried = u.merge_registry_pins(old, new)
+    assert carried == 1
+    assert new[0]["sha256"] == "aaa"      # same URL: pin carried
+    assert new[1]["sha256"] == ""          # URL moved: trust reset
+    assert new[2]["sha256"] == ""          # never pinned: stays empty
+    assert new[3]["sha256"] == "ddd"       # shipped hash untouched
