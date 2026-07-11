@@ -42,6 +42,9 @@ dependencies = [
     "flask",
     "pyyaml",
     "cryptography",
+    # Production WSGI server with TLS for the web UI (Flask dev-server
+    # fallback exists, but ships with the package so pip users get it).
+    "cheroot>=10.0",
 ]
 
 [project.optional-dependencies]

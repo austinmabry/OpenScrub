@@ -88,6 +88,43 @@ faces are stationary or scroll with the page rather than moving rapidly
 across the frame. In all cases this is a **best-effort assistive tool:
 review the output before publishing.**
 
+## Install from PyPI (quickest)
+
+```
+pip install OpenScrub
+```
+
+This installs the Python package with all of its Python dependencies and
+gives you two commands: `openscrub` (the CLI engine) and `openscrub-web`
+(the web interface). The YuNet face model (~230 KB) downloads
+automatically on first run.
+
+Two system tools are **not** pip-installable and must be present for full
+functionality:
+
+1. **Tesseract OCR** — required for every text category (names, SSNs,
+   emails, …). Face and plate detection work without it; text detection
+   does not.
+   - Windows: installer from https://github.com/UB-Mannheim/tesseract/wiki
+   - Linux: `sudo apt install tesseract-ocr`
+2. **ffmpeg** (ffprobe ships with it) — strongly recommended: audio
+   passthrough, H.264 output, and VFR screen-recording normalization all
+   depend on it.
+   - Windows: `winget install ffmpeg`
+   - Linux: `sudo apt install ffmpeg`
+
+Optional extras:
+
+```
+pip install "OpenScrub[ner]"             # spaCy name detection (recommended)
+python -m spacy download en_core_web_sm
+pip install cheroot                      # production TLS server for the web UI
+                                         # (bundled by default after v1.0.0)
+```
+
+Prefer a guided setup that installs the system tools for you? Use the
+installer below.
+
 ## Windows install — easy way
 
 Download everything into one folder and double-click **install.bat**.
