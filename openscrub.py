@@ -34,7 +34,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.10"
+VERSION = "1.0.11"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -610,15 +610,22 @@ class PhiMemory:
         return None
 
 
-def detect_phi(words, lines, t, offset, namer, mrn_re):
+def detect_phi(words, lines, t, offset, namer, mrn_re, custom_res=()):
     """offset = cumulative scroll (dx, dy) at this frame; boxes are converted
-    to content coordinates by subtracting it."""
+    to content coordinates by subtracting it. custom_res: sequence of
+    (category_id, compiled_regex) for user-defined categories — each is
+    checked independently of the built-in category chain."""
     dets = []
     ox, oy = offset
 
     def add(box, cat, txt, conf):
         cbox = (int(box[0] - ox), int(box[1] - oy), int(box[2] - ox), int(box[3] - oy))
         dets.append(Detection(t, t, cbox, cat, txt, round(float(conf), 3), (ox, oy)))
+
+    for txt, box, conf in words:
+        for cid, cre in custom_res:
+            if cre.search(txt):
+                add(box, cid, txt, conf)
 
     for i, (txt, box, conf) in enumerate(words):
         m_card = RE_CARD.search(txt)
@@ -1796,6 +1803,14 @@ def build_parser():
                          "risky while blurring the rest. Categories not listed "
                          "use --mode.")
     ap.add_argument("--mrn-regex", default=RE_MRN_DEFAULT)
+    ap.add_argument("--custom-regex", action="append", default=[],
+                    metavar="ID=PATTERN",
+                    help="user-defined regex category (repeatable), e.g. "
+                         "--custom-regex claim=CLM-\\d+ . Matches are "
+                         "detections in category ID: they appear in review, "
+                         "reports, per-category modes, and detection zones "
+                         "like any built-in category. Add ID to --categories "
+                         "to enable it.")
     ap.add_argument("--bridge-gap", type=float, default=4.0,
                     help="max seconds to bridge blur across OCR misses when the "
                          "same PHI reappears in the same region (default 4.0)")
@@ -2004,6 +2019,19 @@ def run_scan(args, cb=None):
         cb.log(f"      ignore regions: {len(args.ignore_regions)}")
 
     mrn_re = re.compile(args.mrn_regex)
+    # user-defined categories: only those enabled in --categories run, and a
+    # bad pattern fails the run loudly rather than silently detecting nothing
+    custom_res = []
+    for spec in getattr(args, "custom_regex", []) or []:
+        cid, _, pat = spec.partition("=")
+        cid = cid.strip().lower()
+        if not cid or not pat:
+            raise ValueError("--custom-regex needs ID=PATTERN, got %r" % spec)
+        if cid in cats:
+            custom_res.append((cid, re.compile(pat)))
+    if custom_res:
+        cb.log("      custom categories: "
+               + ", ".join(c for c, _ in custom_res))
 
     cb.log(f"[3/4] Scanning (every {args.sample_interval}s or {args.scan_trigger}px of scroll)")
     cap = cv2.VideoCapture(args.video)
@@ -2122,7 +2150,8 @@ def run_scan(args, cb=None):
             t = idx / fps
             words = read_adaptive(ocr, frame, getattr(args, "ocr_upscale", "auto"))
             lines = group_lines(words)
-            found = detect_phi(words, lines, t, (cx, cy), namer, mrn_re)
+            found = detect_phi(words, lines, t, (cx, cy), namer, mrn_re,
+                               custom_res)
             found = [d for d in found if d.category in cats]
 
             if facer is not None:

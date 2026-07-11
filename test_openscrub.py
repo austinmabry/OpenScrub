@@ -287,3 +287,13 @@ def test_vault_tamper_fails_closed(tmp_path):
     with pytest.raises(Exception):
         v.decrypt_file(key, enc)
     assert not f.exists(), "tampered file must NOT decrypt to plaintext"
+
+
+def test_custom_regex_category(tmp_path):
+    """A user-defined regex category detects, reports, and survives the
+    full pipeline like a built-in."""
+    v = make_video(str(tmp_path / "c.mp4"), [(200, "Claim CLM-123456 filed")])
+    _, dets = run(v, "--categories", "claim",
+                  "--custom-regex", r"claim=CLM-\d+")
+    hits = [d for d in dets if d["category"] == "claim"]
+    assert hits, "custom category should appear in the report"

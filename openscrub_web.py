@@ -230,6 +230,10 @@ def build_args(job, for_render=False):
                                   if o.get("out_format") in ("mp4", "mov", "mkv")
                                   else "mp4")),
             "--report", os.path.join(jdir, "report.json")]
+    # user-defined regex categories ride along on every job; the engine only
+    # activates the ones whose id is in --categories
+    for c in load_custom_cats():
+        argv += ["--custom-regex", "%s=%s" % (c["id"], c["regex"])]
     if o.get("no_memory"):
         argv.append("--no-memory")
     if o.get("no_ner"):
@@ -978,6 +982,19 @@ placeholder="e.g. provider or app names to always keep visible&#10;one per line"
  <div id="platestatus" style="font-size:12px;color:#6b7280;margin-bottom:6px">checking…</div>
  <div id="platelist"></div>
 </div>
+<div class="card"><h2>Custom regex categories</h2>
+<div style="font-size:12px;color:#6b7280;margin-bottom:6px">Add your own
+detection categories — claim numbers, case IDs, account formats, anything
+regex-matchable. Each appears as a category checkbox above, in review and
+reports, and on the <a href="zones">detection zones</a> page. No limit;
+one at a time, and every category needs a name.</div>
+<div id="cclist" style="font-size:13px"></div>
+<div class="row" style="gap:8px;flex-wrap:wrap;font-size:13px;margin-top:6px">
+ <input id="ccname" placeholder="name (required, e.g. Claim numbers)">
+ <input id="ccregex" placeholder="regex, e.g. CLM-\\d{6}" style="min-width:220px">
+ <button onclick="ccAdd()">Add category</button>
+</div>
+</div>
 <div class="card"><h2>Optional detection engines</h2>
 <div id="extras" style="font-size:13px">loading…</div>
 </div>
@@ -1027,9 +1044,10 @@ OpenScrub v%%VERSION%% <span id="upd"></span>· <a href="license" style="color:#
 <script>
 const CATS=["name","dob","phone","ssn","mrn","email","address","card","apikey","ipaddr","plate","face"];
 const CATMODE={};   // category -> "" (default) | "blur" | "box"
+let CC=[];          // custom regex categories, loaded by ccLoad()
 function renderCats(){
  const gm=document.getElementById("mode").value;
- document.getElementById("cats").innerHTML=CATS.map(c=>{
+ document.getElementById("cats").innerHTML=CATS.concat(CC.map(x=>x.id)).map(c=>{
   const on=CATMODE[c]===undefined?true:CATMODE[c]!=="__off";
   const m=(CATMODE[c]&&CATMODE[c]!=="__off")?CATMODE[c]:"";
   return `<span class="catrow">
@@ -1710,6 +1728,28 @@ async function vaultDoLock(){
  alert(r.ok?("Locked — "+(await r.json()).encrypted+" file(s) encrypted."):await r.text());
  vaultStatus();loadJobs();
 }
+async function ccLoad(){
+ try{
+  CC=await (await fetch("/api/custom_cats")).json();
+  renderCats();
+  document.getElementById("cclist").innerHTML=CC.length?CC.map(c=>
+   `<div class="row" style="justify-content:space-between;padding:3px 0"><span><b>${c.label}</b> <code style="color:#6b7280">${c.regex}</code></span><button onclick="ccDel('${c.id}')">remove</button></div>`).join(""):'<span style="color:#9ca3af">none yet</span>';
+ }catch(e){}
+}
+async function ccAdd(){
+ const name=document.getElementById("ccname").value.trim(),rx=document.getElementById("ccregex").value;
+ if(!name){alert("Name the new category first — the name is required and appears on the zones page.");return;}
+ if(!rx){alert("A regex pattern is required.");return;}
+ const r=await fetch("/api/custom_cats",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:name,regex:rx})});
+ if(!r.ok){alert(await r.text());return;}
+ document.getElementById("ccname").value="";document.getElementById("ccregex").value="";
+ ccLoad();
+}
+async function ccDel(id){
+ if(!confirm("Remove this category? Future scans stop detecting it; existing reports are unaffected."))return;
+ await fetch("/api/custom_cats/"+id,{method:"DELETE"});
+ ccLoad();
+}
 let EXTPOLL=null;
 async function extrasStatus(){
  try{
@@ -1734,7 +1774,7 @@ async function extraInstall(id){
  extrasStatus();
 }
 zoneStatus();loadPersist();loadCertInfo();loadJobs();setInterval(loadJobs,5000);
-updCheck();vaultStatus();extrasStatus();
+updCheck();vaultStatus();extrasStatus();ccLoad();
 </script></body></html>"""
 
 
@@ -1904,6 +1944,68 @@ def vault_unlock():
 # pip/folder installs. Frozen (Program Files) builds have no pip, so the
 # endpoints report that instead of pretending.
 # ----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# Custom regex categories — user-defined, stored in the data root, injected
+# into the category checkboxes, job args, and the zones page.
+# ----------------------------------------------------------------------------
+CUSTOM_CATS_PATH = os.path.join(_data_root(), "custom_categories.json")
+BUILTIN_CATS = {"name", "dob", "phone", "ssn", "mrn", "email", "address",
+                "card", "apikey", "ipaddr", "plate", "face"}
+
+
+def load_custom_cats():
+    try:
+        with open(CUSTOM_CATS_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def _cat_color(cid):
+    import colorsys, hashlib
+    h = int(hashlib.sha256(cid.encode()).hexdigest()[:6], 16) / 0xFFFFFF
+    r, g, b = colorsys.hls_to_rgb(h, 0.45, 0.75)
+    return "#%02x%02x%02x" % (int(r * 255), int(g * 255), int(b * 255))
+
+
+@app.route("/api/custom_cats", methods=["GET", "POST"])
+def custom_cats():
+    cats = load_custom_cats()
+    if request.method == "GET":
+        return jsonify(cats)
+    d = request.json or {}
+    name = (d.get("name") or "").strip()
+    pattern = (d.get("regex") or "").strip()
+    if not name:
+        abort(400, "the category needs a name")
+    cid = "".join(ch for ch in name.lower().replace(" ", "_")
+                  if ch.isalnum() or ch == "_")[:24]
+    if not cid:
+        abort(400, "name must contain letters or digits")
+    if cid in BUILTIN_CATS or any(c["id"] == cid for c in cats):
+        abort(409, "a category with that name already exists")
+    try:
+        import re as _re
+        _re.compile(pattern)
+    except Exception as e:
+        abort(400, "invalid regex: %s" % e)
+    if not pattern:
+        abort(400, "a regex pattern is required")
+    cats.append({"id": cid, "label": name, "regex": pattern,
+                 "color": _cat_color(cid)})
+    with open(CUSTOM_CATS_PATH, "w", encoding="utf-8") as f:
+        json.dump(cats, f, indent=2)
+    return jsonify({"ok": True, "id": cid})
+
+
+@app.route("/api/custom_cats/<cid>", methods=["DELETE"])
+def custom_cats_delete(cid):
+    cats = [c for c in load_custom_cats() if c["id"] != cid]
+    with open(CUSTOM_CATS_PATH, "w", encoding="utf-8") as f:
+        json.dump(cats, f, indent=2)
+    return jsonify({"ok": True})
+
+
 def _spec(name):
     import importlib.util
     try:
@@ -1922,12 +2024,21 @@ EXTRAS = {
         "check": lambda: _spec("spacy") and _spec("en_core_web_sm"),
     },
     "paddle": {
-        "label": "PaddleOCR (better OCR on small fonts)",
+        "label": "PaddleOCR — CPU (better OCR on small fonts)",
         "desc": "Stronger OCR engine, picked automatically once "
-                "installed (CPU build — for the GPU build run "
-                "python install.py). Large download.",
+                "installed. Large download.",
         "pip": ["paddleocr", "paddlepaddle"],
         "post": [],
+        "check": lambda: _spec("paddleocr") and _spec("paddle"),
+    },
+    "paddle_gpu": {
+        "label": "PaddleOCR — NVIDIA GPU (CUDA 12.x)",
+        "desc": "GPU-accelerated build for NVIDIA cards — much faster "
+                "OCR. Very large download. Shows installed if either "
+                "Paddle build is present.",
+        "pip": ["paddleocr", "paddlepaddle-gpu==3.2.2", "-i",
+                "https://www.paddlepaddle.org.cn/packages/stable/cu126/"],
+        "post": [["-m", "pip", "install", "-U", "nvidia-cudnn-cu12"]],
         "check": lambda: _spec("paddleocr") and _spec("paddle"),
     },
 }
@@ -2044,8 +2155,15 @@ def _header_logo_uri():
 
 @app.route("/zones")
 def zones_page():
-    return zones_ui.ZONES_PAGE.replace('src="logo_dark.png"',
+    page = zones_ui.ZONES_PAGE.replace('src="logo_dark.png"',
                                        'src="%s"' % _header_logo_uri())
+    # inject user-defined categories into the zone editor's color map so
+    # they can be zoned exactly like built-ins
+    extra = "".join(',%s:"%s"' % (c["id"], c.get("color", "#64748b"))
+                    for c in load_custom_cats())
+    if extra:
+        page = page.replace('face:"#ec4899"}', 'face:"#ec4899"%s}' % extra)
+    return page
 
 
 @app.route("/api/certinfo")

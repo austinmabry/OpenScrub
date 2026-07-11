@@ -96,6 +96,13 @@ When adding a category, update all three + the `IMMEDIATE` set if it needs
 no confirmation delay. Verify alignment:
 `grep -o 'name,dob[^"]*' openscrub.py` vs the two JS lists.
 
+USER-DEFINED categories (custom_categories.json in the data root) are
+separate from this rule: the web injects them dynamically — into the
+checkbox row (JS `CC` via /api/custom_cats), job argv (`--custom-regex
+id=pattern`, engine activates only ids present in --categories), and the
+zones page (server-side injection anchored on `face:"#ec4899"` in
+ZONES_PAGE — keep that literal stable).
+
 ## Verification workflow (do this after every change)
 
 ```
