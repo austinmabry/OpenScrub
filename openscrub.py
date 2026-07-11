@@ -1,28 +1,19 @@
 #!/usr/bin/env python3
 """
-openscrub.py v3 — Automatic PHI redaction for screen-recording videos.
-Windows + Linux. No patient list required. Scroll-aware.
+openscrub.py — the OpenScrub engine: automatic PII/PHI redaction for
+videos and screen recordings. Windows + Linux. No name list required.
 
-Detects and blurs PHI (patient names, dates of birth, MRNs, phone numbers,
-SSNs, email addresses) in screen recordings before they go into DaVinci
-Resolve or anywhere else.
+Detects and blurs 12 categories — names, dates of birth, phone numbers,
+SSNs, MRNs, emails, addresses, card numbers, API keys, IP addresses,
+license plates, and faces — using OCR + pattern matching, spaCy NER with
+heuristic fallbacks, and DNN detectors for faces and plates.
 
-What's new in v2:
-  * Name detection WITHOUT a patient list, via three stacked signals:
-      1. spaCy NER (PERSON entities) — install spacy + en_core_web_sm
-      2. Label heuristic — text following "Patient:", "Name:", "Pt:", etc.
-      3. Capitalized-name-pair heuristic (fallback / belt-and-suspenders)
-    Plus an --allow-names file so provider/staff names stay visible.
-  * Scroll tracking: per-frame global motion estimation (phase correlation).
-    Blur boxes are anchored in CONTENT coordinates and translated with the
-    scroll on every frame — the blur rides along with the text.
-  * Safety bands: any screen region that scrolled into view since the last
-    OCR scan is blurred until it has been scanned. Nothing unverified is
-    ever shown, even mid-scroll.
-  * Motion-triggered OCR: extra scans fire automatically every N pixels of
-    scroll, independent of the time-based sample interval.
-  * Windows support: auto-detects Tesseract install path, graceful ffmpeg
-    fallback.
+Scroll-aware: blur boxes are anchored in content coordinates and ride
+along with the text on every frame; any region that scrolled into view
+since the last OCR scan stays covered until it has been scanned. Name
+detection needs no list — spaCy PERSON entities, a label heuristic
+("Patient:", "Name:", …), and a capitalized-pair fallback stack up, with
+an --allow-names file to keep chosen names visible.
 
 Usage (see README.md):
   python openscrub.py recording.mp4
@@ -43,7 +34,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 
 # ----------------------------------------------------------------------------
 # OCR backends

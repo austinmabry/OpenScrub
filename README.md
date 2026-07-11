@@ -10,8 +10,9 @@ footage). OCR-driven, so it catches text anywhere on screen; face-tracked,
 so a face detected once stays covered even when the detector blinks;
 scroll- and motion-aware, so blur boxes follow content as it moves; and
 onset-aware, so redaction starts on the exact frame a detail first appears
-rather than a half-second late. Ships with a HIPAA preset out of the box,
-but the engine is general-purpose.
+rather than a half-second late. Defaults are tuned for the hardest case —
+dense, scrolling medical-records screens — but the engine is
+general-purpose.
 
 > Keywords: video redaction · blur faces in video · redact screen recording ·
 > PII redaction · anonymize video · blur license plates · GDPR / CCPA /
@@ -20,9 +21,13 @@ but the engine is general-purpose.
 ## What it does
 
 - **Blur faces** — detected with a DNN model and visually tracked, so a
-  single detection covers a face across frames it would otherwise be missed on.
+  single detection covers a face across frames where it would otherwise
+  be missed.
+- **Blur license plates** — via an optional ONNX detector model
+  (see [PLATES.md](PLATES.md)); plates re-detect every frame, so a plate
+  crossing the frame stays covered.
 - **Redact text by pattern** — bring your own regex for account numbers,
-  license plates, case numbers, employee IDs, order numbers; built-in
+  case numbers, employee IDs, order numbers; built-in
   patterns for SSNs, phone numbers, emails, dates, addresses (including
   multi-line street/city/state/ZIP blocks), credit/debit card numbers (Luhn-validated), API keys/tokens, IP addresses,
   and medical record numbers.
@@ -74,7 +79,8 @@ tool is built to handle it. But the same engine fits many privacy workflows:
 - **Streaming & gaming VODs** — redact Discord DMs, donation alerts with
   real names, second-monitor leaks, and non-consenting on-cam guests.
 - **Dashcam footage** — blur license plates and pedestrian faces before
-  posting insurance or public clips (plates via regex + OCR).
+  posting insurance or public clips (plates via the dedicated detector
+  model — see [PLATES.md](PLATES.md)).
 - **UX & usability research** — anonymize participants' faces, names, and
   on-screen account data before sharing session recordings internally.
 - **Government document-on-screen redaction** — remove names, locations,
@@ -118,45 +124,38 @@ Optional extras:
 ```
 pip install "OpenScrub[ner]"             # spaCy name detection (recommended)
 python -m spacy download en_core_web_sm
-pip install cheroot                      # production TLS server for the web UI
-                                         # (bundled by default after v1.0.0)
+pip install paddleocr paddlepaddle       # better OCR on small UI fonts (large install)
 ```
 
-Prefer a guided setup that installs the system tools for you? Use the
-installer below.
+spaCy is strongly recommended — it's the primary name detector. The tool
+still runs without it using heuristics, but NER is more accurate.
 
-## Windows install — easy way
+## Guided installer (Windows / Linux / macOS best-effort)
 
-Download everything into one folder and double-click **install.bat**.
-It bootstraps Python if needed (via winget), then runs `installer.py`,
-which probes every dependency and installs what's missing with your
-consent: core pip packages, spaCy NER, Tesseract, ffmpeg (full build with
-NVENC), and PaddleOCR — automatically offering the GPU build when an
-NVIDIA GPU is detected, and offering an ffmpeg upgrade when NVENC is
-present but broken (old build vs. new driver). Re-run any time with
-`python installer.py --check` to audit, or `--yes` for unattended install.
+Prefer a setup that installs the system tools too? Clone or download the
+repository and run:
 
-## Windows install — manual way
+    python install.py
 
-1. **Python 3.10+** from python.org (check "Add to PATH" during install)
-2. **Tesseract OCR**: installer from https://github.com/UB-Mannheim/tesseract/wiki
-   (default location is auto-detected; no PATH edit needed)
-3. **ffmpeg**: `winget install ffmpeg` in PowerShell (needed for audio + h264 output)
-4. Python packages:
-   ```
-   pip install opencv-python rapidfuzz pytesseract spacy
-   python -m spacy download en_core_web_sm
-   ```
-   spaCy is strongly recommended — it's the primary name detector. The tool
-   still runs without it using heuristics, but NER is more accurate.
+It probes every dependency and installs what's missing with your consent:
+core pip packages, spaCy NER, Tesseract and ffmpeg (via winget / apt /
+dnf / pacman / brew), and PaddleOCR — automatically offering the GPU
+build when an NVIDIA card is detected — then verifies NVENC hardware
+encoding and creates a launchable "OpenScrub" shortcut with the program
+icon (Desktop + Start Menu on Windows, a .desktop entry on Linux, a
+.command on macOS).
 
-   Optional, better OCR on small UI fonts (large install):
-   `pip install paddleocr paddlepaddle`
+`--check` reports what's present without changing anything; `--yes` runs
+unattended; `--cpu-only` skips GPU OCR; `--with-plates` fetches a
+license-plate model (see [PLATES.md](PLATES.md)). Start the app from the
+created shortcut, or `python openscrub_web.py` — the web interface is the
+primary interface. (`openscrub_gui.py`, the desktop Tk interface, still
+works but is legacy: new features land in the web app.)
 
 ## Web interface (LAN)
 
 Run `python openscrub_web.py` on an always-on machine and open the printed
-URL (includes a required access token) from any device on your network —
+URL from any device on your network —
 laptop or phone. Workflow: upload a recording (or point at a server-side
 path) → scan runs on the server with a live preview and log → **review
 page**: every detection shown as a thumbnail grouped by category, uncheck
@@ -164,9 +163,13 @@ false positives, per-category all-on/all-off, draw missed regions directly
 on any frame (works with touch) → render → download the redacted video and
 the audit report. Jobs queue one at a time so they don't fight over the GPU.
 
-Security: LAN-grade token auth only — never expose the port to the
-internet. The jobs folder on the server contains PHI (uploads + reports);
-protect it accordingly.
+Security: HTTPS by default (self-signed certificate — your browser warns
+once; or install your own cert from the main page). Access is open to
+everyone on your network unless you start with `--token <secret>`, which
+then gates every request (recommended). Either way this is LAN-grade
+protection — never expose the port to the internet. The jobs folder on
+the server contains PHI (uploads + reports); protect it accordingly.
+`--retain-days` auto-deletes finished job folders (default 7 days).
 
 ## ⚠️ Disclaimer — read this before using openscrub on real PHI
 
@@ -194,7 +197,8 @@ Specifically:
   **contain PHI in plaintext**. Protect them with the same controls as
   any other PHI: restricted access, encryption at rest where required,
   and deletion when no longer needed.
-- The web interface provides **LAN-grade token access control only**.
+- The web interface provides **LAN-grade access control at most**
+  (HTTPS with an optional access token — set one with `--token`).
   Never expose it to the internet, and run it only on networks and
   machines already authorized to handle PHI.
 - This tool addresses **on-screen visual content only**. Audio narration,
@@ -207,40 +211,24 @@ Specifically:
 This software is provided "AS IS" without warranty of any kind — see the
 [LICENSE](LICENSE) (Apache-2.0, §7–8) for the governing terms.
 
-## Install
-
-One installer covers Windows and Linux (macOS best-effort). It installs the
-Python dependencies, sets up GPU-accelerated OCR when an NVIDIA card is
-present, installs Tesseract and ffmpeg via your system package manager,
-verifies NVENC hardware encoding, and creates a launchable "OpenScrub"
-shortcut with the program icon.
-
-    Windows:      double-click install.bat        (or: python install.py)
-    Linux/macOS:  ./install.sh                    (or: python3 install.py)
-
-`--check` reports what's present without changing anything; `--yes` runs
-unattended; `--cpu-only` skips GPU OCR. Start the app from the created
-shortcut, or `python openscrub_web.py` — the web interface at the printed
-HTTPS URL is the primary interface. (`openscrub_gui.py`, the desktop Tk
-interface, still works but is legacy: new features land in the web app.)
-
 ## Validation
 
-The corpus generator (`make_corpus.py`) plants fake PHI at known
-locations across the hard cases — static charts, schedule grids,
-scrolling notes, OCR-disrupting highlights, embedded face photos — and
-`validate.py` scores the pipeline against the ground truth:
+During development the pipeline is scored against a **synthetic corpus**:
+a generator plants fake PHI at known locations across the hard cases —
+static charts, schedule grids, scrolling notes, OCR-disrupting
+highlights, embedded face photos — and a scorer checks the rendered
+output against the ground truth:
 
     PHI recall:           100.0%   (102/102 planted samples blurred)
     Benign preservation:  100.0%   (39/39 benign samples left readable)
 
 (measured with the Tesseract fallback engine; PaddleOCR + spaCy NER, the
-recommended stack, is stronger). Run it yourself:
-`python make_corpus.py --out corpus && python validate.py --corpus corpus`.
-CI runs the regression suite (`pytest test_openscrub.py`) and re-validates
-recall on every commit — a detection regression fails the build.
+recommended stack, is stronger). The shipped regression suite
+(`pytest test_openscrub.py`) exercises the same end-to-end pipeline on
+synthetic videos — for this tool a regression is not a bug, it's a leak,
+so the suite must stay green on every change.
 
-## What's new in v4.1
+## Feature notes
 
 - **VFR normalization** — OBS/Game Bar variable-frame-rate recordings are
   detected (ffprobe) and normalized to CFR before processing, preventing
@@ -259,36 +247,31 @@ recall on every commit — a detection regression fails the build.
   (default 7 days).
 - **Batch resume** — re-running `--batch` skips files already done
   (`--overwrite` to redo).
-- **Packaging**: `pip install .` gives `openscrub`, `openscrub-web`,
-  `openscrub-gui` commands.
-
-## What's new in v4
-
 - **Review workflow** — scan and render are separate phases; between them
   you can audit every detection and correct both false positives and
   misses. CLI equivalent: run with `--report audit.json`, edit the JSON
   (set `"enabled": false`, or append boxes), then
   `openscrub.py video.mp4 --from-report audit.json` re-renders in seconds
   without re-scanning.
-- **Face detection** — new `face` category (on by default) blurs faces in
+- **Face detection** — the `face` category (on by default) blurs faces in
   clinical photos and webcam bubbles, which OCR is blind to. Uses the
   YuNet DNN detector (auto-downloaded, ~230 KB) with a Haar-cascade
   fallback. Faces re-detect on every scan; boxes are expanded 15%.
-- **Config profiles** — `--config ema.yaml` loads per-environment settings
-  (engine, MRN regex, categories, ignore regions…). CLI flags override the
-  file. See the included `ema.yaml`.
+- **Config profiles** — `--config profile.yaml` loads per-environment
+  settings (engine, MRN regex, categories, ignore regions…). CLI flags
+  override the file.
 - **Ignore regions** — `--ignore-region X1,Y1,X2,Y2` (repeatable, or in
   config) excludes screen areas like the taskbar clock from all blurring.
 - **Batch mode** — `--batch folder` processes every video, writing
   per-file outputs + audit reports and a `batch_summary.json`.
-- **Provenance** — every audit report now records tool version, timestamp,
+- **Provenance** — every audit report records tool version, timestamp,
   full settings, and SHA256 of input and output, making the audit trail
   independently verifiable.
 
-## GUI (Windows)
+## Desktop GUI (Windows, legacy)
 
-`python openscrub_gui.py` (or double-click `openscrub_gui.bat`) opens a
-desktop app covering everything the CLI does:
+`python openscrub_gui.py` opens a desktop app covering everything the
+CLI does (legacy: it still works, but new features land in the web app):
 
 - Source / output / audit-report file pickers
 - OCR engine selection with live status (Tesseract / PaddleOCR / spaCy NER
@@ -356,7 +339,7 @@ scrolling into view is covered by the safety band before it's even been
 read. Verified in testing with 26/26 PHI regions covered across static,
 mid-scroll, and post-scroll frames.
 
-## PHI memory and gap bridging (v3)
+## PHI memory and gap bridging
 
 Two reasoning layers prevent "flash of PHI" from intermittent OCR misses:
 
@@ -377,8 +360,9 @@ Two reasoning layers prevent "flash of PHI" from intermittent OCR misses:
 
 - **Best-effort, not a guarantee.** OCR can miss low-contrast or tiny
   text; NER can miss unusual names (heuristics + label detection back it
-  up, but nothing is 100%). Do a final QC scrub in Resolve at 2x before
-  anything goes public. Treat this as removing ~95% of the manual work.
+  up, but nothing is 100%). Do a final QC scrub in your editor at 2x
+  before anything goes public. Treat this as removing ~95% of the manual
+  work.
 - **All dates are blurred**, since the tool can't distinguish DOBs from
   visit dates. Usually right on a medical UI; drop `dob` from
   --categories if too aggressive for a given recording.
@@ -397,7 +381,7 @@ Two reasoning layers prevent "flash of PHI" from intermittent OCR misses:
 1. Record as usual
 2. `--preview` pass, spot-check red boxes and orange bands
 3. Real pass (optionally with --report)
-4. Import `_redacted.mp4` into Resolve, edit normally
+4. Import `_redacted.mp4` into your editor, edit normally
 5. Final QC scrub before publishing
 
 ## Tuning cheat sheet

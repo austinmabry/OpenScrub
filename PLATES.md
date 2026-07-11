@@ -13,19 +13,31 @@ OpenScrub lets you drop in the model that fits your footage and licensing needs.
 
 ## What OpenScrub expects
 
-A **single-class YOLOv8 detector exported to ONNX**:
+A **single-class plate detector exported to ONNX**, in either of two output
+formats (auto-detected):
 
-- input shape `(1, 3, 640, 640)`
-- output shape `(1, 5, 8400)`  (one class: license-plate)
+- **raw YOLOv8**: input `(1, 3, 640, 640)`, output `(1, 5, 8400)` — the
+  default export from Ultralytics YOLOv8
+  (`model.export(format="onnx", imgsz=640, opset=12)`)
+- **end2end**: output `(1, N, 6)` = (x1, y1, x2, y2, score, class) — what
+  the open-image-models YOLOv9 exports emit
 
-This is the default export from Ultralytics YOLOv8
-(`model.export(format="onnx", imgsz=640, opset=12)`). OpenScrub runs it through
-OpenCV's DNN module, so **no PyTorch or ultralytics runtime dependency** is
-needed to *use* it — only to train/export one.
+OpenScrub runs either through OpenCV's DNN module, so **no PyTorch or
+ultralytics runtime dependency** is needed to *use* a model — only to
+train/export one.
 
 ## Getting a model
 
-Any of these produce a compatible file:
+The easiest path is the **built-in registry** (`plate_models.json`): curated,
+MIT-licensed YOLOv9 plate models from
+[ankandrew/open-image-models](https://github.com/ankandrew/open-image-models).
+In the web UI, pick one in the license-plate model section and click
+**Download** — the file's SHA-256 is pinned on first download and verified on
+every later one, and the model is picked up on the next job. (Alternative:
+`python fetch_plate_models.py` on a machine with the open-image-models pip
+package installed.)
+
+Any of these also produce a compatible file:
 
 1. **Train/fine-tune your own** on a plate dataset (e.g. the Roboflow
    "License Plate Recognition" datasets) with Ultralytics YOLOv8, then export to
@@ -36,7 +48,9 @@ Any of these produce a compatible file:
 
 ## Installing the model
 
-Put the file at either location (OpenScrub checks both):
+Registry downloads land in `models/<registry-id>.onnx` and are found
+automatically. For a model you obtained yourself, put the file at either
+location:
 
     models/plate_yolov8.onnx        (next to openscrub.py)
     plate_yolov8.onnx

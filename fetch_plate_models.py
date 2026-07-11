@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """fetch_plate_models.py — populate plate_models.json with verified values.
 
-Run this ONCE on a machine with internet (your dev box, not the clinic server):
+Run this ONCE on a machine with internet access (the pinned results are
+committed so offline/production boxes can verify downloads):
 
     pip install open-image-models
     python fetch_plate_models.py

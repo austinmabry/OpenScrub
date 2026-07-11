@@ -5,8 +5,10 @@ openscrub_gui.py — Windows GUI for openscrub.
 A tkinter front-end over openscrub.run_pipeline(). Everything the command
 line can do, plus a live preview of each frame as it's analyzed, one-click
 installers for the optional OCR/NER engines, and a cancel button.
+Legacy interface: it still works, but new features land in the web app
+(openscrub_web.py).
 
-Run:  python openscrub_gui.py          (or double-click openscrub_gui.bat)
+Run:  python openscrub_gui.py
 
 Requires the same environment as openscrub.py plus Pillow for the preview
 (pip install pillow). tkinter ships with the python.org Windows installer.

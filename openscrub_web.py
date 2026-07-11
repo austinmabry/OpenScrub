@@ -11,9 +11,11 @@ Workflow: upload a recording (or give a server-side path) -> scan runs on
 the server (live preview + log) -> review every detection with thumbnails,
 uncheck false positives, draw missed regions -> render -> download.
 
-Security model: a single access token (printed at startup or set with
---token) is required for every request; it's carried in a cookie after the
-first visit. This is *LAN-grade* protection for a trusted home/office
+Security model: HTTPS by default (self-signed cert generated on first
+run, or install your own). Pass --token <secret> to require an access
+token on every request (carried in a cookie after the first visit);
+without it the server runs open and trusts everyone on the network.
+Either way this is *LAN-grade* protection for a trusted home/office
 network — do not expose this port to the internet. Uploaded videos and
 audit reports contain PHI; the jobs folder inherits that sensitivity.
 
@@ -1790,7 +1792,7 @@ def main():
             print("installed. Fix it with ONE of these:")
             print()
             print("    pip install cryptography      (recommended)")
-            print("    python installer.py --yes     (installs everything)")
+            print("    python install.py --yes       (installs everything)")
             print()
             print("or start with --http to serve unencrypted")
             print("(not recommended: PHI would cross the network in plain text).")
