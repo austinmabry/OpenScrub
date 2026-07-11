@@ -401,6 +401,15 @@ def check_token():
                    "at server startup (includes ?token=...)")
 
 
+@app.before_request
+def enforce_vault_lock():
+    """While the vault is locked, every job operation is refused — the
+    files are ciphertext, so this fails closed rather than half-working."""
+    if request.path.startswith("/api/jobs") and vault_locked():
+        abort(423, "vault is locked — unlock it (Encryption panel) to "
+                   "access jobs")
+
+
 @app.after_request
 def set_cookie(resp):
     if TOKEN is not None and request.args.get("token") == TOKEN:
@@ -971,6 +980,32 @@ placeholder="e.g. provider or app names to always keep visible&#10;one per line"
 </div>
 <div class="card"><h2>Jobs</h2><div class="joblist" id="jobs">loading…</div></div>
 <div id="detail"></div>
+<div class="card"><h2>Encryption at rest</h2>
+<div id="vstat" style="font-size:13px;color:#6b7280;margin-bottom:8px">loading…</div>
+<div id="vsetup" style="display:none">
+ <div style="background:#fef3c7;border:1px solid #f59e0b;border-radius:8px;padding:10px 12px;font-size:13px;margin-bottom:8px">
+  <b>&#9888; No password reset exists.</b> If you lose this password, every
+  encrypted job — uploads, audit reports, rendered output — is
+  <b>permanently unrecoverable</b>. Write it down and store it safely.
+ </div>
+ <div class="row" style="gap:8px;flex-wrap:wrap;font-size:13px">
+  <input type="password" id="vpw1" placeholder="password (8+ chars)">
+  <input type="password" id="vpw2" placeholder="repeat password">
+  <button onclick="vaultSetup()">Enable encryption</button>
+ </div>
+ <div style="font-size:12px;color:#9ca3af;margin-top:6px">Job files are
+ encrypted (AES-256) whenever you lock or shut the server down, and
+ decrypted while unlocked so scanning and review work normally. Pair with
+ OS disk encryption (e.g. BitLocker) for full coverage.</div>
+</div>
+<div id="vunlock" style="display:none" class="row">
+ <input type="password" id="vpw" placeholder="vault password">
+ <button onclick="vaultUnlock()">Unlock</button>
+</div>
+<div id="vlock" style="display:none" class="row">
+ <button onclick="vaultDoLock()">Lock now (encrypt all job files)</button>
+</div>
+</div>
 <div class="card"><h2>HTTPS certificate</h2>
 <div id="certinfo" style="font-size:13px;color:#6b7280;margin-bottom:8px">loading…</div>
 <div class="row" style="gap:8px;flex-wrap:wrap;font-size:13px">
@@ -1078,7 +1113,9 @@ async function startJob(){
 }
 
 async function loadJobs(){
- const js=await (await fetch("api/jobs")).json();
+ const r=await fetch("api/jobs");
+ if(r.status===423){jobs.innerHTML='<span style="color:#b91c1c">&#128274; locked — unlock in the Encryption panel below</span>';JOBSJSON="";return;}
+ const js=await r.json();
  const s=JSON.stringify(js);
  if(s===JOBSJSON)return;
  JOBSJSON=s;
@@ -1637,8 +1674,41 @@ async function updRun(){
   }
  },2000);
 }
+async function vaultStatus(){
+ try{
+  const d=await (await fetch("/api/vault")).json();
+  const st=document.getElementById("vstat");
+  document.getElementById("vsetup").style.display=d.enabled?"none":"block";
+  document.getElementById("vunlock").style.display=(d.enabled&&d.locked)?"flex":"none";
+  document.getElementById("vlock").style.display=(d.enabled&&!d.locked)?"flex":"none";
+  if(!d.enabled){st.textContent="Disabled — job files (PHI) are stored in plaintext. Set a password to enable at-rest encryption.";st.style.color="#b45309";}
+  else if(d.locked){st.textContent="LOCKED — "+d.encrypted_files+" file(s) encrypted on disk. Unlock to work with jobs.";st.style.color="#b91c1c";}
+  else{st.textContent="Unlocked — files decrypt while you work; they re-encrypt when you lock or shut down. Losing the password makes encrypted files unrecoverable.";st.style.color="#15803d";}
+ }catch(e){}
+}
+async function vaultSetup(){
+ const a=document.getElementById("vpw1").value,b=document.getElementById("vpw2").value;
+ if(a.length<8){alert("Password must be at least 8 characters.");return;}
+ if(a!==b){alert("Passwords do not match.");return;}
+ if(!confirm("Enable at-rest encryption?\\n\\nTHERE IS NO PASSWORD RESET. If you lose this password, every encrypted job file is PERMANENTLY UNRECOVERABLE.\\n\\nContinue?"))return;
+ const r=await fetch("/api/vault/setup",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({password:a})});
+ alert(r.ok?(await r.json()).note:await r.text());
+ vaultStatus();
+}
+async function vaultUnlock(){
+ const r=await fetch("/api/vault/unlock",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({password:document.getElementById("vpw").value})});
+ if(!r.ok){alert(await r.text());return;}
+ document.getElementById("vpw").value="";
+ vaultStatus();loadJobs();
+}
+async function vaultDoLock(){
+ if(!confirm("Encrypt all job files now?\\n\\nYou will need the password to access them again."))return;
+ const r=await fetch("/api/vault/lock",{method:"POST"});
+ alert(r.ok?("Locked — "+(await r.json()).encrypted+" file(s) encrypted."):await r.text());
+ vaultStatus();loadJobs();
+}
 zoneStatus();loadPersist();loadCertInfo();loadJobs();setInterval(loadJobs,5000);
-updCheck();
+updCheck();vaultStatus();
 </script></body></html>"""
 
 
@@ -1718,6 +1788,101 @@ def update_status():
     with UPD_LOCK:
         return jsonify({"running": UPD["running"], "ok": UPD["ok"],
                         "log": list(UPD["log"])})
+
+
+# ----------------------------------------------------------------------------
+# Vault: password-based at-rest encryption of the job store (PHI!).
+# LOCKED = job files encrypted on disk, job APIs refuse to run.
+# UNLOCKED = decrypted in place so the pipeline works unchanged.
+# NO PASSWORD RESET EXISTS — a lost password means the data is gone.
+# ----------------------------------------------------------------------------
+import openscrub_vault as vault
+
+VAULT = {"key": None}          # data key while unlocked; None = locked
+VAULT_LOCK = threading.Lock()
+
+
+def vault_enabled():
+    return vault.keystore_exists(_data_root())
+
+
+def vault_locked():
+    return vault_enabled() and VAULT["key"] is None
+
+
+def _vault_lock_now():
+    """Encrypt the job store and forget the key. Returns files encrypted."""
+    with VAULT_LOCK:
+        key = VAULT["key"]
+        if key is None:
+            return 0
+        n = vault.encrypt_tree(key, JOBS_DIR)
+        VAULT["key"] = None
+        return n
+
+
+def _vault_lock_atexit():
+    if vault_enabled() and VAULT["key"] is not None:
+        busy = any(j.get("phase") in ("queued", "scanning", "rendering",
+                                      "queued_render") for j in JOBS.values())
+        if busy:
+            print("vault: NOT locking on exit — a job was still running; "
+                  "job files remain in plaintext. Restart and lock.")
+            return
+        n = _vault_lock_now()
+        print("vault: locked on shutdown (%d file(s) encrypted)" % n)
+
+
+@app.route("/api/vault")
+def vault_status():
+    enc, plain = (0, 0)
+    if vault_enabled():
+        enc, plain = vault.tree_locked_state(JOBS_DIR)
+    return jsonify({"enabled": vault_enabled(), "locked": vault_locked(),
+                    "encrypted_files": enc, "plaintext_files": plain})
+
+
+@app.route("/api/vault/setup", methods=["POST"])
+def vault_setup():
+    pw = (request.json or {}).get("password") or ""
+    if vault_enabled():
+        abort(409, "vault already set up")
+    if len(pw) < 8:
+        abort(400, "password must be at least 8 characters")
+    with VAULT_LOCK:
+        VAULT["key"] = vault.create_keystore(_data_root(), pw)
+    return jsonify({"ok": True, "note":
+                    "Encryption enabled. Jobs encrypt when you lock or "
+                    "shut down. LOSING THIS PASSWORD MAKES THE ENCRYPTED "
+                    "FILES PERMANENTLY UNRECOVERABLE."})
+
+
+@app.route("/api/vault/unlock", methods=["POST"])
+def vault_unlock():
+    pw = (request.json or {}).get("password") or ""
+    if not vault_enabled():
+        abort(400, "vault is not set up")
+    try:
+        key = vault.open_keystore(_data_root(), pw)
+    except ValueError:
+        abort(403, "wrong password")
+    with VAULT_LOCK:
+        VAULT["key"] = key
+        n = vault.decrypt_tree(key, JOBS_DIR)
+    rehydrate_jobs()               # pick up jobs that were locked at startup
+    return jsonify({"ok": True, "decrypted": n})
+
+
+@app.route("/api/vault/lock", methods=["POST"])
+def vault_lock_route():
+    with JOBS_LOCK:
+        busy = any(j.get("phase") in ("queued", "scanning", "rendering",
+                                      "queued_render")
+                   for j in JOBS.values())
+    if busy:
+        abort(409, "a job is queued or running — lock after it finishes")
+    n = _vault_lock_now()
+    return jsonify({"ok": True, "encrypted": n})
 
 
 @app.route("/license")
@@ -1930,6 +2095,8 @@ def main():
     args = ap.parse_args()
     TOKEN = args.token or None
     os.makedirs(JOBS_DIR, exist_ok=True)
+    import atexit
+    atexit.register(_vault_lock_atexit)
     rehydrate_jobs()
     threading.Thread(target=worker, daemon=True).start()
     if args.retain_days > 0:
@@ -1965,6 +2132,10 @@ def main():
         print(f"    {scheme}://{lan_ip()}:{args.port}/")
         print("    (open access: no token — everyone on this network can use it;")
         print("     add --token <secret> if you ever want a gate back)")
+    if vault_enabled():
+        print("Encryption: vault is LOCKED — unlock in the web UI "
+              "(Encryption panel) to access jobs."
+              if vault_locked() else "Encryption: vault unlocked.")
     print("Jobs folder (contains PHI):", JOBS_DIR,
           f"— auto-deleted after {args.retain_days} day(s)" if args.retain_days else "— kept forever")
     print("Do NOT expose this port to the internet.")
@@ -1994,6 +2165,20 @@ def _serve(host, port, ssl_ctx):
         return
     server = Server((host, port), app, server_name="openscrub",
                     numthreads=16)
+    # Browsers probing/rejecting the self-signed certificate abort mid-
+    # handshake on every new socket, and cheroot logs each one. Harmless
+    # noise (install a trusted cert to stop the aborts themselves) —
+    # filter just that class of message, pass everything else through.
+    _orig_log = server.error_log
+    _TLS_NOISE = ("during handshake", "certificate unknown", "unknown ca",
+                  "peer dropped the tls connection")
+
+    def _quiet_log(msg="", level=20, traceback=False):
+        if any(s in str(msg).lower() for s in _TLS_NOISE):
+            return
+        _orig_log(msg, level, traceback)
+
+    server.error_log = _quiet_log
     if ssl_ctx:
         from cheroot.ssl.builtin import BuiltinSSLAdapter
         server.ssl_adapter = BuiltinSSLAdapter(ssl_ctx[0], ssl_ctx[1])

@@ -28,7 +28,7 @@ DATAS = [
 ]
 HIDDEN = [
     "cheroot", "cheroot.wsgi", "cheroot.ssl", "cheroot.ssl.builtin",
-    "openscrub_update", "openscrub_setup", "zones_ui",
+    "openscrub_update", "openscrub_setup", "openscrub_vault", "zones_ui",
 ]
 EXCLUDES = [
     "spacy", "paddleocr", "paddle", "torch", "torchvision",

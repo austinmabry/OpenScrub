@@ -48,6 +48,7 @@ backups/
 .env.*
 *.secret
 secrets.*
+vault_keystore.json
 
 # ---- Models & large binaries (download or mount instead of commit) ---------
 *.onnx

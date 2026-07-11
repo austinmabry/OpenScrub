@@ -277,9 +277,15 @@ Specifically:
   they are **not** a guarantee of performance on your recordings, your
   EMR, your fonts, or your screen resolution.
 - Audit reports, job folders, and normalized/intermediate video files
-  **contain PHI in plaintext**. Protect them with the same controls as
-  any other PHI: restricted access, encryption at rest where required,
-  and deletion when no longer needed.
+  **contain PHI in plaintext** unless you enable the web UI's
+  **Encryption at rest** panel: set a password and job files are
+  encrypted (scrypt-derived key, AES-256-GCM) whenever the vault is
+  locked or the server shuts down, and decrypted while you work.
+  **There is no password reset — a lost password makes encrypted files
+  permanently unrecoverable.** While unlocked (and during processing)
+  files are plaintext on disk, so pair the vault with OS disk
+  encryption (BitLocker etc.), restricted access, and deletion when no
+  longer needed.
 - The web interface provides **LAN-grade access control at most**
   (HTTPS with an optional access token — set one with `--token`).
   Never expose it to the internet, and run it only on networks and

@@ -247,3 +247,43 @@ def test_registry_user_copy_and_pin_survival(tmp_path, monkeypatch):
     ids = [m["id"] for m in merged["models"]]
     assert "brand-new" in ids, "new release model should merge in"
     assert merged["models"][0]["sha256"] == "f" * 64, "local pin must survive"
+
+
+def test_vault_roundtrip_and_wrong_password(tmp_path):
+    import openscrub_vault as v
+    key = v.create_keystore(str(tmp_path), "correct horse battery")
+    assert v.open_keystore(str(tmp_path), "correct horse battery") == key
+    with pytest.raises(ValueError):
+        v.open_keystore(str(tmp_path), "wrong password")
+
+    big = tmp_path / "job" / "video.mp4"
+    big.parent.mkdir()
+    data = os.urandom(5 * 1024 * 1024)      # spans two 4MiB chunks
+    big.write_bytes(data)
+    (tmp_path / "job" / "report.json").write_text('{"phi": "synthetic"}')
+
+    n = v.encrypt_tree(key, str(tmp_path / "job"))
+    assert n == 2
+    names = sorted(p.name for p in (tmp_path / "job").iterdir())
+    assert names == ["report.json.osvault", "video.mp4.osvault"]
+    enc, plain = v.tree_locked_state(str(tmp_path / "job"))
+    assert (enc, plain) == (2, 0)
+
+    n = v.decrypt_tree(key, str(tmp_path / "job"))
+    assert n == 2
+    assert big.read_bytes() == data
+    assert (tmp_path / "job" / "report.json").read_text() == '{"phi": "synthetic"}'
+
+
+def test_vault_tamper_fails_closed(tmp_path):
+    import openscrub_vault as v
+    key = v.create_keystore(str(tmp_path), "a strong password")
+    f = tmp_path / "report.json"
+    f.write_text("sensitive")
+    enc = v.encrypt_file(key, str(f))
+    raw = bytearray(open(enc, "rb").read())
+    raw[-1] ^= 0xFF                          # flip one ciphertext bit
+    open(enc, "wb").write(bytes(raw))
+    with pytest.raises(Exception):
+        v.decrypt_file(key, enc)
+    assert not f.exists(), "tampered file must NOT decrypt to plaintext"

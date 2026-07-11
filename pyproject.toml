@@ -83,6 +83,7 @@ include = [
     "zones_ui.py",
     "openscrub_setup.py",
     "openscrub_update.py",
+    "openscrub_vault.py",
 ]
 
 [tool.hatch.build.targets.sdist]
@@ -92,6 +93,7 @@ include = [
     "openscrub.py",
     "openscrub_setup.py",
     "openscrub_update.py",
+    "openscrub_vault.py",
     "openscrub_web.py",
     "zones_ui.py",
     "install.py",
