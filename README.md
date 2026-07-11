@@ -117,18 +117,40 @@ gives you two commands: `openscrub` (the CLI engine) and `openscrub-web`
 (the web interface). The YuNet face model (~230 KB) downloads
 automatically on first run.
 
+### Fresh Windows 11 PC — complete setup (copy-paste)
+
+```
+winget install -e --id Python.Python.3.12
+```
+Close and reopen the terminal (so PATH updates), then:
+```
+pip install OpenScrub
+winget install -e --id UB-Mannheim.TesseractOCR
+winget install -e --id Gyan.FFmpeg
+```
+
+### Fresh Linux (Debian/Ubuntu)
+
+```
+sudo apt install python3-pip tesseract-ocr ffmpeg
+pip install OpenScrub
+```
+
+Then run `openscrub-web` and open the URL it prints.
+
 Two system tools are **not** pip-installable and must be present for full
 functionality:
 
 1. **Tesseract OCR** — required for every text category (names, SSNs,
    emails, …). Face and plate detection work without it; text detection
    does not.
-   - Windows: installer from https://github.com/UB-Mannheim/tesseract/wiki
+   - Windows: `winget install -e --id UB-Mannheim.TesseractOCR`
+     (or the installer from https://github.com/UB-Mannheim/tesseract/wiki)
    - Linux: `sudo apt install tesseract-ocr`
 2. **ffmpeg** (ffprobe ships with it) — strongly recommended: audio
    passthrough, H.264 output, and VFR screen-recording normalization all
    depend on it.
-   - Windows: `winget install ffmpeg`
+   - Windows: `winget install -e --id Gyan.FFmpeg`
    - Linux: `sudo apt install ffmpeg`
 
 Optional extras:
