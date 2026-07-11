@@ -102,11 +102,13 @@ landed — partial silent misses have happened repeatedly.
 
 - Canonical badge: `assets/badge_master.png` (hexagon, bucket-hat figure,
   mosaic face + red corner brackets), cut from the full-bleed key art in
-  `assets/social_preview_master.png` (navy background keyed to alpha).
-  When new key art arrives: re-cut the badge, replace both masters,
-  re-run make_icons, and re-embed the web header/favicon base64
-  (icon-32 → the `<link rel="icon">` data URI, icon-128 → the `<header>`
-  img data URI in openscrub_web.py). Alternate blur+box style preserved.
+  `assets/social_preview_master.png` (navy background keyed to alpha),
+  then Real-ESRGAN x4-upscaled to 1628x1848 so every icon size is a
+  downscale. When new key art arrives: re-cut the badge, AI-upscale it
+  ~4x, replace both masters, re-run make_icons, and re-embed the web
+  header/favicon base64 (icon-32 → the `<link rel="icon">` data URI,
+  icon-128 → the `<header>` img data URI in openscrub_web.py).
+  Alternate blur+box style preserved.
 - `social_preview.png` is `social_preview_master.png` resized to 1280x640
   by make_icons; the composited badge+wordmark layout is only a fallback
   when no master exists.
@@ -116,9 +118,8 @@ landed — partial silent misses have happened repeatedly.
   letterforms. Badge art = AI; wordmark = typesetting.**
 - Regenerate everything: `python tools/make_icons.py` and
   `python tools/make_wordmark.py`.
-- `icon-512`/`icon-1024` are upscales of the ~410px badge master; if a
-  ≥2048px badge render ever becomes available, drop it in as
-  `badge_master.png` and re-run make_icons.
+- All icon sizes (including 512/1024) are now downscales of the 1628px
+  AI-upscaled badge master — no soft upscaling remains in the pipeline.
 
 ## Releasing
 
