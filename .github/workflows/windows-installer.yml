@@ -10,6 +10,13 @@ name: Windows installer
 on:
   release:
     types: [published]
+  # Manual fallback: build any existing release tag and attach the exe to it
+  # (used when a release predates this workflow, or to rebuild an asset).
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build and attach to (e.g. v1.0.7)"
+        required: true
 
 jobs:
   build-installer:
@@ -19,6 +26,9 @@ jobs:
       contents: write        # needed to upload the release asset
     steps:
       - uses: actions/checkout@v4
+        with:
+          # release event: the tag's commit; manual dispatch: the given tag
+          ref: ${{ github.event.inputs.tag || github.ref }}
 
       - uses: actions/setup-python@v5
         with:
@@ -51,4 +61,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $exe = (Get-ChildItem windows/output/OpenScrub-Setup-*.exe).FullName
-          gh release upload "${{ github.event.release.tag_name }}" "$exe" --clobber
+          $tag = "${{ github.event.inputs.tag || github.event.release.tag_name }}"
+          gh release upload "$tag" "$exe" --clobber
