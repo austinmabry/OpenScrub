@@ -87,6 +87,10 @@ no confirmation delay. Verify alignment:
 python -c "import ast; ast.parse(open('openscrub.py').read())"   # each edited .py
 # extract PAGE's <script> to a file and: node --check that_file.js
 python -m pytest test_openscrub.py -q                             # 9 tests, all green
+python -m build          # FULL build (sdist->wheel), NEVER just `-w`:
+                         # the wheel is built FROM the sdist in CI, so any
+                         # file the wheel force-includes must be in the
+                         # sdist include list too (v1.0.2 failed on this)
 ```
 For engine changes, also run a real render on a small synthetic video and
 check the report JSON. For web changes, boot the server and hit the routes.

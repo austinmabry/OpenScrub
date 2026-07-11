@@ -81,6 +81,7 @@ include = [
 
 [tool.hatch.build.targets.sdist]
 include = [
+    "plate_models.json",
     "openscrub.py",
     "openscrub_web.py",
     "zones_ui.py",
