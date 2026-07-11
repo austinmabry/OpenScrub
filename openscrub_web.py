@@ -686,30 +686,40 @@ def plate_models():
     """Registry entries + whether each is already installed + active model."""
     import openscrub as engine
     models = engine.load_plate_registry()
-    mdir = os.path.join(os.path.dirname(os.path.abspath(engine.__file__)), "models")
+    # models can live next to the code (folder deploys) or in the per-user
+    # data dir (pip / frozen installs download there) — check both, matching
+    # PlateDetector's own search.
+    roots = [os.path.dirname(os.path.abspath(engine.__file__))]
+    if engine.install_is_readonly():
+        roots.append(engine.user_data_dir())
+
+    def _find(fname):
+        for r in roots:
+            p = os.path.join(r, "models", fname)
+            if os.path.exists(p):
+                return p
+        return None
+
     out = []
     for m in models:
-        path = os.path.join(mdir, "%s.onnx" % m.get("id"))
         out.append({
             "id": m.get("id"), "label": m.get("label"),
             "license": m.get("license"), "source_url": m.get("source_url"),
             "notes": m.get("notes"), "recommended": bool(m.get("recommended")),
             "verified": m.get("download_url") not in (None, "", "TODO_VERIFY"),
             "pinned": bool(m.get("sha256")) and m.get("sha256") != "TODO_VERIFY",
-            "installed": os.path.exists(path),
+            "installed": bool(_find("%s.onnx" % m.get("id"))),
             "attribution": m.get("attribution", ""),
         })
     # is any model active (i.e. would PlateDetector find one)?
-    active = None
-    for cand in (os.environ.get("OPENSCRUB_PLATE_MODEL"),
-                 os.path.join(mdir, "plate_yolov8.onnx")):
-        if cand and os.path.exists(cand):
-            active = cand; break
+    active = os.environ.get("OPENSCRUB_PLATE_MODEL")
+    if not (active and os.path.exists(active)):
+        active = _find("plate_yolov8.onnx")
     if not active:
         for m in models:
-            path = os.path.join(mdir, "%s.onnx" % m.get("id"))
-            if os.path.exists(path):
-                active = path; break
+            p = _find("%s.onnx" % m.get("id"))
+            if p:
+                active = p; break
     return jsonify({"models": out, "active": os.path.basename(active) if active else None})
 
 
@@ -948,17 +958,17 @@ placeholder="e.g. provider or app names to always keep visible&#10;one per line"
 <label style="margin:0"><input type="checkbox" id="pmode"> preview mode (boxes only)<span class="qm" data-tip="Draws red outline boxes instead of blurring — a fast way to check coverage before committing to a render.">?</span></label>
 <label style="margin:0"><input type="checkbox" id="skiprev"> skip review (blur everything found, render immediately)<span class="qm" data-tip="No human check: every detection is blurred and the render starts right away. Use only with settings you already trust.">?</span></label>
 <label style="margin:0"><input type="checkbox" id="usezones" checked> apply detection zones<span class="qm" data-tip="Restricts each category to the zones drawn in the zone editor. Outside a category's zones NOTHING is blurred, even if detected.">?</span></label>
-<div id="platepanel" style="display:none;margin:8px 0;padding:10px 12px;border:1px solid #e5e7eb;border-radius:10px;background:#fafaf9">
- <div style="font-weight:700;font-size:13px;margin-bottom:2px">License-plate model <span class="qm" data-tip="Plate detection needs a model file (not bundled). Pick a curated open-source model to download it — the file is SHA-256 verified before use. Each entry shows its software license.">?</span></div>
- <div id="platestatus" style="font-size:12px;color:#6b7280;margin-bottom:6px">checking…</div>
- <div id="platelist"></div>
-</div>
 <label style="margin:0"><input type="checkbox" id="drawscores"> show face scores (preview)<span class="qm" data-tip="In preview mode, labels each face box with its detection confidence so you can pick a good Face threshold for your footage.">?</span></label>
 <label style="margin:0"><input type="checkbox" id="densefaces"> dense faces (every frame)<span class="qm" data-tip="Runs the face detector on EVERY frame instead of at scan intervals, so fast-moving faces stay covered (e.g. someone walking through a webcam feed). Slower to render — pair it with a face detection zone to keep it fast. Leave off for static screens where faces don't move.">?</span></label>
 <button onclick="startJob()">Start scan</button>
 </div>
 </div>
 
+<div class="card" id="platepanel" style="display:none">
+<h2>License-plate model <span class="qm" data-tip="Plate detection needs a model file (not bundled). Pick a curated open-source model to download it — the file is SHA-256 verified before use. Each entry shows its software license.">?</span></h2>
+ <div id="platestatus" style="font-size:12px;color:#6b7280;margin-bottom:6px">checking…</div>
+ <div id="platelist"></div>
+</div>
 <div class="card"><h2>Jobs</h2><div class="joblist" id="jobs">loading…</div></div>
 <div id="detail"></div>
 <div class="card"><h2>HTTPS certificate</h2>

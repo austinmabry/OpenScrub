@@ -35,6 +35,8 @@ ArchitecturesInstallIn64BitMode=x64compatible
 [Tasks]
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; \
   GroupDescription: "Additional icons:"
+Name: "firewall"; Description: "Allow access from other devices on your private network (Windows Firewall rule for OpenScrub Web — without it, phones/laptops on your LAN can't reach the server and Windows shows a permission prompt)"; \
+  GroupDescription: "Network:"
 Name: "tesseract"; Description: "Install Tesseract OCR via winget (needed for text detection)"; \
   GroupDescription: "System tools (skip if already installed):"; Flags: unchecked
 Name: "ffmpeg"; Description: "Install FFmpeg via winget (audio + H.264 output)"; \
@@ -54,6 +56,16 @@ Name: "{autodesktop}\OpenScrub Web"; Filename: "{app}\openscrub-web.exe"; \
   Tasks: desktopicon
 
 [Run]
+; Firewall: clear any stale rules for this exe first (clicking Cancel on the
+; Windows prompt creates a BLOCK rule that would override our allow rule),
+; then allow inbound on PRIVATE networks only — never public.
+Filename: "netsh"; \
+  Parameters: "advfirewall firewall delete rule name=all program=""{app}\openscrub-web.exe"""; \
+  Tasks: firewall; Flags: runhidden waituntilterminated
+Filename: "netsh"; \
+  Parameters: "advfirewall firewall add rule name=""OpenScrub Web"" dir=in action=allow program=""{app}\openscrub-web.exe"" profile=private enable=yes"; \
+  Tasks: firewall; Flags: runhidden waituntilterminated; \
+  StatusMsg: "Adding Windows Firewall rule (private networks)…"
 Filename: "winget"; Parameters: "install -e --id UB-Mannheim.TesseractOCR"; \
   Tasks: tesseract; Flags: shellexec waituntilterminated; \
   StatusMsg: "Installing Tesseract OCR (winget)…"
@@ -62,3 +74,8 @@ Filename: "winget"; Parameters: "install -e --id Gyan.FFmpeg"; \
   StatusMsg: "Installing FFmpeg (winget)…"
 Filename: "{app}\openscrub-web.exe"; Description: "Start OpenScrub Web now"; \
   Flags: postinstall nowait skipifsilent
+
+[UninstallRun]
+Filename: "netsh"; \
+  Parameters: "advfirewall firewall delete rule name=all program=""{app}\openscrub-web.exe"""; \
+  Flags: runhidden waituntilterminated; RunOnceId: "RemoveFirewallRule"
