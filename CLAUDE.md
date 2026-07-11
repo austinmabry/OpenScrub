@@ -14,6 +14,7 @@ target is Windows 10 + NVIDIA RTX 3060.
 | `openscrub_web.py` | Flask web app. The entire UI is one embedded `PAGE` string (HTML/CSS/JS). Serves via cheroot (production WSGI, TLS) with Flask-dev fallback. |
 | `zones_ui.py` | Zone-editor page (`ZONES_PAGE`), served by the web app at `/zones`. |
 | `openscrub_gui.py` | Legacy Tk GUI. Frozen; ships but is not actively developed. |
+| `openscrub_setup.py` | `openscrub-setup` command: detects/installs Tesseract + FFmpeg (winget/apt), optional spaCy model + plate model. Ships in the wheel. |
 | `install.py` | Windows-friendly installer (deps, GPU OCR, shortcut, `--with-plates`). |
 | `plate_models.json` | Curated license-plate model registry (see PLATES.md). |
 | `fetch_plate_models.py` | Alt path to fetch plate models via the open-image-models pip package. |

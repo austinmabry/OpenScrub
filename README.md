@@ -125,6 +125,14 @@ winget install -e --id Python.Python.3.12
 Close and reopen the terminal (so PATH updates), then:
 ```
 pip install OpenScrub
+openscrub-setup
+```
+
+`openscrub-setup` detects what's missing and installs Tesseract and FFmpeg
+for you via winget (asking first; `--yes` to skip prompts, `--check` to
+only report). Prefer manual control? The equivalent commands:
+
+```
 winget install -e --id UB-Mannheim.TesseractOCR
 winget install -e --id Gyan.FFmpeg
 ```
@@ -132,8 +140,9 @@ winget install -e --id Gyan.FFmpeg
 ### Fresh Linux (Debian/Ubuntu)
 
 ```
-sudo apt install python3-pip tesseract-ocr ffmpeg
+sudo apt install python3-pip
 pip install OpenScrub
+openscrub-setup        # offers: sudo apt install tesseract-ocr ffmpeg
 ```
 
 Then run `openscrub-web` and open the URL it prints.
