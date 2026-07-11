@@ -914,8 +914,9 @@ padding:8px 12px;font-size:13px}
 <div class="brand">Open<span class="box"><span class="fuzz">Scr</span></span>ub</div>
 <small>Local video redaction — review before you trust</small></header>
 <main>
+<div id="mainview">
 <div class="card" id="newjob">
-<h2>Job Settings</h2>
+<h2>Job Settings <a href="#settings" title="App settings" style="float:right;font-size:20px;text-decoration:none" aria-label="App settings">&#9881;&#65039;</a></h2>
 <label>Upload video(s) <span style="font-weight:400;color:#6b7280">— accepts
  MP4, MOV, MKV, AVI, M4V, WebM, WMV (anything ffmpeg can read)</span></label>
 <input type="file" id="file" accept="video/*" multiple>
@@ -977,11 +978,6 @@ placeholder="e.g. provider or app names to always keep visible&#10;one per line"
 </div>
 </div>
 
-<div class="card" id="platepanel" style="display:none">
-<h2>License-plate model <span class="qm" data-tip="Plate detection needs a model file (not bundled). Pick a curated open-source model to download it — the file is SHA-256 verified before use. Each entry shows its software license.">?</span></h2>
- <div id="platestatus" style="font-size:12px;color:#6b7280;margin-bottom:6px">checking…</div>
- <div id="platelist"></div>
-</div>
 <div class="card"><h2>Custom regex categories</h2>
 <div style="font-size:12px;color:#6b7280;margin-bottom:6px">Add your own
 detection categories — claim numbers, case IDs, account formats, anything
@@ -995,11 +991,21 @@ one at a time, and every category needs a name.</div>
  <button onclick="ccAdd()">Add category</button>
 </div>
 </div>
+<div class="card"><h2>Jobs</h2><div class="joblist" id="jobs">loading…</div></div>
+<div id="detail"></div>
+</div>
+<div id="settingsview" style="display:none">
+<div class="card"><h2>App settings <a href="#" style="float:right;font-size:14px;font-weight:400" onclick="location.hash=&quot;&quot;;return false">&#8592; back to jobs</a></h2>
+<div style="font-size:12px;color:#6b7280">Server-level configuration — these apply to every job.</div>
+</div>
+<div class="card" id="platepanel" style="display:none">
+<h2>License-plate model <span class="qm" data-tip="Plate detection needs a model file (not bundled). Pick a curated open-source model to download it — the file is SHA-256 verified before use. Each entry shows its software license.">?</span></h2>
+ <div id="platestatus" style="font-size:12px;color:#6b7280;margin-bottom:6px">checking…</div>
+ <div id="platelist"></div>
+</div>
 <div class="card"><h2>Optional detection engines</h2>
 <div id="extras" style="font-size:13px">loading…</div>
 </div>
-<div class="card"><h2>Jobs</h2><div class="joblist" id="jobs">loading…</div></div>
-<div id="detail"></div>
 <div class="card"><h2>Encryption at rest</h2>
 <div id="vstat" style="font-size:13px;color:#6b7280;margin-bottom:8px">loading…</div>
 <div id="vsetup" style="display:none">
@@ -1036,6 +1042,7 @@ one at a time, and every category needs a name.</div>
 </div>
 <div style="font-size:12px;color:#9ca3af;margin-top:6px">Installing or removing a
 certificate takes effect after a server restart.</div>
+</div>
 </div>
 </main>
 <footer style="text-align:center;color:#9ca3af;font-size:12px;padding:18px 12px 26px">
@@ -1774,7 +1781,14 @@ async function extraInstall(id){
  extrasStatus();
 }
 zoneStatus();loadPersist();loadCertInfo();loadJobs();setInterval(loadJobs,5000);
-updCheck();vaultStatus();extrasStatus();ccLoad();
+function showView(){
+ const s=location.hash==="#settings";
+ document.getElementById("mainview").style.display=s?"none":"block";
+ document.getElementById("settingsview").style.display=s?"block":"none";
+ if(s)window.scrollTo(0,0);
+}
+window.addEventListener("hashchange",showView);
+updCheck();vaultStatus();extrasStatus();ccLoad();showView();
 </script></body></html>"""
 
 
