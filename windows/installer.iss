@@ -63,7 +63,7 @@ Filename: "netsh"; \
   Parameters: "advfirewall firewall delete rule name=all program=""{app}\openscrub-web.exe"""; \
   Tasks: firewall; Flags: runhidden waituntilterminated
 Filename: "netsh"; \
-  Parameters: "advfirewall firewall add rule name=""OpenScrub Web"" dir=in action=allow program=""{app}\openscrub-web.exe"" profile=private enable=yes"; \
+  Parameters: "advfirewall firewall add rule name=""OpenScrub Web"" dir=in action=allow program=""{app}\openscrub-web.exe"" profile=private,domain enable=yes"; \
   Tasks: firewall; Flags: runhidden waituntilterminated; \
   StatusMsg: "Adding Windows Firewall rule (private networks)…"
 Filename: "winget"; Parameters: "install -e --id UB-Mannheim.TesseractOCR"; \

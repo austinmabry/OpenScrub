@@ -978,6 +978,9 @@ placeholder="e.g. provider or app names to always keep visible&#10;one per line"
  <div id="platestatus" style="font-size:12px;color:#6b7280;margin-bottom:6px">checking…</div>
  <div id="platelist"></div>
 </div>
+<div class="card"><h2>Optional detection engines</h2>
+<div id="extras" style="font-size:13px">loading…</div>
+</div>
 <div class="card"><h2>Jobs</h2><div class="joblist" id="jobs">loading…</div></div>
 <div id="detail"></div>
 <div class="card"><h2>Encryption at rest</h2>
@@ -1707,8 +1710,31 @@ async function vaultDoLock(){
  alert(r.ok?("Locked — "+(await r.json()).encrypted+" file(s) encrypted."):await r.text());
  vaultStatus();loadJobs();
 }
+let EXTPOLL=null;
+async function extrasStatus(){
+ try{
+  const d=await (await fetch("/api/extras")).json();
+  const el=document.getElementById("extras");
+  if(d.frozen){el.innerHTML='This standalone install has no pip, so optional engines cannot be added here. Use the pip install of OpenScrub (<code>pip install "OpenScrub[ner]"</code>) if you need spaCy NER or PaddleOCR.';return;}
+  el.innerHTML=d.items.map(i=>{
+   let right;
+   if(i.installed)right='<span style="color:#15803d">installed</span>';
+   else if(d.state==="installing"&&d.target===i.id)right='<span style="color:#b45309">installing… '+(d.log.length?d.log[d.log.length-1]:'')+'</span>';
+   else right=`<button onclick="extraInstall('${i.id}')">Install</button>`;
+   return '<div class="row" style="justify-content:space-between;gap:10px;padding:5px 0"><span><b>'+i.label+'</b><br><span style="color:#6b7280;font-size:12px">'+i.desc+'</span></span>'+right+'</div>';
+  }).join("");
+  if(d.state==="installing"){if(!EXTPOLL)EXTPOLL=setInterval(extrasStatus,3000);}
+  else if(EXTPOLL){clearInterval(EXTPOLL);EXTPOLL=null;
+   if(d.state==="error")alert("Engine install failed:\\n"+d.log.join("\\n"));}
+ }catch(e){}
+}
+async function extraInstall(id){
+ const r=await fetch("/api/extras/"+id+"/install",{method:"POST"});
+ if(!r.ok){alert(await r.text());return;}
+ extrasStatus();
+}
 zoneStatus();loadPersist();loadCertInfo();loadJobs();setInterval(loadJobs,5000);
-updCheck();vaultStatus();
+updCheck();vaultStatus();extrasStatus();
 </script></body></html>"""
 
 
@@ -1873,6 +1899,85 @@ def vault_unlock():
     return jsonify({"ok": True, "decrypted": n})
 
 
+# ----------------------------------------------------------------------------
+# Optional engines (spaCy NER, PaddleOCR) — installable from the web UI on
+# pip/folder installs. Frozen (Program Files) builds have no pip, so the
+# endpoints report that instead of pretending.
+# ----------------------------------------------------------------------------
+def _spec(name):
+    import importlib.util
+    try:
+        return importlib.util.find_spec(name) is not None
+    except Exception:
+        return False
+
+
+EXTRAS = {
+    "ner": {
+        "label": "spaCy NER (name detection)",
+        "desc": "The primary name detector. Without it, names rely on "
+                "the built-in heuristics.",
+        "pip": ["spacy"],
+        "post": [["-m", "spacy", "download", "en_core_web_sm"]],
+        "check": lambda: _spec("spacy") and _spec("en_core_web_sm"),
+    },
+    "paddle": {
+        "label": "PaddleOCR (better OCR on small fonts)",
+        "desc": "Stronger OCR engine, picked automatically once "
+                "installed (CPU build — for the GPU build run "
+                "python install.py). Large download.",
+        "pip": ["paddleocr", "paddlepaddle"],
+        "post": [],
+        "check": lambda: _spec("paddleocr") and _spec("paddle"),
+    },
+}
+_EXT = {"state": "idle", "target": "", "log": []}
+
+
+@app.route("/api/extras")
+def extras_status():
+    frozen = bool(getattr(sys, "frozen", False))
+    items = [{"id": k, "label": v["label"], "desc": v["desc"],
+              "installed": (False if frozen else v["check"]())}
+             for k, v in EXTRAS.items()]
+    return jsonify({"frozen": frozen, "items": items,
+                    "state": _EXT["state"], "target": _EXT["target"],
+                    "log": _EXT["log"][-4:]})
+
+
+@app.route("/api/extras/<eid>/install", methods=["POST"])
+def extras_install(eid):
+    if getattr(sys, "frozen", False):
+        abort(400, "this is a standalone (Program Files) install without "
+                   "pip — optional engines need the pip install of "
+                   "OpenScrub")
+    spec = EXTRAS.get(eid) or abort(404)
+    if _EXT["state"] == "installing":
+        abort(409, "another install is already running")
+    _EXT.update(state="installing", target=eid, log=[])
+
+    def work():
+        import subprocess
+        try:
+            cmds = [[sys.executable, "-m", "pip", "install"] + spec["pip"]]
+            cmds += [[sys.executable] + p for p in spec["post"]]
+            for cmd in cmds:
+                _EXT["log"].append("$ " + " ".join(cmd[1:]))
+                r = subprocess.run(cmd, capture_output=True, text=True)
+                if r.returncode != 0:
+                    tail = (r.stderr or r.stdout or "").strip().splitlines()
+                    _EXT["log"] += tail[-3:] or ["exit %d" % r.returncode]
+                    _EXT["state"] = "error"
+                    return
+            _EXT["log"].append("done — takes effect on the next scan")
+            _EXT["state"] = "done"
+        except Exception as e:
+            _EXT["log"].append(str(e))
+            _EXT["state"] = "error"
+    threading.Thread(target=work, daemon=True).start()
+    return jsonify({"ok": True})
+
+
 @app.route("/api/vault/lock", methods=["POST"])
 def vault_lock_route():
     with JOBS_LOCK:
@@ -1930,9 +2035,17 @@ def index():
     return PAGE.replace("%%VERSION%%", openscrub.VERSION)
 
 
+def _header_logo_uri():
+    """The base64 logo embedded in PAGE — reused by the zones page so its
+    header never 404s on installs without an assets/ folder (pip, frozen)."""
+    i = PAGE.index('<header><img src="') + len('<header><img src="')
+    return PAGE[i:PAGE.index('"', i)]
+
+
 @app.route("/zones")
 def zones_page():
-    return zones_ui.ZONES_PAGE
+    return zones_ui.ZONES_PAGE.replace('src="logo_dark.png"',
+                                       'src="%s"' % _header_logo_uri())
 
 
 @app.route("/api/certinfo")
