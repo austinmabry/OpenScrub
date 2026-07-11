@@ -121,3 +121,6 @@ scratch/
 
 # private local context for Claude Code — never commit
 CLAUDE.local.md
+
+# Windows installer build output (windows/build_installer.bat)
+windows/output/

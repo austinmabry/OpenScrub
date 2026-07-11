@@ -173,6 +173,24 @@ pip install paddleocr paddlepaddle       # better OCR on small UI fonts (large i
 spaCy is strongly recommended — it's the primary name detector. The tool
 still runs without it using heuristics, but NER is more accurate.
 
+### A proper Windows install (Program Files + Start Menu)
+
+Prefer a normal Windows program over pip? The repo ships a native
+installer build: `windows\build_installer.bat` produces
+`OpenScrub-Setup-<version>.exe` (PyInstaller + Inno Setup), which
+installs branded `openscrub.exe` and `openscrub-web.exe` into
+`C:\Program Files\OpenScrub` with Start Menu shortcuts, an uninstaller,
+and optional one-click winget installs of Tesseract and FFmpeg. Grab it
+from the GitHub Releases page when attached, or build it yourself
+(requires Python 3.10+ and Inno Setup 6). App data — jobs, certificates,
+zones, downloaded models — lives in `%LOCALAPPDATA%\OpenScrub`, never in
+Program Files. Note: the frozen build detects names with the built-in
+heuristics (spaCy NER is a pip-only extra).
+
+If you stay with pip instead, `openscrub-setup` on Windows now offers to
+create Start Menu + Desktop shortcuts for OpenScrub Web, so you never
+have to hunt for pip's `Scripts` folder.
+
 ## Guided installer (Windows / Linux / macOS best-effort)
 
 Prefer a setup that installs the system tools too? Clone or download the

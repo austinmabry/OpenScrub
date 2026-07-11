@@ -34,7 +34,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.6"
+VERSION = "1.0.7"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -1166,9 +1166,56 @@ def _model_dir():
     return d
 
 
+def install_is_readonly():
+    """True when the code lives somewhere the user shouldn't write to:
+    pip's site-packages, or a frozen (PyInstaller) install under Program
+    Files. Folder/git deploys return False and keep writing next to the
+    code, as always."""
+    p = os.path.dirname(os.path.abspath(__file__)).replace("\\", "/")
+    return ("site-packages" in p or "dist-packages" in p
+            or bool(getattr(sys, "frozen", False)))
+
+
+def user_data_dir():
+    """Per-user writable data root (mirrors openscrub_web's choice):
+    %LOCALAPPDATA%/OpenScrub on Windows, ~/.local/share/OpenScrub elsewhere."""
+    base = (os.environ.get("LOCALAPPDATA")
+            or os.path.join(os.path.expanduser("~"), ".local", "share"))
+    d = os.path.join(base, "OpenScrub")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
 def plate_registry_path():
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                        "plate_models.json")
+    """Path of the WRITABLE plate registry (TOFU pins are written back here).
+
+    Folder deploys use plate_models.json next to the code. Read-only
+    installs (pip / frozen) use a per-user copy seeded from the packaged
+    registry; new models added by a release are merged into that copy on
+    read (never overwriting an existing entry's pinned hash)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    packaged = os.path.join(here, "plate_models.json")
+    if not install_is_readonly():
+        return packaged
+    user = os.path.join(user_data_dir(), "plate_models.json")
+    try:
+        if not os.path.exists(user) and os.path.exists(packaged):
+            shutil.copy2(packaged, user)
+        elif os.path.exists(user) and os.path.exists(packaged):
+            with open(user, encoding="utf-8") as f:
+                mine = json.load(f)
+            with open(packaged, encoding="utf-8") as f:
+                shipped = json.load(f)
+            have = {m.get("id") for m in mine.get("models", [])}
+            new = [m for m in shipped.get("models", [])
+                   if m.get("id") not in have]
+            if new:
+                mine.setdefault("models", []).extend(new)
+                with open(user, "w", encoding="utf-8") as f:
+                    json.dump(mine, f, indent=2)
+    except Exception:
+        pass                    # fall through: a readable path either way
+    return user if os.path.exists(user) else packaged
 
 
 def load_plate_registry():
@@ -1195,8 +1242,10 @@ def download_plate_model(entry, dest_dir=None, cb=None, progress=None):
     if not url or url == "TODO_VERIFY":
         raise ValueError("model '%s' has no verified download_url yet "
                          "(registry entry says TODO_VERIFY)" % entry.get("id"))
-    dest_dir = dest_dir or os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "models")
+    dest_dir = dest_dir or (
+        os.path.join(user_data_dir(), "models") if install_is_readonly()
+        else os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "models"))
     os.makedirs(dest_dir, exist_ok=True)
     dest = os.path.join(dest_dir, "%s.onnx" % entry.get("id", "plate_model"))
     tmp = dest + ".part"
@@ -1269,10 +1318,16 @@ class PlateDetector:
         if env:
             candidates.append(env)
         here = os.path.dirname(os.path.abspath(__file__))
-        candidates += [
-            os.path.join(here, "models", "plate_yolov8.onnx"),
-            os.path.join(here, "plate_yolov8.onnx"),
-        ]
+        # read-only installs (pip / frozen) download models to the per-user
+        # data dir instead of next to the code — search both.
+        roots = [here]
+        if install_is_readonly():
+            roots.append(user_data_dir())
+        for r in roots:
+            candidates += [
+                os.path.join(r, "models", "plate_yolov8.onnx"),
+                os.path.join(r, "plate_yolov8.onnx"),
+            ]
         # registry-downloaded models are saved as models/<registry-id>.onnx;
         # search those too (recommended entries first), and pick up each
         # model's declared input size from the registry.
@@ -1280,9 +1335,10 @@ class PlateDetector:
         try:
             reg = load_plate_registry()
             for m in sorted(reg, key=lambda x: not x.get("recommended", False)):
-                mp = os.path.join(here, "models", "%s.onnx" % m.get("id"))
-                candidates.append(mp)
-                reg_size[mp] = int(m.get("input_size", 640) or 640)
+                for r in roots:
+                    mp = os.path.join(r, "models", "%s.onnx" % m.get("id"))
+                    candidates.append(mp)
+                    reg_size[mp] = int(m.get("input_size", 640) or 640)
         except Exception:
             pass
         found = next((c for c in candidates if c and os.path.exists(c)), None)

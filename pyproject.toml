@@ -73,6 +73,8 @@ pattern = "VERSION = \"(?P<version>[^\"]+)\""
 
 [tool.hatch.build.targets.wheel.force-include]
 "plate_models.json" = "plate_models.json"
+# branded icon for the Start Menu shortcut openscrub-setup creates
+"assets/openscrub.ico" = "openscrub.ico"
 
 [tool.hatch.build.targets.wheel]
 include = [
@@ -86,6 +88,7 @@ include = [
 [tool.hatch.build.targets.sdist]
 include = [
     "plate_models.json",
+    "assets/openscrub.ico",
     "openscrub.py",
     "openscrub_setup.py",
     "openscrub_update.py",

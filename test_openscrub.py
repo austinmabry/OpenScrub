@@ -204,3 +204,46 @@ def test_update_registry_pin_merge():
     assert new[1]["sha256"] == ""          # URL moved: trust reset
     assert new[2]["sha256"] == ""          # never pinned: stays empty
     assert new[3]["sha256"] == "ddd"       # shipped hash untouched
+
+
+def test_registry_user_copy_and_pin_survival(tmp_path, monkeypatch):
+    """Read-only installs (pip/frozen) must keep TOFU pins in a per-user
+    registry copy: seeded once, new release models merged in, existing
+    pinned hashes never overwritten."""
+    monkeypatch.setattr(openscrub, "install_is_readonly", lambda: True)
+    monkeypatch.setattr(openscrub, "user_data_dir", lambda: str(tmp_path))
+
+    # first call seeds the user copy from the packaged registry
+    p = openscrub.plate_registry_path()
+    assert p == str(tmp_path / "plate_models.json")
+    with open(p, encoding="utf-8") as f:
+        reg = json.load(f)
+    assert reg["models"], "seeded registry should carry the packaged models"
+
+    # pin a hash locally, then simulate a release that adds a new model
+    reg["models"][0]["sha256"] = "f" * 64
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(reg, f)
+    packaged = os.path.join(os.path.dirname(os.path.abspath(
+        openscrub.__file__)), "plate_models.json")
+    with open(packaged, encoding="utf-8") as f:
+        shipped = json.load(f)
+    shipped["models"].append({"id": "brand-new", "sha256": "",
+                              "download_url": "https://x/new.onnx"})
+    fake_pkg = tmp_path / "pkg"; fake_pkg.mkdir()
+    (fake_pkg / "plate_models.json").write_text(json.dumps(shipped),
+                                                encoding="utf-8")
+    real_dirname = os.path.dirname
+
+    def fake_dirname(path):
+        if path == os.path.abspath(openscrub.__file__):
+            return str(fake_pkg)
+        return real_dirname(path)
+    monkeypatch.setattr(openscrub.os.path, "dirname", fake_dirname)
+
+    p2 = openscrub.plate_registry_path()
+    with open(p2, encoding="utf-8") as f:
+        merged = json.load(f)
+    ids = [m["id"] for m in merged["models"]]
+    assert "brand-new" in ids, "new release model should merge in"
+    assert merged["models"][0]["sha256"] == "f" * 64, "local pin must survive"

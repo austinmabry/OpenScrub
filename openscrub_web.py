@@ -47,10 +47,12 @@ import zones_ui
 def _data_root():
     """Writable data root. From a normal checkout/deploy: the script's own
     folder (unchanged behavior). When pip-installed (module lives inside
-    site-packages), use a per-user data dir instead — PHI jobs and TLS keys
-    must never be written into Python's install tree."""
+    site-packages) or frozen into an exe (PyInstaller under Program Files),
+    use a per-user data dir instead — PHI jobs and TLS keys must never be
+    written into the install tree."""
     here = os.path.dirname(os.path.abspath(__file__))
-    if "site-packages" in here or "dist-packages" in here:
+    if ("site-packages" in here or "dist-packages" in here
+            or getattr(sys, "frozen", False)):
         base = (os.environ.get("LOCALAPPDATA")
                 or os.path.join(os.path.expanduser("~"), ".local", "share"))
         root = os.path.join(base, "OpenScrub")
@@ -69,8 +71,19 @@ if os.path.isdir(_legacy_jobs) and not os.path.isdir(JOBS_DIR):
         os.rename(_legacy_jobs, JOBS_DIR)
     except OSError:
         pass  # e.g. cross-device or perms: fall back to fresh dir
-ZONES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                          "zones.json")
+ZONES_PATH = os.path.join(_data_root(), "zones.json")
+# One-time migration: zones.json used to live next to the code, which for
+# pip installs meant site-packages (lost on upgrade) and for frozen installs
+# would be read-only. Carry an existing file over to the data root.
+_legacy_zones = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "zones.json")
+if (_legacy_zones != ZONES_PATH and os.path.exists(_legacy_zones)
+        and not os.path.exists(ZONES_PATH)):
+    try:
+        import shutil as _sh
+        _sh.copy2(_legacy_zones, ZONES_PATH)
+    except OSError:
+        pass
 CERT_DIR = os.path.join(_data_root(), "certs")
 CUSTOM_CERT = os.path.join(CERT_DIR, "custom_cert.pem")
 CUSTOM_KEY = os.path.join(CERT_DIR, "custom_key.pem")
@@ -948,6 +961,17 @@ placeholder="e.g. provider or app names to always keep visible&#10;one per line"
 
 <div class="card"><h2>Jobs</h2><div class="joblist" id="jobs">loading…</div></div>
 <div id="detail"></div>
+<div class="card"><h2>HTTPS certificate</h2>
+<div id="certinfo" style="font-size:13px;color:#6b7280;margin-bottom:8px">loading…</div>
+<div class="row" style="gap:8px;flex-wrap:wrap;font-size:13px">
+ <label>Certificate (PEM): <input type="file" id="certfile" accept=".pem,.crt,.cer"></label>
+ <label>Private key (PEM): <input type="file" id="keyfile" accept=".pem,.key"></label>
+ <button onclick="uploadCerts()">Install</button>
+ <button onclick="removeCerts()">Remove custom cert</button>
+</div>
+<div style="font-size:12px;color:#9ca3af;margin-top:6px">Installing or removing a
+certificate takes effect after a server restart.</div>
+</div>
 </main>
 <footer style="text-align:center;color:#9ca3af;font-size:12px;padding:18px 12px 26px">
 OpenScrub v%%VERSION%% <span id="upd"></span>· <a href="license" style="color:#6b7280">Apache-2.0 license</a>
@@ -1589,7 +1613,7 @@ async function updCheck(){
  }catch(e){}
 }
 async function updRun(){
- if(!confirm("Update OpenScrub to the newest release now?\n\nJobs must be idle, and the server needs a restart afterwards to run the new version."))return;
+ if(!confirm("Update OpenScrub to the newest release now?\\n\\nJobs must be idle, and the server needs a restart afterwards to run the new version."))return;
  const r=await fetch("/api/update_run",{method:"POST"});
  if(!r.ok){alert(await r.text());return;}
  const el=document.getElementById("upd");
@@ -1599,7 +1623,7 @@ async function updRun(){
   if(!s.running&&s.ok!==null){
    clearInterval(t);
    el.textContent=s.ok?"· updated — restart the server to finish ":"· update failed ";
-   alert((s.ok?"Update installed.\nRestart the OpenScrub server to run the new version.":"Update failed:")+"\n\n"+s.log.slice(-8).join("\n"));
+   alert((s.ok?"Update installed.\\nRestart the OpenScrub server to run the new version.":"Update failed:")+"\\n\\n"+s.log.slice(-8).join("\\n"));
   }
  },2000);
 }

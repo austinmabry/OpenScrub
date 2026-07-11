@@ -111,9 +111,11 @@ def setup_plates(assume_yes, check_only):
         _miss("openscrub package not importable — is it installed?")
         return
     models = openscrub.load_plate_registry()
-    here = os.path.dirname(os.path.abspath(openscrub.__file__))
-    installed = [m["id"] for m in models if os.path.exists(
-        os.path.join(here, "models", f"{m['id']}.onnx"))]
+    roots = [os.path.dirname(os.path.abspath(openscrub.__file__))]
+    if openscrub.install_is_readonly():
+        roots.append(openscrub.user_data_dir())
+    installed = [m["id"] for m in models if any(os.path.exists(
+        os.path.join(r, "models", f"{m['id']}.onnx")) for r in roots)]
     if installed:
         _ok(f"license-plate model installed: {installed[0]}")
         return
@@ -133,6 +135,54 @@ def setup_plates(assume_yes, check_only):
         _ok(f"plate model saved: {path}")
     except Exception as e:
         _miss(f"plate model download failed: {e}")
+
+
+def create_shortcuts(assume_yes):
+    """Start Menu + Desktop shortcuts for the web app (Windows pip installs).
+
+    pip drops openscrub-web.exe into a Scripts folder nobody browses to —
+    on Store Python it's buried five levels under AppData. A shortcut with
+    the branded icon makes the app launchable like any other program."""
+    if os.name != "nt":
+        return
+    web = shutil.which("openscrub-web")
+    if not web:
+        cand = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])),
+                            "openscrub-web.exe")
+        web = cand if os.path.exists(cand) else None
+    if not web:
+        _note("could not locate openscrub-web.exe — skipping shortcuts")
+        return
+    ico = ""
+    try:
+        import openscrub
+        c = os.path.join(os.path.dirname(os.path.abspath(openscrub.__file__)),
+                         "openscrub.ico")
+        if os.path.exists(c):
+            ico = c
+    except Exception:
+        pass
+    if not _confirm("Create Start Menu + Desktop shortcuts for "
+                    "'OpenScrub Web'?", assume_yes):
+        _note("Skipped. The server exe is: " + web)
+        return
+    icon_line = f'$s.IconLocation="{ico}";' if ico else ""
+    ps = (
+        '$W=New-Object -ComObject WScript.Shell;'
+        'foreach($d in @([Environment]::GetFolderPath("Programs"),'
+        '[Environment]::GetFolderPath("Desktop"))){'
+        '$s=$W.CreateShortcut((Join-Path $d "OpenScrub Web.lnk"));'
+        f'$s.TargetPath="{web}";'
+        '$s.WorkingDirectory=[Environment]::GetFolderPath("UserProfile");'
+        f'{icon_line}'
+        '$s.Save()}'
+    )
+    r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                       capture_output=True, text=True)
+    if r.returncode == 0:
+        _ok("shortcuts created: Start Menu + Desktop -> OpenScrub Web")
+    else:
+        _note("shortcut creation failed: " + (r.stderr or "").strip()[:200])
 
 
 def main(argv=None):
@@ -205,6 +255,10 @@ def main(argv=None):
     # Optional: plate model
     if args.with_plates:
         setup_plates(args.yes, args.check)
+
+    # Windows: make the app findable — Start Menu + Desktop shortcuts
+    if os.name == "nt" and not args.check:
+        create_shortcuts(args.yes)
 
     print("=" * 46)
     if changed and os.name == "nt":

@@ -14,12 +14,13 @@ target is Windows 10 + NVIDIA RTX 3060.
 | `openscrub_web.py` | Flask web app. The entire UI is one embedded `PAGE` string (HTML/CSS/JS). Serves via cheroot (production WSGI, TLS) with Flask-dev fallback. |
 | `zones_ui.py` | Zone-editor page (`ZONES_PAGE`), served by the web app at `/zones`. |
 | `openscrub_gui.py` | Legacy Tk GUI. Frozen; ships but is not actively developed. |
-| `openscrub_setup.py` | `openscrub-setup` command: detects/installs Tesseract + FFmpeg (winget/apt), optional spaCy model + plate model. Ships in the wheel. |
+| `openscrub_setup.py` | `openscrub-setup` command: detects/installs Tesseract + FFmpeg (winget/apt), optional spaCy model + plate model, Windows Start Menu shortcuts. Ships in the wheel. |
+| `windows/` | Native Windows packaging: `openscrub.spec` (PyInstaller, two branded exes), `installer.iss` (Inno Setup → Program Files), `build_installer.bat` (runs both; attach output exe to the GitHub release). Build on Windows only. |
 | `install.py` | Windows-friendly installer (deps, GPU OCR, shortcut, `--with-plates`). |
 | `plate_models.json` | Curated license-plate model registry (see PLATES.md). |
 | `fetch_plate_models.py` | Alt path to fetch plate models via the open-image-models pip package. |
 | `openscrub_update.py` | `openscrub-update` command + web self-update backend: PyPI version check, sha256-verified sdist download, data-preserving folder update (PRESERVE set), TOFU pin carry-forward. Ships in the wheel. |
-| `test_openscrub.py` | pytest suite (11 tests). Must stay green. |
+| `test_openscrub.py` | pytest suite (12 tests). Must stay green. |
 | `tools/make_icons.py` | Regenerates every icon/logo asset from `assets/badge_master.png`. |
 | `tools/make_wordmark.py` | Regenerates the typeset Poppins wordmarks (navy + white). |
 | `assets/` | Brand assets. `badge_master.png` (canonical, mosaic+brackets style) and `badge_master_blurbox_alt.png` (alternate) are the sources; everything else is generated. |
@@ -50,6 +51,12 @@ Key classes/functions (locate with grep, line numbers drift):
   into `plate_models.json`; later downloads must match or are rejected and
   deleted. Registry reads/writes must always pass `encoding="utf-8"`
   (Windows defaults to cp1252 and mojibakes labels).
+- Install-location rules: `install_is_readonly()` (site-packages OR
+  `sys.frozen`) switches every write path to `user_data_dir()`
+  (%LOCALAPPDATA%/OpenScrub or ~/.local/share/OpenScrub): plate-model
+  downloads, the TOFU-pinned registry (per-user copy seeded from the
+  packaged one; new release models merge in, pins never overwritten),
+  web jobs/certs/zones. Folder deploys keep writing next to the code.
 
 Per-frame detection blocks (dense faces, plates) live inside the frame loop
 in `run_scan`, AFTER the frame read and the detection-window check. The zone
@@ -92,8 +99,11 @@ no confirmation delay. Verify alignment:
 
 ```
 python -c "import ast; ast.parse(open('openscrub.py').read())"   # each edited .py
-# extract PAGE's <script> to a file and: node --check that_file.js
-python -m pytest test_openscrub.py -q                             # 11 tests, all green
+# JS check: extract the <script> from the EVALUATED page, not the file text —
+# PAGE is a normal (non-raw) Python string, so \n in source JS becomes a real
+# newline when served and can break string literals (the v1.0.6 jobs bug):
+#   python -c "import openscrub_web as w, re; open('/tmp/p.js','w').write(re.search(r'<script>(.*)</script>', w.PAGE, re.S).group(1))" && node --check /tmp/p.js
+python -m pytest test_openscrub.py -q                             # 12 tests, all green
 python -m build          # FULL build (sdist->wheel), NEVER just `-w`:
                          # the wheel is built FROM the sdist in CI, so any
                          # file the wheel force-includes must be in the
