@@ -44,8 +44,22 @@ import zones_ui
 
 # Anchor to the script's own folder, NOT the process working directory —
 # double-clicking a .py on Windows can launch with cwd=C:\Windows\system32
-JOBS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                        "openscrub_jobs")
+def _data_root():
+    """Writable data root. From a normal checkout/deploy: the script's own
+    folder (unchanged behavior). When pip-installed (module lives inside
+    site-packages), use a per-user data dir instead — PHI jobs and TLS keys
+    must never be written into Python's install tree."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    if "site-packages" in here or "dist-packages" in here:
+        base = (os.environ.get("LOCALAPPDATA")
+                or os.path.join(os.path.expanduser("~"), ".local", "share"))
+        root = os.path.join(base, "OpenScrub")
+        os.makedirs(root, exist_ok=True)
+        return root
+    return here
+
+
+JOBS_DIR = os.path.join(_data_root(), "openscrub_jobs")
 # One-time migration from the pre-rebrand job store: carries over all prior
 # jobs, reviews, and the learned-words allowlist.
 _legacy_jobs = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -57,7 +71,7 @@ if os.path.isdir(_legacy_jobs) and not os.path.isdir(JOBS_DIR):
         pass  # e.g. cross-device or perms: fall back to fresh dir
 ZONES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                           "zones.json")
-CERT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "certs")
+CERT_DIR = os.path.join(_data_root(), "certs")
 CUSTOM_CERT = os.path.join(CERT_DIR, "custom_cert.pem")
 CUSTOM_KEY = os.path.join(CERT_DIR, "custom_key.pem")
 AUTO_CERT = os.path.join(CERT_DIR, "auto_cert.pem")
@@ -1589,19 +1603,28 @@ def license_page():
 
 @app.route("/logo.png")
 def logo():
-    return send_file(os.path.join(ASSET_DIR, "logo.png"),
+    p = os.path.join(ASSET_DIR, "logo.png")
+    if not os.path.exists(p):
+        abort(404)
+    return send_file(p,
                      mimetype="image/png", max_age=86400)
 
 
 @app.route("/logo_dark.png")
 def logo_dark():
-    return send_file(os.path.join(ASSET_DIR, "logo_dark.png"),
+    p = os.path.join(ASSET_DIR, "logo_dark.png")
+    if not os.path.exists(p):
+        abort(404)
+    return send_file(p,
                      mimetype="image/png", max_age=86400)
 
 
 @app.route("/favicon.ico")
 def favicon():
-    return send_file(os.path.join(ASSET_DIR, "openscrub.ico"),
+    p = os.path.join(ASSET_DIR, "openscrub.ico")
+    if not os.path.exists(p):
+        abort(404)
+    return send_file(p,
                      mimetype="image/x-icon", max_age=86400)
 
 

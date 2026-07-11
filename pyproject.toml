@@ -69,6 +69,9 @@ openscrub-web = "openscrub_web:main"
 path = "openscrub.py"
 pattern = "VERSION = \"(?P<version>[^\"]+)\""
 
+[tool.hatch.build.targets.wheel.force-include]
+"plate_models.json" = "plate_models.json"
+
 [tool.hatch.build.targets.wheel]
 include = [
     "openscrub.py",
