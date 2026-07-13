@@ -30,7 +30,7 @@ jobs:
           # release event: the tag's commit; manual dispatch: the given tag
           ref: ${{ github.event.inputs.tag || github.ref }}
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
