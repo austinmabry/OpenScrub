@@ -261,10 +261,15 @@ def build_args(job, for_render=False):
             with open(p, "w", encoding="utf-8") as f:
                 f.write(text)
             argv += ["--" + kind.replace("_", "-"), p]
-    for line in (o.get("ignore_regions") or "").strip().splitlines():
-        line = line.strip()
-        if line:
-            argv += ["--ignore-region", line]
+    # ignore zones (drawn in the zone editor) apply to every job,
+    # independent of the "apply detection zones" checkbox
+    try:
+        if os.path.exists(ZONES_PATH):
+            with open(ZONES_PATH, encoding="utf-8") as f:
+                for r in (json.load(f).get("ignore") or []):
+                    argv += ["--ignore-region", "%s,%s,%s,%s" % tuple(r)]
+    except Exception:
+        pass
     if for_render:
         argv += ["--from-report", os.path.join(jdir, "report.json")]
     parser = openscrub.build_parser()
@@ -991,8 +996,6 @@ placeholder="e.g. provider or app names to always keep visible&#10;one per line"
  padding:4px 10px;font-size:12px" onclick="clearPersist()">Clear all learned words</button></div>
 <div><label>Always blur (extra names)<span class="qm" data-tip="Words always blurred even if the detectors would miss them (unusual spellings, nicknames). One per line.">?</span></label><textarea id="extra"></textarea></div>
 </div>
-<label>Ignore regions (x1,y1,x2,y2 per line — e.g. taskbar clock)<span class="qm" data-tip="Screen rectangles that are never scanned at all — taskbar clock, a webcam overlay of yourself. Pixel coordinates of the recording.">?</span></label>
-<textarea id="ign" style="height:40px"></textarea>
 <div class="row" style="margin-top:8px">
 <label style="margin:0"><input type="checkbox" id="nomem"> disable memory<span class="qm" data-tip="Memory recalls confirmed PHI on later frames even when OCR misreads it. Disabling cuts false positives but weakens recall — usually leave off.">?</span></label>
 <label style="margin:0"><input type="checkbox" id="pmode"> preview mode (boxes only)<span class="qm" data-tip="Draws red outline boxes instead of blurring — a fast way to check coverage before committing to a render.">?</span></label>
@@ -1153,7 +1156,7 @@ function opts(){return{
  categories:[...document.querySelectorAll(".cat:checked")].map(e=>e.value).join(","),
  mode_map:Object.entries(CATMODE).filter(([c,m])=>m==="blur"||m==="box")
    .map(([c,m])=>`${c}=${m}`).join(","),
- allow_names:allow.value,extra_names:extra.value,ignore_regions:ign.value,
+ allow_names:allow.value,extra_names:extra.value,
  no_memory:nomem.checked,preview_mode:pmode.checked,
  dense_faces:densefaces.checked,face_threshold:+fthr.value,
  detect_scale:+dscale.value,draw_scores:drawscores.checked}}
@@ -2277,7 +2280,7 @@ def zones_page():
     extra = "".join(',%s:"%s"' % (c["id"], c.get("color", "#64748b"))
                     for c in load_custom_cats())
     if extra:
-        page = page.replace('face:"#ec4899"}', 'face:"#ec4899"%s}' % extra)
+        page = page.replace('face:"#ec4899"', 'face:"#ec4899"%s' % extra)
     return page
 
 

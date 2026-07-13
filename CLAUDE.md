@@ -21,7 +21,7 @@ target is Windows 10 + NVIDIA RTX 3060.
 | `fetch_plate_models.py` | Alt path to fetch plate models via the open-image-models pip package. |
 | `openscrub_update.py` | `openscrub-update` command + web self-update backend: PyPI version check, sha256-verified sdist download, data-preserving folder update (PRESERVE set), TOFU pin carry-forward. Ships in the wheel. |
 | `openscrub_vault.py` | At-rest encryption for the job store: scrypt keystore, chunked AES-256-GCM files (`.osvault`), lock/unlock tree walkers. NO password reset by design. Ships in the wheel. |
-| `test_openscrub.py` | pytest suite (17 tests). Must stay green. |
+| `test_openscrub.py` | pytest suite (18 tests). Must stay green. |
 | `tools/make_icons.py` | Regenerates every icon/logo asset from `assets/badge_master.png`. |
 | `tools/make_wordmark.py` | Regenerates the typeset Poppins wordmarks (navy + white). |
 | `assets/` | Brand assets. `badge_master.png` (canonical, mosaic+brackets style) and `badge_master_blurbox_alt.png` (alternate) are the sources; everything else is generated. |
@@ -52,6 +52,13 @@ Key classes/functions (locate with grep, line numbers drift):
   into `plate_models.json`; later downloads must match or are rejected and
   deleted. Registry reads/writes must always pass `encoding="utf-8"`
   (Windows defaults to cp1252 and mojibakes labels).
+- Camera vs screen: `probe_camera_motion` (run before scanning,
+  --scroll-track auto) detects continuous 2-axis motion; camera footage
+  disables scroll tracking + safety bands (screen-anchored boxes) and
+  auto-enables dense faces — content anchoring on camera video produced
+  giant fake offsets, edge-band smears, and displaced backtracked boxes.
+  Scan-time face adds are skipped whenever dense_faces is on (unions
+  balloon across a moving face's path).
 - Install-location rules: `install_is_readonly()` (site-packages OR
   `sys.frozen`) switches every write path to `user_data_dir()`
   (%LOCALAPPDATA%/OpenScrub or ~/.local/share/OpenScrub): plate-model
@@ -101,7 +108,15 @@ separate from this rule: the web injects them dynamically — into the
 checkbox row (JS `CC` via /api/custom_cats), job argv (`--custom-regex
 id=pattern`, engine activates only ids present in --categories), and the
 zones page (server-side injection anchored on `face:"#ec4899"` in
-ZONES_PAGE — keep that literal stable).
+ZONES_PAGE — keep that literal stable; customs land between it and the
+`ignore` pseudo-class).
+
+The zones page also has an `ignore` pseudo-class (never-blur zones,
+color #334155): NOT a detection category. The editor enforces that
+ignore and detection zones never overlap (barrier clipping in JS); the
+engine pops "ignore" from zones_data into args.ignore_regions
+(normalized rects, always applied — independent of use_zones), and
+in_ignore_region also gates dense faces/plates.
 
 ## Verification workflow (do this after every change)
 
@@ -111,7 +126,7 @@ python -c "import ast; ast.parse(open('openscrub.py').read())"   # each edited .
 # PAGE is a normal (non-raw) Python string, so \n in source JS becomes a real
 # newline when served and can break string literals (the v1.0.6 jobs bug):
 #   python -c "import openscrub_web as w, re; open('/tmp/p.js','w').write(re.search(r'<script>(.*)</script>', w.PAGE, re.S).group(1))" && node --check /tmp/p.js
-python -m pytest test_openscrub.py -q                             # 17 tests, all green
+python -m pytest test_openscrub.py -q                             # 18 tests, all green
 python -m build          # FULL build (sdist->wheel), NEVER just `-w`:
                          # the wheel is built FROM the sdist in CI, so any
                          # file the wheel force-includes must be in the

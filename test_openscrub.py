@@ -356,3 +356,16 @@ def test_gap_verification_refuses_real_absence(tmp_path):
     assert ssn, "SSN should be detected"
     assert not any(d["t_start"] < 4 and d["t_end"] > 8 for d in ssn), \
         "the true 6s absence must not be blurred straight through"
+
+
+def test_ignore_zone_blocks_detection(tmp_path):
+    """Normalized ignore regions (zone-editor rects) suppress detection
+    inside them — and only inside them."""
+    v1 = make_video(str(tmp_path / "a.mp4"), [(300, "SSN 123-45-6789")])
+    _, dets = run(v1, "--categories", "ssn")
+    assert [d for d in dets if d["category"] == "ssn"], "control run detects"
+    v2 = make_video(str(tmp_path / "b.mp4"), [(300, "SSN 123-45-6789")])
+    _, dets = run(v2, "--categories", "ssn",
+                  "--ignore-region", "0,0,1,0.6")
+    assert not [d for d in dets if d["category"] == "ssn"], \
+        "text centered inside a normalized ignore region must not detect"

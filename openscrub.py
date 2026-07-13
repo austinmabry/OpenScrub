@@ -34,7 +34,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.18"
+VERSION = "1.0.19"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -787,6 +787,49 @@ def detect_phi(words, lines, t, offset, namer, mrn_re, custom_res=()):
 # ----------------------------------------------------------------------------
 # Scroll tracking
 # ----------------------------------------------------------------------------
+
+def probe_camera_motion(path, max_seconds=15, sample_stride=3):
+    """Screen recording or camera footage? Screen content moves along one
+    axis at a time (scrolling) with long static stretches; handheld camera
+    video drifts continuously on BOTH axes. Scroll tracking, content
+    anchoring, and safety bands are built for the former and misfire badly
+    on the latter (giant fake offsets -> edge bands and displaced boxes).
+    Returns (is_camera, moving_fraction, mixed_axis_fraction)."""
+    cap = cv2.VideoCapture(path)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    limit = int(fps * max_seconds)
+    prev = None
+    win = None
+    moving = mixed = pairs = 0
+    idx = 0
+    while idx < limit:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        if idx % sample_stride == 0:
+            g = cv2.cvtColor(cv2.resize(frame, (320, max(2, int(
+                frame.shape[0] * 320 / frame.shape[1])))),
+                cv2.COLOR_BGR2GRAY).astype(np.float32)
+            if prev is not None and prev.shape == g.shape:
+                if win is None or win.shape != g.shape:
+                    win = cv2.createHanningWindow(g.shape[::-1], cv2.CV_32F)
+                (dx, dy), resp = cv2.phaseCorrelate(prev, g, win)
+                if resp >= 0.08:
+                    pairs += 1
+                    if abs(dx) >= 0.4 or abs(dy) >= 0.4:
+                        moving += 1
+                        if abs(dx) >= 0.4 and abs(dy) >= 0.4:
+                            mixed += 1
+            prev = g
+        idx += 1
+    cap.release()
+    if pairs == 0:
+        return False, 0.0, 0.0
+    mov_f = moving / pairs
+    mix_f = (mixed / moving) if moving else 0.0
+    # camera = most sampled pairs are moving AND that motion is 2-axis
+    return (mov_f > 0.5 and mix_f > 0.5), mov_f, mix_f
+
 
 class ScrollTracker:
     """Estimates cumulative global (dx, dy) content motion via phase
@@ -1579,7 +1622,7 @@ def apply_config(args, parser):
     for key, val in cfg.items():
         dest = key.replace("-", "_")
         if dest == "ignore_regions":
-            args.ignore_regions = [tuple(map(int, r)) for r in (val or [])]
+            args.ignore_regions = [tuple(map(float, r)) for r in (val or [])]
             continue
         if dest == "zones":
             args.zones_data = {c: [tuple(float(v) for v in r) for r in rs]
@@ -1843,6 +1886,13 @@ def build_parser():
                          "risky while blurring the rest. Categories not listed "
                          "use --mode.")
     ap.add_argument("--mrn-regex", default=RE_MRN_DEFAULT)
+    ap.add_argument("--scroll-track", choices=["auto", "on", "off"],
+                    default="auto",
+                    help="screen-scroll tracking + safety bands. 'auto' "
+                         "(default) probes the footage: camera video "
+                         "(continuous 2-axis motion) disables them — "
+                         "detections stay screen-anchored and no unscanned-"
+                         "strip bands are drawn. 'on'/'off' force it.")
     ap.add_argument("--adaptive", choices=["on", "off"], default="on",
                     help="self-tune scan pacing: stretch the sample "
                          "interval while the screen is static, tighten it "
@@ -1908,7 +1958,7 @@ def _prep_args(args, parser):
     regions = []
     for r in (args.ignore_region or []):
         if isinstance(r, str):
-            regions.append(tuple(int(v) for v in r.split(",")))
+            regions.append(tuple(float(v) for v in r.split(",")))
         else:
             regions.append(tuple(r))
     args.ignore_regions = getattr(args, "ignore_regions", []) or regions
@@ -2087,6 +2137,18 @@ def run_scan(args, cb=None):
     vw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     vh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     step = max(1, int(round(fps * args.sample_interval)))
+    # ignore zones ride in the zones file under the "ignore" class:
+    # normalized rects where NOTHING is ever detected or blurred. They are
+    # not a detection category — pop before zone filtering. Normalized
+    # --ignore-region values (all <= 1.0) scale to this video too.
+    if getattr(args, "zones_data", None) and "ignore" in args.zones_data:
+        args.ignore_regions = list(args.ignore_regions or []) + list(
+            args.zones_data.pop("ignore"))
+    if args.ignore_regions:
+        args.ignore_regions = [
+            (r[0] * vw, r[1] * vh, r[2] * vw, r[3] * vh)
+            if max(r) <= 1.0 else tuple(r)
+            for r in args.ignore_regions]
     zones_px = (zones_to_pixels(args.zones_data, vw, vh)
                 if getattr(args, "zones_data", None) else None)
     duration = total / fps if fps else 0
@@ -2101,6 +2163,22 @@ def run_scan(args, cb=None):
         cb.log("      detection zones active: "
                + ", ".join(f"{c} ({len(r)})" for c, r in zones_px.items()))
 
+    scroll_mode = getattr(args, "scroll_track", "auto")
+    track_on = scroll_mode != "off"
+    if scroll_mode == "auto":
+        _cam, _movf, _mixf = probe_camera_motion(args.video)
+        if _cam:
+            track_on = False
+            cb.log("      camera footage detected (continuous 2-axis "
+                   "motion) — scroll tracking and safety bands off; "
+                   "detections are screen-anchored. Force with "
+                   "--scroll-track on if this is actually a screen "
+                   "recording.")
+            # a face that moves across a camera frame must be re-detected
+            # every frame, or merge unions its positions into one huge box
+            args.dense_faces = True
+            cb.log("      camera mode: dense face tracking enabled "
+                   "(re-detect every frame)")
     tracker = ScrollTracker()
     memory = None if args.no_memory else PhiMemory(
         threshold=78 if getattr(args, "paranoid", False) else 82)
@@ -2149,7 +2227,7 @@ def run_scan(args, cb=None):
         ok, frame = cap.read()
         if not ok:
             break
-        cx, cy = tracker.step(frame)
+        cx, cy = tracker.step(frame) if track_on else (0.0, 0.0)
         cum.append((cx, cy))
 
         t_now = idx / fps
@@ -2175,6 +2253,9 @@ def run_scan(args, cb=None):
                 if face_zone_rects is not None and not in_any_zone(
                         (fx1, fy1, fx2, fy2), face_zone_rects):
                     continue
+                if in_ignore_region((fx1, fy1, fx2, fy2),
+                                    args.ignore_regions):
+                    continue
                 raw.append(Detection(
                     t_now, t_now + dense_hold,
                     (int(fx1 - cx), int(fy1 - cy),
@@ -2190,6 +2271,9 @@ def run_scan(args, cb=None):
             for (px1, py1, px2, py2, pconf) in plater.find(frame, detect_scale):
                 if plate_zone_rects is not None and not in_any_zone(
                         (px1, py1, px2, py2), plate_zone_rects):
+                    continue
+                if in_ignore_region((px1, py1, px2, py2),
+                                    args.ignore_regions):
                     continue
                 raw.append(Detection(
                     t_now, t_now + phold,
@@ -2225,7 +2309,10 @@ def run_scan(args, cb=None):
                                custom_res)
             found = [d for d in found if d.category in cats]
 
-            if facer is not None:
+            # in dense mode the frame loop already detects faces on EVERY
+            # frame — adding scan-time copies only feeds merge_detections
+            # unions that balloon across a moving face's path
+            if facer is not None and not dense_faces:
                 for (fx1, fy1, fx2, fy2, conf) in facer.find(frame, detect_scale):
                     found.append(Detection(t, t,
                                            (int(fx1 - cx), int(fy1 - cy),
@@ -2396,7 +2483,8 @@ def run_scan(args, cb=None):
                                   (0, 0, 255), 2)
                 cb.scan_frame(shown, t, len(found))
             cb.progress("scan", idx, total)
-        bands.append((cx - scan_cx, cy - scan_cy))
+        bands.append((cx - scan_cx, cy - scan_cy) if track_on
+                     else (0.0, 0.0))
         if bt_on and face_tracks and not dense_faces:
             t_now2 = idx / fps
             hh, ww = small.shape[:2]

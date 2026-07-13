@@ -138,9 +138,9 @@ Overlapping zones of the same class merge into one shape.</p>
 <script>
 const CATS={name:"#3b82f6",dob:"#22c55e",phone:"#f59e0b",ssn:"#ef4444",
             mrn:"#8b5cf6",email:"#14b8a6",address:"#f97316",card:"#db2777",
-            apikey:"#0891b2",ipaddr:"#65a30d",plate:"#7c3aed",face:"#ec4899"};
+            apikey:"#0891b2",ipaddr:"#65a30d",plate:"#7c3aed",face:"#ec4899",ignore:"#334155"};
 let zones={},active=null,mode="draw",undoStack=[],saveT=null;
-let anchor=null,floatPt=null,dragKind=null,dragIdx=-1,dragOff=null,selIdx=-1;
+let anchor=null,floatPt=null,dragKind=null,dragIdx=-1,dragOff=null,selIdx=-1,beforeDrag=null;
 let natW=1280,natH=720,DUR=10,CURJOB=null,BGMODE="img";
 
 const bg=document.getElementById("bg"),bgv=document.getElementById("bgv"),
@@ -153,7 +153,7 @@ function chips(){
  const el=document.getElementById("chips");
  el.innerHTML=Object.entries(CATS).map(([c,col])=>
   `<div class="chip ${active===c?"active":""}" style="--c:${col}"
-    onclick="setActive('${c}')"><span class="dot"></span>${c}
+    onclick="setActive('${c}')"><span class="dot"></span>${c==="ignore"?"ignore (never blur)":c}
     <span class="n">${(zones[c]||[]).length}</span></div>`).join("")
   +`<div class="chip viewall ${active===null?"active":""}"
     onclick="setActive(null)">👁 view all classes</div>`;
@@ -249,9 +249,9 @@ cv.addEventListener("pointerdown",e=>{
   const rs=zones[active]||[];
   if(selIdx>=0&&rs[selIdx]!==undefined){
    const h=hitHandle(p,rs[selIdx]);
-   if(h>=0){pushUndo();dragKind="handle";dragIdx=h;return;}}
+   if(h>=0){pushUndo();beforeDrag=[...zones[active][selIdx]];dragKind="handle";dragIdx=h;return;}}
   for(let i=rs.length-1;i>=0;i--)
-   if(hitRect(p,rs[i])){selIdx=i;pushUndo();dragKind="move";
+   if(hitRect(p,rs[i])){selIdx=i;pushUndo();beforeDrag=[...rs[i]];dragKind="move";
     const[x1,y1]=rectPx(rs[i]);dragOff=[p[0]-x1,p[1]-y1];draw();return;}
   selIdx=-1;dragKind=null;draw();
  }else{ // draw
@@ -279,7 +279,10 @@ cv.addEventListener("pointermove",e=>{
    if(dragIdx===2){zones[active][selIdx]=[...toNorm(p[0],y1),...toNorm(x2,p[1])];}
    if(dragIdx===3){zones[active][selIdx]=[...toNorm(x1,y1),...toNorm(p[0],p[1])];}
   }
-  normRect(zones[active][selIdx]);draw();save();
+  normRect(zones[active][selIdx]);
+ if(clipToBarriers(zones[active][selIdx],active)===null){
+  zones[active][selIdx]=beforeDrag?[...beforeDrag]:zones[active][selIdx];}
+ draw();save();
  }
 });
 cv.addEventListener("pointerup",e=>{
@@ -288,10 +291,43 @@ cv.addEventListener("pointerup",e=>{
  if(mode==="select"){dragKind=null;}
  downAt=null;
 });
+function rectsHit(a,b){return a[0]<b[2]&&a[2]>b[0]&&a[1]<b[3]&&a[3]>b[1];}
+function barriersFor(cls){
+ let out=[];
+ for(const c in zones){
+  if(cls==="ignore"?c!=="ignore":c==="ignore")out=out.concat(zones[c]||[]);
+ }
+ return out;
+}
+function clipToBarriers(r,cls){
+ /* ignore zones and detection zones may never overlap: the edge of one
+    group is a hard barrier for the other. Shrink the rect along whichever
+    edge loses the least area; null = nothing legal remains. */
+ const bars=barriersFor(cls);
+ for(let guard=0;guard<16;guard++){
+  const hit=bars.find(b=>rectsHit(r,b));
+  if(!hit)return r;
+  const cands=[];
+  if(hit[0]>r[0])cands.push([r[0],r[1],hit[0],r[3]]);
+  if(hit[2]<r[2])cands.push([hit[2],r[1],r[2],r[3]]);
+  if(hit[1]>r[1])cands.push([r[0],r[1],r[2],hit[1]]);
+  if(hit[3]<r[3])cands.push([r[0],hit[3],r[2],r[3]]);
+  const ok=cands.filter(c=>c[2]-c[0]>0.005&&c[3]-c[1]>0.005)
+   .sort((a,b)=>(b[2]-b[0])*(b[3]-b[1])-(a[2]-a[0])*(a[3]-a[1]))[0];
+  if(!ok)return null;
+  r[0]=ok[0];r[1]=ok[1];r[2]=ok[2];r[3]=ok[3];
+ }
+ return r;
+}
 function commitRect(p){
  const r=[...toNorm(anchor[0],anchor[1]),...toNorm(p[0],p[1])];
  anchor=null;floatPt=null;
  normRect(r);
+ if(clipToBarriers(r,active)===null){
+  document.getElementById("modeinfo").textContent=
+   "⚠ blocked — ignore zones and detection zones cannot overlap";
+  setTimeout(chips,1800);draw();return;
+ }
  if((r[2]-r[0])*cv.width<8||(r[3]-r[1])*cv.height<8){draw();return;}
  pushUndo();(zones[active]=zones[active]||[]).push(r);
  chips();draw();save();
