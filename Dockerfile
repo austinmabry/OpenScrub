@@ -15,7 +15,7 @@
 # recreate the container (the in-app updater is disabled in Docker).
 # Notes: CPU OCR/encode only (no CUDA/NVENC). spaCy NER is included.
 
-FROM python:3.12-slim
+FROM python:3.14-slim
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends tesseract-ocr ffmpeg \
