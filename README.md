@@ -207,8 +207,25 @@ zones, and downloaded plate models live in the mounted volume, so the
 container is disposable. Add `--token <secret>` after the image name
 (as `openscrub-web --host 0.0.0.0 --token <secret>`) for access
 control. To update, pull the new tag and recreate the container — the
-in-app updater doesn't apply inside Docker. CPU-only: no NVENC/CUDA,
-and spaCy NER isn't included.
+in-app updater doesn't apply inside Docker. The default image is
+CPU-only and doesn't include spaCy NER.
+
+**NVIDIA GPU build** (`:cuda` / `:<version>-cuda`) — CUDA-accelerated
+PaddleOCR and NVENC hardware encoding:
+
+```
+docker run -d --gpus all -p 8384:8384 \
+  -v openscrub_data:/root/.local/share/OpenScrub \
+  ghcr.io/austinmabry/openscrub:cuda
+```
+
+On **Unraid**: install the Nvidia Driver plugin, add a container with
+repository `ghcr.io/austinmabry/openscrub:cuda`, extra parameter
+`--runtime=nvidia`, port 8384, and map
+`/root/.local/share/OpenScrub` to `/mnt/user/appdata/openscrub`.
+GPU features engage automatically (the OCR engine picks the CUDA build,
+and the render's NVENC test selects hardware encoding). Note the GPU
+image is several GB.
 
 ## Guided installer (Windows / Linux / macOS best-effort)
 

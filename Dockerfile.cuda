@@ -1,0 +1,52 @@
+# OpenScrub server image — NVIDIA GPU build (CUDA OCR via PaddleOCR-GPU,
+# NVENC hardware encoding via ffmpeg). Published on every release as
+# ghcr.io/austinmabry/openscrub:<version>-cuda and :cuda.
+#
+# Unraid (with the Nvidia Driver plugin installed):
+#   Repository:   ghcr.io/austinmabry/openscrub:cuda
+#   Extra Params: --runtime=nvidia
+#   Variables:    NVIDIA_VISIBLE_DEVICES=all   (already set in the image)
+#   Port:         8384 -> 8384
+#   Path:         /root/.local/share/OpenScrub -> /mnt/user/appdata/openscrub
+#
+# Plain docker:
+#   docker run -d --gpus all -p 8384:8384 \
+#     -v openscrub_data:/root/.local/share/OpenScrub \
+#     ghcr.io/austinmabry/openscrub:cuda
+#
+# GPU features light up automatically: the engine's --device auto picks the
+# CUDA PaddleOCR build, and the NVENC test-encode selects h264_nvenc when
+# the driver is exposed (NVIDIA_DRIVER_CAPABILITIES includes "video").
+
+FROM nvidia/cuda:12.6.3-cudnn-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      python3 python3-pip tesseract-ocr ffmpeg \
+ && rm -rf /var/lib/apt/lists/* \
+ && ln -sf /usr/bin/python3 /usr/local/bin/python
+
+WORKDIR /src
+COPY pyproject.toml README.md LICENSE plate_models.json ./
+COPY openscrub.py openscrub_web.py openscrub_setup.py openscrub_update.py \
+     openscrub_vault.py zones_ui.py install.py requirements.txt \
+     test_openscrub.py ./
+COPY assets/openscrub.ico assets/
+RUN pip install --no-cache-dir . cheroot \
+ && pip install --no-cache-dir paddleocr \
+      paddlepaddle-gpu==3.2.2 \
+      -i https://www.paddlepaddle.org.cn/packages/stable/cu126/ \
+      --extra-index-url https://pypi.org/simple \
+ && pip install --no-cache-dir -U nvidia-cudnn-cu12 \
+ && mkdir -p /root/.openscrub/models \
+ && python -c "import urllib.request, openscrub; \
+urllib.request.urlretrieve(openscrub.YUNET_URL, \
+'/root/.openscrub/models/face_detection_yunet_2023mar.onnx')"
+
+EXPOSE 8384
+VOLUME ["/root/.local/share/OpenScrub"]
+CMD ["openscrub-web", "--host", "0.0.0.0"]
