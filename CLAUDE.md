@@ -21,7 +21,7 @@ target is Windows 10 + NVIDIA RTX 3060.
 | `fetch_plate_models.py` | Alt path to fetch plate models via the open-image-models pip package. |
 | `openscrub_update.py` | `openscrub-update` command + web self-update backend: PyPI version check, sha256-verified sdist download, data-preserving folder update (PRESERVE set), TOFU pin carry-forward. Ships in the wheel. |
 | `openscrub_vault.py` | At-rest encryption for the job store: scrypt keystore, chunked AES-256-GCM files (`.osvault`), lock/unlock tree walkers. NO password reset by design. Ships in the wheel. |
-| `test_openscrub.py` | pytest suite (18 tests). Must stay green. |
+| `test_openscrub.py` | pytest suite (21 tests). Must stay green. |
 | `tools/make_icons.py` | Regenerates every icon/logo asset from `assets/badge_master.png`. |
 | `tools/make_wordmark.py` | Regenerates the typeset Poppins wordmarks (navy + white). |
 | `assets/` | Brand assets. `badge_master.png` (canonical, mosaic+brackets style) and `badge_master_blurbox_alt.png` (alternate) are the sources; everything else is generated. |
@@ -61,7 +61,16 @@ Key classes/functions (locate with grep, line numbers drift):
   balloon across a moving face's path). `assign_dense_tracks` groups the
   per-frame dense samples into tracks (`Detection.track`, additive report
   field) so review shows ONE card per physical object with a fan-out
-  toggle (web `TRKMEM`), not hundreds of frames.
+  toggle (web `TRKMEM`), not hundreds of frames. Dense samples keep their
+  sub-frame hold through `merge_detections` — stamping them with the OCR
+  hold left a trail of stale boxes along the motion path (v1.0.21 bug).
+  `smooth_dense_tracks` then makes each track leak-free: interpolates the
+  box across detector-flicker gaps (≤0.75s) so the blur moves WITH the
+  object, template-matches each track's first sample BACKWARD through the
+  file to the object's true first visible frame (closes the onset leak
+  before the detector's first hit), and adds 0.25s grace pads at both
+  ends. Matching happens on 3x3-smoothed half-scale frames — sub-pixel
+  motion decorrelates raw fine texture.
 - Install-location rules: `install_is_readonly()` (site-packages OR
   `sys.frozen`) switches every write path to `user_data_dir()`
   (%LOCALAPPDATA%/OpenScrub or ~/.local/share/OpenScrub): plate-model
@@ -129,7 +138,7 @@ python -c "import ast; ast.parse(open('openscrub.py').read())"   # each edited .
 # PAGE is a normal (non-raw) Python string, so \n in source JS becomes a real
 # newline when served and can break string literals (the v1.0.6 jobs bug):
 #   python -c "import openscrub_web as w, re; open('/tmp/p.js','w').write(re.search(r'<script>(.*)</script>', w.PAGE, re.S).group(1))" && node --check /tmp/p.js
-python -m pytest test_openscrub.py -q                             # 18 tests, all green
+python -m pytest test_openscrub.py -q                             # 21 tests, all green
 python -m build          # FULL build (sdist->wheel), NEVER just `-w`:
                          # the wheel is built FROM the sdist in CI, so any
                          # file the wheel force-includes must be in the

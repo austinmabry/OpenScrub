@@ -369,3 +369,89 @@ def test_ignore_zone_blocks_detection(tmp_path):
                   "--ignore-region", "0,0,1,0.6")
     assert not [d for d in dets if d["category"] == "ssn"], \
         "text centered inside a normalized ignore region must not detect"
+
+
+def test_dense_hold_not_extended_by_merge():
+    """Dense per-frame samples must keep their sub-frame hold through
+    merge_detections: stamping them with the multi-second OCR hold left a
+    trail of stale blur boxes along a moving face's path (v1.0.21 bug)."""
+    d = openscrub.Detection(5.0, 5.01, (100, 100, 160, 160), "face", "face",
+                            0.9, (0, 0), dense=True)
+    merged = openscrub.merge_detections([d], hold=2.3)
+    assert merged[0].t_end <= 5.02, \
+        "dense sample t_end must not be extended by the OCR hold"
+
+
+def test_dense_track_flicker_interpolation():
+    """A short detector flicker inside a dense track is filled by
+    interpolating the box between the surrounding samples: the blur must
+    MOVE with the face across the gap, not vanish or hang at the pre-gap
+    position (the v1.0.21 sideways-trail bug, inverted)."""
+    fps = 30.0
+    speed = 150.0                      # face drifting right, px/s
+    dets = []
+    for i in range(6):                 # samples at 0.00 .. 0.17
+        t = i / fps
+        x = int(speed * t)
+        dets.append(openscrub.Detection(t, t + 0.01, (x, 100, x + 60, 160),
+                                        "face", "face", 0.9, (0, 0),
+                                        dense=True))
+    t2 = 0.6                           # detector missed 0.17 .. 0.60
+    x2 = int(speed * t2)
+    dets.append(openscrub.Detection(t2, t2 + 0.01, (x2, 100, x2 + 60, 160),
+                                    "face", "face", 0.9, (0, 0), dense=True))
+    openscrub.assign_dense_tracks(dets)
+    assert len({d.track for d in dets}) == 1, "one physical face = one track"
+    openscrub.smooth_dense_tracks(dets, fps, video=None)
+    for t in np.arange(0.20, 0.58, 0.02):
+        true_cx = speed * t + 30
+        cover = [d for d in dets if d.t_start - 1e-6 <= t <= d.t_end + 1e-6]
+        assert cover, f"flicker gap not covered at t={t:.2f}"
+        assert any(abs((d.cbox[0] + d.cbox[2]) / 2 - true_cx) < 45
+                   for d in cover), \
+            f"box does not track the moving face at t={t:.2f}"
+
+
+def test_dense_onset_walkback(tmp_path):
+    """The first dense detection of a track is template-matched backward
+    through the file: frames where the object was visible before the
+    detector's first hit must end up covered (the v1.0.21 onset leak),
+    and the walked boxes must follow the object's true positions."""
+    path = str(tmp_path / "onset.mp4")
+    fps = 30
+    rng = np.random.default_rng(7)
+    patch = rng.integers(0, 255, (64, 64, 3)).astype(np.uint8)
+
+    def pos(t):                        # moving right at 120 px/s
+        return int(60 + 120 * t), 140
+
+    appear = 0.5
+    out = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), fps,
+                          (640, 360))
+    for i in range(3 * fps):
+        t = i / fps
+        fr = np.full((360, 640, 3), 200, np.uint8)
+        if t >= appear:
+            x, y = pos(t)
+            fr[y:y + 64, x:x + 64] = patch
+        out.write(fr)
+    out.release()
+
+    t0 = 1.5                           # detector "first fires" a second late
+    x0, y0 = pos(t0)
+    dets = [openscrub.Detection(t0, t0 + 0.01, (x0, y0, x0 + 64, y0 + 64),
+                                "face", "face", 0.9, (0, 0), dense=True)]
+    openscrub.assign_dense_tracks(dets)
+    openscrub.smooth_dense_tracks(dets, fps, path)
+    start = min(d.t_start for d in dets)
+    assert start <= appear + 0.35, \
+        f"walk-back should reach near the true first frame, got {start:.2f}"
+    assert start >= appear - 0.40, \
+        f"must not extend far before the object existed, got {start:.2f}"
+    early = [d for d in dets if appear <= d.t_start < 1.0]
+    assert early, "walk-back should add pre-detection samples"
+    for e in early:
+        true_cx = pos(e.t_start)[0] + 32
+        got_cx = (e.cbox[0] + e.cbox[2]) / 2
+        assert abs(got_cx - true_cx) < 40, \
+            f"walked box off the object at t={e.t_start:.2f}"

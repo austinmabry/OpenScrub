@@ -34,7 +34,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.21"
+VERSION = "1.0.22"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -981,6 +981,157 @@ def assign_dense_tracks(dets, max_gap=0.6, reach=1.6):
     return next_id
 
 
+def smooth_dense_tracks(dets, fps, video, cum=None, win_start=0.0):
+    """Make each dense track leak-free from true first appearance to exit.
+
+    Dense samples are instantaneous per-frame boxes; three gaps remain
+    between them and continuous cover of a moving object:
+      1. detector flicker — frames mid-track where the detector missed the
+         object. The box is INTERPOLATED between the surrounding samples, so
+         the blur moves with the object instead of vanishing (or hanging at
+         a stale position).
+      2. onset — the detector needs a few clear frames before its first hit,
+         exposing the object as it enters. The first sample's pixels are
+         template-matched BACKWARD through the file (the same visual match
+         deep backtrack uses) and synthetic samples are added down to the
+         earliest frame that still matches, plus a short unconditional
+         grace pad below detection threshold.
+      3. exit — mirror grace pad after the last sample.
+    Every addition is a dense sample on the same track id, so review still
+    shows one card per physical object. Fail closed: only ever adds cover.
+    Returns (interpolated_gaps, leadin_samples, leadin_seconds)."""
+    GRACE = 0.25        # s of unconditional pad at track onset/exit
+    CHAIN_MAX = 0.75    # s: longest flicker gap interpolated (matches the
+    #                     assign_dense_tracks max_gap, with slack)
+    LEAD_MAX = 4.0      # s: farthest the onset walk seeks back
+    SCALE = 0.5         # match deep backtrack's working resolution
+    THR = 0.58          # TM_CCOEFF_NORMED bar (same as face backtrack)
+    frame_period = 1.0 / max(fps, 1.0)
+
+    tracks = {}
+    for d in dets:
+        if getattr(d, "dense", False) and getattr(d, "track", -1) >= 0:
+            tracks.setdefault(d.track, []).append(d)
+    if not tracks:
+        return (0, 0, 0.0)
+
+    def _off(t):
+        if not cum:
+            return (0.0, 0.0)
+        return cum[min(int(t * fps), len(cum) - 1)]
+
+    def _screen(d):
+        return (d.cbox[0] + d.aoff[0], d.cbox[1] + d.aoff[1],
+                d.cbox[2] + d.aoff[0], d.cbox[3] + d.aoff[1])
+
+    def _mk(t0, t1, sbox, ref, tid):
+        o = _off(t0)
+        return Detection(t0, t1,
+                         (int(sbox[0] - o[0]), int(sbox[1] - o[1]),
+                          int(sbox[2] - o[0]), int(sbox[3] - o[1])),
+                         ref.category, ref.text, ref.confidence, o,
+                         last_seen=t0, dense=True, track=tid)
+
+    cap = cv2.VideoCapture(video) if video else None
+    if cap is not None and not cap.isOpened():
+        cap = None
+
+    def _gray(t):
+        if cap is None:
+            return None
+        cap.set(cv2.CAP_PROP_POS_MSEC, max(t, 0.0) * 1000)
+        ok, fr = cap.read()
+        if not ok:
+            return None
+        g = cv2.resize(cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY), None,
+                       fx=SCALE, fy=SCALE)
+        # light smoothing before matching: sub-pixel motion at this scale
+        # decorrelates fine texture (measured 1.0 -> 0.48 on a half-pixel
+        # offset), while a smoothed match stays >0.8 present and ~0 absent
+        return cv2.GaussianBlur(g, (3, 3), 0)
+
+    n_gaps, n_lead, lead_s = 0, 0, 0.0
+    added = []
+    for tid, samples in tracks.items():
+        samples.sort(key=lambda d: d.t_start)
+
+        # 1. flicker gaps: chain, and interpolate the box across the gap
+        for a, b in zip(samples, samples[1:]):
+            gap = b.t_start - a.t_start
+            if gap <= frame_period * 1.5:
+                a.t_end = max(a.t_end, b.t_start)
+                continue
+            if gap > CHAIN_MAX:
+                continue        # sustained absence: never bridge blind
+            A, B = _screen(a), _screen(b)
+            steps = min(12, max(1, int(round(gap / (2 * frame_period)))))
+            ts = [a.t_start + gap * i / steps for i in range(steps + 1)]
+            pos = [tuple(A[k] + (B[k] - A[k]) * i / steps for k in range(4))
+                   for i in range(steps + 1)]
+            a.t_end = max(a.t_end, ts[1] if steps > 1 else b.t_start)
+            for i in range(1, steps):
+                # union with the next step's box so movement WITHIN the
+                # step stays covered
+                u = tuple(min(pos[i][k], pos[i + 1][k]) if k < 2 else
+                          max(pos[i][k], pos[i + 1][k]) for k in range(4))
+                added.append(_mk(ts[i], ts[i + 1], u, a, tid))
+            n_gaps += 1
+
+        # 2. onset: template-match the first sample backwards to the
+        # object's true first visible frame
+        first = samples[0]
+        g0 = _gray(first.t_start)
+        walked = first
+        if g0 is not None:
+            sb = _screen(first)
+            x1, y1 = int(sb[0] * SCALE), int(sb[1] * SCALE)
+            x2, y2 = int(sb[2] * SCALE), int(sb[3] * SCALE)
+            gh, gw = g0.shape[:2]
+            x1, y1, x2, y2 = max(0, x1), max(0, y1), min(gw, x2), min(gh, y2)
+            tmpl = g0[y1:y2, x1:x2] if (x2 - x1 >= 8 and y2 - y1 >= 8) else None
+            if tmpl is not None and float(tmpl.std()) > 4:
+                th_, tw_ = tmpl.shape
+                box = list(sb)
+                t = first.t_start
+                step = 2 * frame_period
+                while (first.t_start - t < LEAD_MAX
+                       and t - step >= max(0.0, win_start - 0.01)):
+                    t -= step
+                    g = _gray(t)
+                    if g is None:
+                        break
+                    m = int(max(10, 0.6 * max(tw_, th_)))
+                    rx1 = max(0, int(box[0] * SCALE) - m)
+                    ry1 = max(0, int(box[1] * SCALE) - m)
+                    rx2 = min(g.shape[1], int(box[2] * SCALE) + m)
+                    ry2 = min(g.shape[0], int(box[3] * SCALE) + m)
+                    if rx2 - rx1 < tw_ or ry2 - ry1 < th_:
+                        break   # clipped at the frame edge: object entering
+                    res = cv2.matchTemplate(g[ry1:ry2, rx1:rx2], tmpl,
+                                            cv2.TM_CCOEFF_NORMED)
+                    _, mx, _, loc = cv2.minMaxLoc(res)
+                    if mx < THR:
+                        break   # genuinely not there yet
+                    nx = (rx1 + loc[0]) / SCALE
+                    ny = (ry1 + loc[1]) / SCALE
+                    box = [nx, ny, nx + (sb[2] - sb[0]), ny + (sb[3] - sb[1])]
+                    walked = _mk(t, t + step, tuple(box), first, tid)
+                    added.append(walked)
+                    n_lead += 1
+                    lead_s += step
+
+        # 3. grace pads: cover the sub-threshold sliver at both ends
+        pre = walked.t_start
+        walked.t_start = max(0.0, win_start, walked.t_start - GRACE)
+        lead_s += pre - walked.t_start
+        samples[-1].t_end += GRACE
+
+    if cap is not None:
+        cap.release()
+    dets.extend(added)
+    return (n_gaps, n_lead, lead_s)
+
+
 def merge_detections(dets, hold, scans=None, bridge_gap=4.0, fuzz=None,
                      gap_check=None):
     """Chain detections of the same category whose content boxes overlap.
@@ -1032,7 +1183,13 @@ def merge_detections(dets, hold, scans=None, bridge_gap=4.0, fuzz=None,
 
     for d in dets:
         d.last_seen = d.t_start
-        d.t_end = d.t_start + hold
+        if not getattr(d, "dense", False):
+            # dense samples keep their sub-frame hold: stamping them with the
+            # multi-second OCR hold leaves every PAST position blurred for
+            # `hold` seconds — a trail of stale boxes marching away from a
+            # moving face. Their continuity across detector flicker and the
+            # onset gap is handled per-track by smooth_dense_tracks().
+            d.t_end = d.t_start + hold
         for m in reversed(merged):
             if m.category != d.category or not boxes_overlap(m.cbox, d.cbox):
                 continue
@@ -2752,6 +2909,12 @@ def run_scan(args, cb=None):
         cb.log(f"      dense tracking: {sum(1 for d in detections if d.dense)}"
                f" per-frame samples grouped into {n_tracks} track(s) "
                "for review")
+        n_gaps, n_lead, lead_s = smooth_dense_tracks(
+            detections, fps, args.video, cum=cum, win_start=win_start)
+        if n_gaps or n_lead or lead_s:
+            cb.log(f"      dense continuity: {n_gaps} flicker gap(s) "
+                   f"interpolated; onsets walked back {lead_s:.2f}s total "
+                   f"({n_lead} pre-detection sample(s) matched in the file)")
     if _gap_stats["checked"]:
         cb.log(f"      gap verification: {_gap_stats['checked']} long gap(s) "
                f"checked against the file, {_gap_stats['bridged']} verified "
