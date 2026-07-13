@@ -1037,7 +1037,8 @@ placeholder="e.g. provider or app names to always keep visible&#10;one per line"
 <label style="margin:0"><input type="checkbox" id="usezones" checked> apply detection zones<span class="qm" data-tip="Restricts each category to the zones drawn in the zone editor. Outside a category's zones NOTHING is blurred, even if detected.">?</span></label>
 <label style="margin:0"><input type="checkbox" id="drawscores"> show face scores (preview)<span class="qm" data-tip="In preview mode, labels each face box with its detection confidence so you can pick a good Face threshold for your footage.">?</span></label>
 <label style="margin:0"><input type="checkbox" id="densefaces"> dense faces (every frame)<span class="qm" data-tip="Runs the face detector on EVERY frame instead of at scan intervals, so fast-moving faces stay covered (e.g. someone walking through a webcam feed). Slower to render — pair it with a face detection zone to keep it fast. Leave off for static screens where faces don't move.">?</span></label>
-<button onclick="startJob()">Start scan</button>
+<button id="startbtn" onclick="startJob()">Start scan</button>
+<span id="upstat" style="display:none;font-size:13px;color:#64748b"></span>
 </div>
 </div>
 
@@ -1195,16 +1196,38 @@ function opts(){return{
  dense_faces:densefaces.checked,face_threshold:+fthr.value,
  detect_scale:+dscale.value,draw_scores:drawscores.checked}}
 
-async function startJob(){
+let UPLOADING=false;
+function startJob(){
+ if(UPLOADING)return;                       // double-click guard
+ if(!file.files.length&&!spath.value.trim()){
+  alert("Choose a video file or enter a server path first.");return}
  const fd=new FormData();
- for(const f of file.files) fd.append("video",f);
+ let bytes=0;
+ for(const f of file.files){fd.append("video",f);bytes+=f.size}
  fd.append("server_path",spath.value);
  fd.append("options",JSON.stringify(opts()));
- const r=await fetch("api/jobs",{method:"POST",body:fd});
- const j=await r.json();
- if(j.error){alert(j.error);return}
- file.value="";spath.value="";
- loadJobs(); if(j.jobs.length)openJob(j.jobs[0]);
+ UPLOADING=true;
+ const btn=document.getElementById("startbtn");
+ const ust=document.getElementById("upstat");
+ btn.disabled=true;ust.style.display="inline";
+ ust.textContent=bytes?"uploading… 0%":"submitting…";
+ // XHR instead of fetch: it reports UPLOAD progress, which is the whole
+ // wait when the UI is reached over the internet (upstream-bound)
+ const xhr=new XMLHttpRequest();
+ xhr.open("POST","api/jobs");
+ xhr.upload.onprogress=e=>{if(e.lengthComputable){
+  const p=Math.round(100*e.loaded/e.total);
+  ust.textContent=p<100?`uploading… ${p}%`:"upload received — queuing…"}};
+ const done=()=>{UPLOADING=false;btn.disabled=false;ust.style.display="none"};
+ xhr.onerror=()=>{done();alert("Upload failed — check the connection and try again.")};
+ xhr.onload=()=>{
+  done();
+  let j={};try{j=JSON.parse(xhr.responseText)}catch(e){}
+  if(xhr.status>=400||j.error){alert(j.error||("Upload failed (HTTP "+xhr.status+")"));return}
+  file.value="";spath.value="";
+  loadJobs(); if(j.jobs&&j.jobs.length)openJob(j.jobs[0]);
+ };
+ xhr.send(fd);
 }
 
 async function loadJobs(){
