@@ -34,7 +34,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.13"
+VERSION = "1.0.14"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -2075,6 +2075,9 @@ def run_scan(args, cb=None):
     bt_buf = deque(maxlen=max(3, int(round(fps * bt_win))))
     prev_keys = {}
     bt_count, bt_gain, bt_capped = 0, 0.0, 0
+    bt_deep = []   # regions still visible at the buffer's oldest frame:
+                   # their true onset is found after the scan by seeking
+                   # the file itself (RAM buffer can stay small)
     face_tracks = []   # forward face tracking: detect once, hold every frame
     dense_faces = bool(getattr(args, "dense_faces", False))
     dense_stride = max(1, int(getattr(args, "dense_face_stride", 1) or 1))
@@ -2230,8 +2233,19 @@ def run_scan(args, cb=None):
                     onset = backtrack_onset(d, bt_buf, cx, cy, small, BT_SCALE)
                     if onset is not None:
                         if bt_buf and onset == bt_buf[0][0]:
-                            bt_capped += 1   # visible beyond the buffer:
-                            # gap-bridging (layer 2/3) covers further back
+                            bt_capped += 1   # visible beyond the buffer —
+                            # queue for the post-scan deep backtrack
+                            tx1 = int((d.cbox[0] + cx) * BT_SCALE)
+                            ty1 = int((d.cbox[1] + cy) * BT_SCALE)
+                            tx2 = int((d.cbox[2] + cx) * BT_SCALE)
+                            ty2 = int((d.cbox[3] + cy) * BT_SCALE)
+                            sh_, sw_ = small.shape[:2]
+                            tx1, ty1 = max(0, tx1), max(0, ty1)
+                            tx2, ty2 = min(sw_, tx2), min(sh_, ty2)
+                            if tx2 - tx1 >= 6 and ty2 - ty1 >= 4:
+                                bt_deep.append(
+                                    (d, cx, cy,
+                                     small[ty1:ty2, tx1:tx2].copy()))
                         new_start = max(win_start, onset / fps - 0.12)
                         if new_start < d.t_start - 0.01:
                             bt_count += 1
@@ -2387,6 +2401,78 @@ def run_scan(args, cb=None):
             raw.extend(extra)
     hold = args.sample_interval + 0.3
     from rapidfuzz import fuzz as _fuzz
+    if bt_on and bt_deep:
+        # Deep backtrack: the RAM buffer only reaches --backtrack-window
+        # seconds back, but the video file reaches all the way to frame 0.
+        # For each region still visible at the buffer's edge, seek the file
+        # backwards (exponential probe, then binary search) with the same
+        # visual match the buffered walk uses, until its true first frame
+        # is found. No knobs to raise — it goes as far back as it needs to.
+        cap2 = cv2.VideoCapture(args.video)
+        deep_n, deep_gain = 0, 0.0
+        for d, dcx, dcy, tmpl in bt_deep:
+            if float(tmpl.std()) < 4:
+                continue
+            th_, tw_ = tmpl.shape
+            M = 10
+
+            def _visible(t, d=d, dcx=dcx, dcy=dcy, tmpl=tmpl,
+                         th_=th_, tw_=tw_):
+                cap2.set(cv2.CAP_PROP_POS_MSEC, max(t, 0.0) * 1000)
+                ok, fr = cap2.read()
+                if not ok:
+                    return False
+                sm = cv2.resize(cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY), None,
+                                fx=BT_SCALE, fy=BT_SCALE)
+                sh, sw = sm.shape[:2]
+                bx1 = int((d.cbox[0] + dcx) * BT_SCALE) - M
+                by1 = int((d.cbox[1] + dcy) * BT_SCALE) - M
+                bx2, by2 = bx1 + tw_ + 2 * M, by1 + th_ + 2 * M
+                bx1, by1 = max(0, bx1), max(0, by1)
+                bx2, by2 = min(sw, bx2), min(sh, by2)
+                if bx2 - bx1 < tw_ or by2 - by1 < th_:
+                    return False
+                reg = sm[by1:by2, bx1:bx2]
+                if float(reg.std()) < max(3.0, 0.30 * float(tmpl.std())):
+                    return False
+                return float(cv2.matchTemplate(
+                    reg, tmpl, cv2.TM_CCOEFF_NORMED).max()) >= 0.6
+
+            hi, step, lo, at_start = d.t_start, 1.0, None, False
+            for _ in range(11):          # doubling covers ~34 min of video
+                t = hi - step
+                if t <= win_start + 0.01:
+                    at_start = _visible(win_start)
+                    lo = win_start
+                    break
+                if _visible(t):
+                    hi, step = t, step * 2
+                else:
+                    lo = t
+                    break
+            if lo is None:
+                lo = max(win_start, hi - step)
+            if not at_start:
+                for _ in range(6):       # binary search to ~0.15s
+                    if hi - lo <= 0.15:
+                        break
+                    mid = (lo + hi) / 2
+                    if _visible(mid):
+                        hi = mid
+                    else:
+                        lo = mid
+            new_start = max(win_start,
+                            (win_start if at_start else hi) - 0.12)
+            if new_start < d.t_start - 0.05:
+                deep_n += 1
+                deep_gain += d.t_start - new_start
+                d.t_start = new_start
+        cap2.release()
+        if deep_n:
+            cb.log(f"      deep backtrack: found the true onset of {deep_n} "
+                   f"region(s) beyond the buffer, closing another "
+                   f"{deep_gain:.2f}s of would-be exposure")
+
     detections = merge_detections(raw, hold=hold, scans=scans,
                                   bridge_gap=args.bridge_gap, fuzz=_fuzz)
     zdropped = merge_detections(zdrop_raw, hold=hold, scans=scans,
@@ -2398,10 +2484,11 @@ def run_scan(args, cb=None):
     if bt_count:
         cb.log(f"      backtrack: {bt_count} region(s) start moved earlier "
                f"(avg {bt_gain / bt_count:.2f}s of would-be exposure closed)")
-    if bt_capped:
+    if bt_capped and not bt_deep:
         cb.log(f"      note: {bt_capped} region(s) were visible beyond the "
-               "backtrack buffer — earlier coverage relies on gap bridging "
-               "(raise --bridge-gap if scans of it were sparse)")
+               "backtrack buffer and could not be deep-searched "
+               "(featureless region) — earlier coverage relies on "
+               "gap bridging")
     if zone_dropped:
         cb.log("      *** ZONE WARNING: "
                + ", ".join(f"{c} x{n}" for c, n in sorted(zone_dropped.items()))

@@ -297,3 +297,31 @@ def test_custom_regex_category(tmp_path):
                   "--custom-regex", r"claim=CLM-\d+")
     hits = [d for d in dets if d["category"] == "claim"]
     assert hits, "custom category should appear in the report"
+
+
+def test_deep_backtrack_finds_true_onset(tmp_path):
+    """A region whose first frame lies beyond the RAM backtrack buffer must
+    still get its true onset via the post-scan deep file search — and must
+    not be extended earlier than it actually appeared."""
+    path = str(tmp_path / "late.mp4")
+    fps, seconds, appear_at = 30, 6, 3.0
+    blank = np.full((720, 1280, 3), 245, np.uint8)
+    with_text = blank.copy()
+    cv2.putText(with_text, "SSN 123-45-6789", (60, 300), FONT, 1.1,
+                (20, 20, 20), 2)
+    out = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), fps,
+                          (1280, 720))
+    for i in range(seconds * fps):
+        out.write(with_text if i / fps >= appear_at else blank)
+    out.release()
+
+    _, dets = run(path, "--categories", "ssn",
+                  "--sample-interval", "2.0",
+                  "--backtrack-window", "0.5")
+    ssn = [d for d in dets if d["category"] == "ssn"]
+    assert ssn, "SSN should be detected"
+    start = min(d["t_start"] for d in ssn)
+    assert start <= appear_at + 0.30, \
+        f"deep backtrack should reach the true onset, got {start}"
+    assert start >= appear_at - 1.0, \
+        f"must not extend far before the text existed, got {start}"
