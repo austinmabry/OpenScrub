@@ -953,8 +953,8 @@ padding:8px 12px;font-size:13px}
 <input type="number" id="skipstart" value="0" min="0" step="1"></div>
 <div><label>Skip last (s) — stop before end<span class="qm" data-tip="Detection window end. Nothing in the last N seconds is detected or blurred.">?</span></label>
 <input type="number" id="skipend" value="0" min="0" step="1"></div>
-<div><label>MRN regex<span class="qm" data-tip="Pattern for medical record numbers. Default matches 7 digits starting with 1, or MM followed by 10 digits. Anchors work — punctuation around the number is handled.">?</span></label><input type="text" id="mrnrx"
-value="(^(?:1\\d{6}|MM\\d{10})$)"></div>
+<div><label>MRN regex<span class="qm" data-tip="Pattern for medical record numbers. The default matches standalone 6-10 digit numbers (optional short letter prefix); a match only counts as an MRN when it sits near an MRN/chart/acct label or has 7+ digits. Tighten this to your EMR's exact format for fewer false positives.">?</span></label><input type="text" id="mrnrx"
+value="^[A-Za-z]{0,3}\\d{6,10}$"></div>
 </div>
 <label>Categories<span class="qm" data-tip="Which PHI types the detectors look for. Unchecking a category means it is never blurred.">?</span></label>
 <div class="chk" id="cats"></div>

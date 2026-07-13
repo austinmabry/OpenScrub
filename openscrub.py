@@ -34,7 +34,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.16"
+VERSION = "1.0.17"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -325,7 +325,13 @@ RE_CITYSTATE_NOZIP = re.compile(
 # Standalone ZIP+4 or 5-digit ZIP with a ZIP label nearby is weak on its own;
 # we rely on the specific patterns above to avoid noise.
 
-RE_MRN_DEFAULT = r"(^(?:1\d{6}|MM\d{10})$)"
+# Generic MRN token shape: a standalone 6-10 digit run, optionally with a
+# short letter prefix (chart/system codes). detect_phi additionally requires
+# a nearby MRN/chart/acct label OR 7+ digits before calling it an MRN, so
+# this stays conservative. Sites with a known MRN format should tighten it
+# via --mrn-regex (CLI) or the MRN regex field (web) for fewer false
+# positives — e.g. \b\d{7}\b for an exact-width MRN.
+RE_MRN_DEFAULT = r"^[A-Za-z]{0,3}\d{6,10}$"
 RE_MRN_LABEL = re.compile(r"(?i)\b(mrn|med(?:ical)?\s*rec(?:ord)?|acct|account|chart)\b")
 RE_NAME_LABEL = re.compile(
     r"(?i)\b(patient|name|pt|member|insured|guarantor|subscriber|responsible\s*party)\s*[:#\-]"

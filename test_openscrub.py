@@ -56,13 +56,21 @@ def sharp(path, t, box):
 # ---------------------------------------------------------------- unit tests
 
 def test_mrn_regex_precision():
+    """The default MRN token shape is generic: standalone 6-10 digit runs
+    with an optional short letter prefix. (detect_phi separately requires a
+    nearby MRN/chart/acct label OR 7+ digits before flagging.) Site-specific
+    formats belong in --mrn-regex, never hardcoded as the default."""
     rx = openscrub.RE_MRN_DEFAULT
     import re
     r = re.compile(rx)
-    assert r.search("1234567")
-    assert r.search("MM0123456789")
-    assert not r.search("4829173")          # 7 digits, wrong prefix
-    assert not r.search("123456")           # too short
+    assert r.search("1234567")               # plain 7-digit run
+    assert r.search("MM0123456789")          # letter prefix + digits
+    assert r.search("4829173")               # any 7 digits — no magic prefix
+    assert r.search("123456")                # 6 digits (label-gated upstream)
+    assert not r.search("12345")             # too short
+    assert not r.search("12345678901")       # too long (11+): not MRN-shaped
+    assert not r.search("ABCD123456")        # prefix too long
+    assert not r.search("4111111111111111")  # card-length: left to card/Luhn
 
 
 def test_memory_two_sighting_gate():
