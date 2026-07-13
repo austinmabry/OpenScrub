@@ -455,3 +455,46 @@ def test_dense_onset_walkback(tmp_path):
         got_cx = (e.cbox[0] + e.cbox[2]) / 2
         assert abs(got_cx - true_cx) < 40, \
             f"walked box off the object at t={e.t_start:.2f}"
+
+
+def test_hdr_probe_and_tonemap(tmp_path):
+    """HDR input (PQ transfer / BT.2020 tags) is detected and tone-mapped
+    to tagged SDR BT.709 at intake; SDR input is left untouched."""
+    import shutil as _sh
+    if not (_sh.which("ffmpeg") and _sh.which("ffprobe")):
+        pytest.skip("ffmpeg not available")
+    if not (openscrub._ffmpeg_has("zscale") and openscrub._ffmpeg_has("tonemap")):
+        pytest.skip("ffmpeg lacks zscale/tonemap")
+    hdr = str(tmp_path / "hdr.mp4")
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error",
+                    "-f", "lavfi", "-i", "testsrc2=duration=1:size=320x240:rate=30",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                    "-color_primaries", "bt2020", "-color_trc", "smpte2084",
+                    "-colorspace", "bt2020nc", hdr], check=True)
+    is_hdr, desc = openscrub.probe_hdr(hdr)
+    assert is_hdr and desc == "HDR10/PQ"
+
+    class A:
+        video = hdr
+        output = str(tmp_path / "out.mp4")
+        encoder = "cpu"
+    args = A()
+    openscrub.normalize_vfr(args, openscrub.Callbacks())
+    assert args.video.endswith(".sdr.mp4") and os.path.exists(args.video)
+    assert args.hdr_tonemapped and args.original_video == hdr
+    again, _ = openscrub.probe_hdr(args.video)
+    assert not again, "normalized file must probe as SDR"
+
+    sdr = str(tmp_path / "sdr.mp4")
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error",
+                    "-f", "lavfi", "-i", "testsrc2=duration=1:size=320x240:rate=30",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", sdr], check=True)
+    assert openscrub.probe_hdr(sdr) == (False, None)
+
+    class B:
+        video = sdr
+        output = str(tmp_path / "out2.mp4")
+        encoder = "cpu"
+    args2 = B()
+    openscrub.normalize_vfr(args2, openscrub.Callbacks())
+    assert args2.video == sdr, "CFR SDR input must be a no-op"

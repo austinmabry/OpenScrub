@@ -1893,6 +1893,7 @@ def write_report(path, args, state, output_path=None):
         "original_input": (os.path.abspath(args.original_video)
                            if getattr(args, "original_video", None) else None),
         "vfr_normalized": bool(getattr(args, "original_video", None)),
+        "hdr_tonemapped": bool(getattr(args, "hdr_tonemapped", False)),
         "zones": getattr(args, "zones_data", None),
         "settings": _settings_dict(args),
     }
@@ -1978,21 +1979,84 @@ def probe_vfr(path):
     return abs(r - avg) / max(r, avg) > 0.005, avg
 
 
+def probe_hdr(path):
+    """-> (is_hdr, desc). HDR when the first video stream signals a PQ or
+    HLG transfer function, or BT.2020 primaries on a 10-bit format (what
+    iPhone HDR / Dolby Vision clips carry after demux)."""
+    if not shutil.which("ffprobe"):
+        return False, None
+    try:
+        p = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
+                            "-show_entries",
+                            "stream=color_transfer,color_primaries,pix_fmt",
+                            "-of", "json", path],
+                           capture_output=True, text=True, timeout=30)
+        if p.returncode != 0 or not p.stdout:
+            return False, None
+        st = json.loads(p.stdout)["streams"][0]
+    except Exception:
+        return False, None
+    trc = (st.get("color_transfer") or "").lower()
+    prim = (st.get("color_primaries") or "").lower()
+    if trc == "smpte2084":
+        return True, "HDR10/PQ"
+    if trc == "arib-std-b67":
+        return True, "HLG"
+    if prim == "bt2020" and "10" in (st.get("pix_fmt") or ""):
+        return True, "BT.2020 10-bit"
+    return False, None
+
+
+_FILTER_CACHE = {}
+
+
+def _ffmpeg_has(filter_name):
+    if filter_name not in _FILTER_CACHE:
+        try:
+            p = subprocess.run(["ffmpeg", "-hide_banner", "-filters"],
+                               capture_output=True, text=True, timeout=30)
+            _FILTER_CACHE[filter_name] = f" {filter_name} " in p.stdout
+        except Exception:
+            _FILTER_CACHE[filter_name] = False
+    return _FILTER_CACHE[filter_name]
+
+
+# proper PQ/HLG -> BT.709 tone mapping (linearize, gamut-map, hable curve),
+# instead of the flat washed-out colors a naive 8-bit decode produces
+_TONEMAP_VF = ("zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,"
+               "tonemap=tonemap=hable:desat=0,"
+               "zscale=t=bt709:m=bt709:r=tv,format=yuv420p")
+
+
 def normalize_vfr(args, cb):
-    """If input is VFR, transcode to CFR next to the output and point
-    args.video at it. Reuses NVENC when available. No-op for CFR input."""
+    """Intake normalization, one ffmpeg pass: VFR input is transcoded to
+    CFR (frame->time mapping assumes CFR), HDR input is tone-mapped to SDR
+    BT.709 (the 8-bit pipeline can't carry HDR, and decoding it naively
+    washes the colors out). Reuses NVENC when available. No-op for
+    CFR SDR input."""
     if getattr(args, "no_vfr_fix", False) or getattr(args, "vfr", "auto") == "ignore":
         return
     is_vfr, avg = probe_vfr(args.video)
-    if not is_vfr:
+    is_hdr, hdesc = probe_hdr(args.video)
+    if is_hdr and not (_ffmpeg_has("zscale") and _ffmpeg_has("tonemap")):
+        cb.log(f"      NOTE: input looks HDR ({hdesc}) but this ffmpeg build "
+               "lacks the zscale/tonemap filters — processing without tone "
+               "mapping; colors may look washed out in the output.")
+        is_hdr = False
+    if not is_vfr and not is_hdr:
         return
     target = int(round(avg)) if avg and 10 <= avg <= 120 else 30
     out_ref = args.output or os.path.splitext(args.video)[0] + "_redacted.mp4"
     fixed = os.path.join(os.path.dirname(os.path.abspath(out_ref)),
                          os.path.splitext(os.path.basename(args.video))[0]
-                         + ".cfr.mp4")
-    cb.log(f"      input is VFR (avg {avg:.2f} fps) — normalizing to CFR "
-           f"{target} fps first")
+                         + (".cfr.mp4" if is_vfr else ".sdr.mp4"))
+    if is_vfr:
+        cb.log(f"      input is VFR (avg {avg:.2f} fps) — normalizing to CFR "
+               f"{target} fps first")
+    if is_hdr:
+        cb.log(f"      input is {hdesc} HDR — tone-mapping to SDR (BT.709) "
+               "for processing: colors are converted properly, but the "
+               "output is SDR (true HDR output is not yet supported)")
     if (os.path.exists(fixed)
             and os.path.getmtime(fixed) > os.path.getmtime(args.video)):
         cb.log(f"      reusing existing {os.path.basename(fixed)}")
@@ -2001,18 +2065,24 @@ def normalize_vfr(args, cb):
         vargs = (["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "18"]
                  if codec == "h264_nvenc"
                  else ["-c:v", "libx264", "-crf", "18", "-preset", "fast"])
-        for fpsflag in ("-fps_mode", "-vsync"):
+        tmargs = (["-vf", _TONEMAP_VF, "-color_primaries", "bt709",
+                   "-color_trc", "bt709", "-colorspace", "bt709"]
+                  if is_hdr else [])
+        attempts = ([["-fps_mode", "cfr", "-r", str(target)],
+                     ["-vsync", "cfr", "-r", str(target)]] if is_vfr
+                    else [[]])
+        for cfrargs in attempts:
             p = subprocess.run(["ffmpeg", "-y", "-loglevel", "error",
-                                "-i", args.video, fpsflag, "cfr",
-                                "-r", str(target), *vargs,
+                                "-i", args.video, *cfrargs, *tmargs, *vargs,
                                 "-pix_fmt", "yuv420p", "-c:a", "copy", fixed],
                                capture_output=True, text=True)
             if p.returncode == 0:
                 break
         else:
-            raise RuntimeError("VFR normalization failed: "
+            raise RuntimeError("input normalization failed: "
                                + (p.stderr or "").strip()[-300:])
     args.original_video = args.video
+    args.hdr_tonemapped = bool(is_hdr)
     args.video = fixed
 
 
