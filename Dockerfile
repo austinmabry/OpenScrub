@@ -13,8 +13,7 @@
 # Data (jobs, certs, zones, models, vault) lives in the mounted volume —
 # the container itself is disposable. To update: pull the new tag and
 # recreate the container (the in-app updater is disabled in Docker).
-# Notes: CPU OCR/encode only (no CUDA/NVENC); spaCy NER not included —
-# see the README's pip instructions if you need it.
+# Notes: CPU OCR/encode only (no CUDA/NVENC). spaCy NER is included.
 
 FROM python:3.12-slim
 
@@ -30,6 +29,9 @@ COPY openscrub.py openscrub_web.py openscrub_setup.py openscrub_update.py \
 COPY assets/openscrub.ico assets/
 RUN pip install --no-cache-dir . \
  && pip install --no-cache-dir cheroot \
+ # spaCy NER for name detection, baked in with its model
+ && pip install --no-cache-dir spacy \
+ && python -m spacy download en_core_web_sm \
  # pre-fetch the YuNet face model so first run works offline
  && mkdir -p /root/.openscrub/models \
  && python -c "import urllib.request, openscrub; \

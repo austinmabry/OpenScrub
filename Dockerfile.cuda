@@ -42,6 +42,8 @@ RUN pip install --no-cache-dir . cheroot \
       -i https://www.paddlepaddle.org.cn/packages/stable/cu126/ \
       --extra-index-url https://pypi.org/simple \
  && pip install --no-cache-dir -U nvidia-cudnn-cu12 \
+ && pip install --no-cache-dir spacy \
+ && python -m spacy download en_core_web_sm \
  && mkdir -p /root/.openscrub/models \
  && python -c "import urllib.request, openscrub; \
 urllib.request.urlretrieve(openscrub.YUNET_URL, \

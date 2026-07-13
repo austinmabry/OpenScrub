@@ -207,8 +207,9 @@ zones, and downloaded plate models live in the mounted volume, so the
 container is disposable. Add `--token <secret>` after the image name
 (as `openscrub-web --host 0.0.0.0 --token <secret>`) for access
 control. To update, pull the new tag and recreate the container — the
-in-app updater doesn't apply inside Docker. The default image is
-CPU-only and doesn't include spaCy NER.
+in-app updater doesn't apply inside Docker. Both images include
+spaCy NER (name detection) out of the box; the default image is
+CPU-only.
 
 **NVIDIA GPU build** (`:cuda` / `:<version>-cuda`) — CUDA-accelerated
 PaddleOCR and NVENC hardware encoding:
