@@ -106,7 +106,46 @@ faces are stationary or scroll with the page rather than moving rapidly
 across the frame. In all cases this is a **best-effort assistive tool:
 review the output before publishing.**
 
-## Install from PyPI (quickest)
+## Install with Docker (recommended)
+
+The most complete OpenScrub install: Tesseract, FFmpeg, spaCy NER, and
+the face model are all preinstalled — nothing to set up, and updates are
+a `docker pull` away. Every release publishes a CPU server image to
+GitHub Container Registry:
+
+```
+docker run -d -p 8384:8384 \
+  -v openscrub_data:/root/.local/share/OpenScrub \
+  ghcr.io/austinmabry/openscrub:latest
+```
+
+Tesseract, FFmpeg, and the face model are baked in; jobs, certificates,
+zones, and downloaded plate models live in the mounted volume, so the
+container is disposable. Add `--token <secret>` after the image name
+(as `openscrub-web --host 0.0.0.0 --token <secret>`) for access
+control. To update, pull the new tag and recreate the container — the
+in-app updater doesn't apply inside Docker. Both images include
+spaCy NER (name detection) out of the box; the default image is
+CPU-only.
+
+**NVIDIA GPU build** (`:cuda` / `:<version>-cuda`) — CUDA-accelerated
+PaddleOCR and NVENC hardware encoding:
+
+```
+docker run -d --gpus all -p 8384:8384 \
+  -v openscrub_data:/root/.local/share/OpenScrub \
+  ghcr.io/austinmabry/openscrub:cuda
+```
+
+On **Unraid**: install the Nvidia Driver plugin, add a container with
+repository `ghcr.io/austinmabry/openscrub:cuda`, extra parameter
+`--runtime=nvidia`, port 8384, and map
+`/root/.local/share/OpenScrub` to `/mnt/user/appdata/openscrub`.
+GPU features engage automatically (the OCR engine picks the CUDA build,
+and the render's NVENC test selects hardware encoding). Note the GPU
+image is several GB.
+
+## Install from PyPI
 
 ```
 pip install OpenScrub
@@ -191,42 +230,6 @@ heuristics (spaCy NER is a pip-only extra).
 If you stay with pip instead, `openscrub-setup` on Windows now offers to
 create Start Menu + Desktop shortcuts for OpenScrub Web, so you never
 have to hunt for pip's `Scripts` folder.
-
-### Docker (Linux servers / homelab)
-
-Every release publishes a CPU server image to GitHub Container Registry:
-
-```
-docker run -d -p 8384:8384 \
-  -v openscrub_data:/root/.local/share/OpenScrub \
-  ghcr.io/austinmabry/openscrub:latest
-```
-
-Tesseract, FFmpeg, and the face model are baked in; jobs, certificates,
-zones, and downloaded plate models live in the mounted volume, so the
-container is disposable. Add `--token <secret>` after the image name
-(as `openscrub-web --host 0.0.0.0 --token <secret>`) for access
-control. To update, pull the new tag and recreate the container — the
-in-app updater doesn't apply inside Docker. Both images include
-spaCy NER (name detection) out of the box; the default image is
-CPU-only.
-
-**NVIDIA GPU build** (`:cuda` / `:<version>-cuda`) — CUDA-accelerated
-PaddleOCR and NVENC hardware encoding:
-
-```
-docker run -d --gpus all -p 8384:8384 \
-  -v openscrub_data:/root/.local/share/OpenScrub \
-  ghcr.io/austinmabry/openscrub:cuda
-```
-
-On **Unraid**: install the Nvidia Driver plugin, add a container with
-repository `ghcr.io/austinmabry/openscrub:cuda`, extra parameter
-`--runtime=nvidia`, port 8384, and map
-`/root/.local/share/OpenScrub` to `/mnt/user/appdata/openscrub`.
-GPU features engage automatically (the OCR engine picks the CUDA build,
-and the render's NVENC test selects hardware encoding). Note the GPU
-image is several GB.
 
 ## Guided installer (Windows / Linux / macOS best-effort)
 

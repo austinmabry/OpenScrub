@@ -11,7 +11,8 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to build (e.g. v1.0.16)"
+        description: "Version label for the images (e.g. v1.0.17). Manual
+          runs build with the Dockerfiles of the branch you dispatch on."
         required: true
 
 jobs:
@@ -22,8 +23,6 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
 
       - name: Compute tags
         id: meta
@@ -52,8 +51,6 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
 
       - name: Free runner disk (CUDA image is large)
         run: |
