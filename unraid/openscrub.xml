@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>OpenScrub</Name>
+  <Repository>ghcr.io/austinmabry/openscrub:latest</Repository>
+  <Registry>https://github.com/austinmabry/OpenScrub/pkgs/container/openscrub</Registry>
+  <Network>bridge</Network>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/austinmabry/OpenScrub/issues</Support>
+  <Project>https://github.com/austinmabry/OpenScrub</Project>
+  <Overview>Local video redaction with human review — nothing leaves your server. Detects and blurs faces and any on-screen text (names, SSNs, phones, emails, addresses, card numbers, license plates, custom regex categories) in videos and screen recordings. OCR-driven with scroll tracking for screen captures and automatic camera-footage handling; review every detection in the web UI before rendering; optional at-rest encryption of the job store; audit reports with SHA-256 provenance. This is the CPU image — for NVIDIA-accelerated OCR and NVENC encoding install the OpenScrub-CUDA template instead. Best-effort redaction: always review output before sharing.</Overview>
+  <Category>MediaApp:Video Productivity: Security:</Category>
+  <WebUI>https://[IP]:[PORT:8384]/</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/austinmabry/OpenScrub/main/unraid/openscrub.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/austinmabry/OpenScrub/main/assets/icon-256.png</Icon>
+  <DonateText/>
+  <DonateLink/>
+  <Config Name="WebUI port" Target="8384" Default="8384" Mode="tcp" Description="HTTPS web interface (self-signed certificate — your browser warns once, or install your own cert in App settings)" Type="Port" Display="always" Required="true" Mask="false">8384</Config>
+  <Config Name="Data" Target="/root/.local/share/OpenScrub" Default="/mnt/user/appdata/openscrub" Mode="rw" Description="Jobs (contains the sensitive uploads and reports!), certificates, zones, downloaded models, encryption vault. Everything OpenScrub stores lives here — the container itself is disposable." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/openscrub</Config>
+  <Config Name="Access token (optional)" Target="OPENSCRUB_TOKEN" Default="" Mode="" Description="Leave empty for open access on your LAN, or set a secret to require it on every request (recommended if others use your network). The WebUI URL becomes https://ip:8384/?token=SECRET on first visit." Type="Variable" Display="always" Required="false" Mask="true"/>
+</Container>

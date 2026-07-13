@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>OpenScrub-CUDA</Name>
+  <Repository>ghcr.io/austinmabry/openscrub:cuda</Repository>
+  <Registry>https://github.com/austinmabry/OpenScrub/pkgs/container/openscrub</Registry>
+  <Network>bridge</Network>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/austinmabry/OpenScrub/issues</Support>
+  <Project>https://github.com/austinmabry/OpenScrub</Project>
+  <Overview>Local video redaction with human review — NVIDIA GPU build with CUDA-accelerated OCR (PaddleOCR-GPU) and NVENC hardware encoding. Detects and blurs faces and any on-screen text (names, SSNs, phones, emails, addresses, card numbers, license plates, custom regex categories) in videos and screen recordings; review every detection in the web UI before rendering; optional at-rest encryption; audit reports with SHA-256 provenance. REQUIRES the Nvidia Driver plugin and an NVIDIA GPU; if the GPU is unavailable the app falls back to CPU automatically. Best-effort redaction: always review output before sharing.</Overview>
+  <Category>MediaApp:Video Productivity: Security:</Category>
+  <WebUI>https://[IP]:[PORT:8384]/</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/austinmabry/OpenScrub/main/unraid/openscrub-cuda.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/austinmabry/OpenScrub/main/assets/icon-256.png</Icon>
+  <ExtraParams>--runtime=nvidia</ExtraParams>
+  <Requires>Nvidia Driver plugin (Apps tab) and an NVIDIA GPU.</Requires>
+  <DonateText/>
+  <DonateLink/>
+  <Config Name="WebUI port" Target="8384" Default="8384" Mode="tcp" Description="HTTPS web interface (self-signed certificate — your browser warns once, or install your own cert in App settings)" Type="Port" Display="always" Required="true" Mask="false">8384</Config>
+  <Config Name="Data" Target="/root/.local/share/OpenScrub" Default="/mnt/user/appdata/openscrub" Mode="rw" Description="Jobs (contains the sensitive uploads and reports!), certificates, zones, downloaded models, encryption vault. Everything OpenScrub stores lives here — the container itself is disposable." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/openscrub</Config>
+  <Config Name="NVIDIA_VISIBLE_DEVICES" Target="NVIDIA_VISIBLE_DEVICES" Default="all" Mode="" Description="GPU(s) to expose. 'all', or a specific GPU UUID from the Nvidia Driver plugin page." Type="Variable" Display="always" Required="true" Mask="false">all</Config>
+  <Config Name="NVIDIA_DRIVER_CAPABILITIES" Target="NVIDIA_DRIVER_CAPABILITIES" Default="compute,utility,video" Mode="" Description="Leave as-is: 'video' is required for NVENC hardware encoding." Type="Variable" Display="advanced" Required="true" Mask="false">compute,utility,video</Config>
+  <Config Name="Access token (optional)" Target="OPENSCRUB_TOKEN" Default="" Mode="" Description="Leave empty for open access on your LAN, or set a secret to require it on every request (recommended if others use your network). The WebUI URL becomes https://ip:8384/?token=SECRET on first visit." Type="Variable" Display="always" Required="false" Mask="true"/>
+</Container>

@@ -788,25 +788,29 @@ def detect_phi(words, lines, t, offset, namer, mrn_re, custom_res=()):
 # Scroll tracking
 # ----------------------------------------------------------------------------
 
-def probe_camera_motion(path, max_seconds=15, sample_stride=3):
+def probe_camera_motion(path, sample_windows=14, pairs_per_window=4):
     """Screen recording or camera footage? Screen content moves along one
     axis at a time (scrolling) with long static stretches; handheld camera
     video drifts continuously on BOTH axes. Scroll tracking, content
     anchoring, and safety bands are built for the former and misfire badly
     on the latter (giant fake offsets -> edge bands and displaced boxes).
+
+    Samples short windows spread across the WHOLE duration (not just the
+    start), so tripod-then-pan footage is still recognized as camera.
     Returns (is_camera, moving_fraction, mixed_axis_fraction)."""
     cap = cv2.VideoCapture(path)
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    limit = int(fps * max_seconds)
-    prev = None
-    win = None
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
     moving = mixed = pairs = 0
-    idx = 0
-    while idx < limit:
-        ok, frame = cap.read()
-        if not ok:
-            break
-        if idx % sample_stride == 0:
+    win = None
+    positions = ([int(total * i / sample_windows) for i in range(sample_windows)]
+                 if total > sample_windows * (pairs_per_window + 1) else [0])
+    for pos in positions:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, pos)
+        prev = None
+        for _ in range(pairs_per_window + 1):
+            ok, frame = cap.read()
+            if not ok:
+                break
             g = cv2.cvtColor(cv2.resize(frame, (320, max(2, int(
                 frame.shape[0] * 320 / frame.shape[1])))),
                 cv2.COLOR_BGR2GRAY).astype(np.float32)
@@ -821,14 +825,16 @@ def probe_camera_motion(path, max_seconds=15, sample_stride=3):
                         if abs(dx) >= 0.4 and abs(dy) >= 0.4:
                             mixed += 1
             prev = g
-        idx += 1
     cap.release()
     if pairs == 0:
         return False, 0.0, 0.0
     mov_f = moving / pairs
     mix_f = (mixed / moving) if moving else 0.0
-    # camera = most sampled pairs are moving AND that motion is 2-axis
-    return (mov_f > 0.5 and mix_f > 0.5), mov_f, mix_f
+    # camera = a solid share of sampled pairs move, and that motion is
+    # 2-axis. A perfectly static camera scores like a static screen —
+    # which is fine: zero motion means zero offsets and zero bands, so
+    # screen mode is harmless there.
+    return (mov_f > 0.35 and mix_f > 0.5), mov_f, mix_f
 
 
 class ScrollTracker:

@@ -2431,7 +2431,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8384)
     ap.add_argument("--host", default="0.0.0.0")
-    ap.add_argument("--token", help="require this access token on every "
+    ap.add_argument("--token",
+                    default=os.environ.get("OPENSCRUB_TOKEN") or None,
+                    help="require this access token on every "
                     "request (default: open — anyone on the network can use "
                     "the server)")
     ap.add_argument("--http", action="store_true",
