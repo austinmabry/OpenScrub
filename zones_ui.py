@@ -58,6 +58,22 @@ label{display:block;margin:8px 0 3px;font-size:12.5px;color:var(--mut)}
 #bg,#cv{display:block;max-width:100%}
 #cv{position:absolute;left:0;top:0;touch-action:none}
 #coords{font:12px ui-monospace,Consolas,monospace;color:#93c5fd;min-width:210px}
+#tl{display:flex;align-items:center;gap:10px;padding:2px 4px;user-select:none}
+.tltime{font:12px ui-monospace,Consolas,monospace;color:#cbd5e1;min-width:44px;text-align:center}
+#tltrack{position:relative;flex:1;height:22px;cursor:pointer}
+#tltrack::before{content:"";position:absolute;left:0;right:0;top:8px;height:6px;
+ border-radius:3px;background:#334155}
+#tlticks{position:absolute;left:0;right:0;top:8px;height:6px}
+.tick{position:absolute;top:0;width:1px;height:6px;background:rgba(255,255,255,.18)}
+#tlfill{position:absolute;left:0;top:8px;height:6px;border-radius:3px;
+ background:linear-gradient(90deg,#3b82f6,#60a5fa);width:0}
+#tlhead{position:absolute;top:3px;width:16px;height:16px;border-radius:50%;
+ background:#fff;border:3px solid #3b82f6;box-shadow:0 1px 6px rgba(0,0,0,.5);
+ margin-left:-8px;left:0}
+#tlbub{position:absolute;bottom:26px;transform:translateX(-50%);background:#0f172a;
+ color:#e2e8f0;font:11px ui-monospace,monospace;padding:3px 7px;border-radius:6px;
+ display:none;white-space:nowrap;border:1px solid #334155}
+#tl.off{opacity:.35;pointer-events:none}
 .hint{font-size:12px;color:#94a3b8}
 kbd{background:#334155;color:#e2e8f0;border-radius:4px;padding:0 5px;
  font:11px ui-monospace,monospace}
@@ -93,9 +109,7 @@ coordinates and apply to <b>all</b> jobs while enabled.</div>
 <input type="file" id="localvid" accept="video/*" onchange="loadLocal()">
 <label>…or a frame from an uploaded job (any phase)</label>
 <select id="jobsel" onchange="pickJob()"></select>
-<label>Scrub to the layout you want to trace</label>
-<input type="range" id="tslide" min="0" max="10" step="0.2" value="0"
- oninput="scrub()" disabled>
+<input type="hidden" id="tslide" min="0" max="10" value="0" disabled>
 <label>…or a reference screenshot</label>
 <input type="file" id="refimg" accept="image/*" onchange="loadRef()">
 <p class="hint" style="margin-top:12px">
@@ -114,6 +128,10 @@ Overlapping zones of the same class merge into one shape.</p>
 </div>
 <div id="cwrap"><img id="bg"><video id="bgv" muted playsinline
  style="display:none"></video><canvas id="cv"></canvas></div>
+<div id="tl" class="off"><span class="tltime" id="tlcur">0:00</span>
+ <div id="tltrack"><div id="tlticks"></div><div id="tlfill"></div>
+  <div id="tlhead"></div><div id="tlbub">0:00</div></div>
+ <span class="tltime" id="tldur">0:00</span></div>
 <div class="stagebar"><span class="hint" id="reshint"></span></div>
 </div>
 </main>
@@ -327,7 +345,7 @@ bgv.addEventListener("loadedmetadata",()=>{
  setBgMode("video");natW=bgv.videoWidth;natH=bgv.videoHeight;
  DUR=bgv.duration||10;
  const sl=document.getElementById("tslide");
- sl.max=Math.max(0.5,DUR-0.1).toFixed(1);sl.value=0;sl.disabled=false;
+ sl.max=Math.max(0.5,DUR-0.1).toFixed(1);sl.value=0;sl.disabled=false;tlSync();
  requestAnimationFrame(fitCanvas);
 });
 bgv.addEventListener("loadeddata",fitCanvas);
@@ -362,13 +380,53 @@ async function jobs(){
 async function pickJob(){
  CURJOB=document.getElementById("jobsel").value||null;
  const sl=document.getElementById("tslide");
- if(!CURJOB){sl.disabled=true;setBgMode("img");gridBg();return;}
+ if(!CURJOB){sl.disabled=true;tlSync();setBgMode("img");gridBg();return;}
  const d=await (await fetch(`api/jobs/${CURJOB}/mediainfo`)).json();
  DUR=d.duration;natW=d.width;natH=d.height;
  sl.max=Math.max(0.5,DUR-0.2).toFixed(1);sl.disabled=false;
  scrub();
 }
+const tltrack=document.getElementById("tltrack"),tlfill=document.getElementById("tlfill"),
+      tlhead=document.getElementById("tlhead"),tlbub=document.getElementById("tlbub"),
+      tlcur=document.getElementById("tlcur"),tldur=document.getElementById("tldur"),
+      tlbox=document.getElementById("tl");
+function tfmt(t){t=Math.max(0,+t||0);const m=Math.floor(t/60),s=Math.floor(t%60);
+ return m+":"+String(s).padStart(2,"0");}
+let tlThrottle=null,tlDrag=false;
+function tlSync(){
+ const sl=document.getElementById("tslide");
+ tlbox.classList.toggle("off",sl.disabled);
+ const mx=+sl.max||10,v=+sl.value||0,f=Math.min(1,v/mx);
+ tlfill.style.width=(f*100)+"%";tlhead.style.left=(f*100)+"%";
+ tlcur.textContent=tfmt(v);tldur.textContent=tfmt(mx);
+ const tk=document.getElementById("tlticks");
+ if(tk.childElementCount!==9){tk.innerHTML="";for(let i=1;i<10;i++){
+  const d=document.createElement("div");d.className="tick";
+  d.style.left=(i*10)+"%";tk.appendChild(d);}}
+}
+function tlSeek(ev,final){
+ const sl=document.getElementById("tslide");
+ if(sl.disabled)return;
+ const r=tltrack.getBoundingClientRect();
+ const f=Math.min(1,Math.max(0,(ev.clientX-r.left)/r.width));
+ sl.value=(f*(+sl.max||10)).toFixed(2);
+ tlSync();
+ if(final){clearTimeout(tlThrottle);tlThrottle=null;scrub();}
+ else if(!tlThrottle)tlThrottle=setTimeout(()=>{tlThrottle=null;scrub();},160);
+}
+tltrack.addEventListener("pointerdown",e=>{tlDrag=true;
+ tltrack.setPointerCapture(e.pointerId);tlSeek(e,false);});
+tltrack.addEventListener("pointermove",e=>{
+ const sl=document.getElementById("tslide");
+ const r=tltrack.getBoundingClientRect();
+ const f=Math.min(1,Math.max(0,(e.clientX-r.left)/r.width));
+ tlbub.style.left=(f*100)+"%";tlbub.textContent=tfmt(f*(+sl.max||10));
+ if(!sl.disabled)tlbub.style.display="block";
+ if(tlDrag)tlSeek(e,false);});
+tltrack.addEventListener("pointerup",e=>{tlDrag=false;tlSeek(e,true);});
+tltrack.addEventListener("pointerleave",()=>{tlbub.style.display="none";});
 function scrub(){
+ tlSync();
  const t=document.getElementById("tslide").value;
  if(BGMODE==="video"&&!CURJOB){bgv.currentTime=+t;return;}
  if(!CURJOB)return;
@@ -376,5 +434,5 @@ function scrub(){
  bg.src=`api/jobs/${CURJOB}/frame_at?t=${t}`;
 }
 
-gridBg();chips();load();jobs();setMode('draw');
+gridBg();chips();load();jobs();setMode('draw');tlSync();
 </script></body></html>"""

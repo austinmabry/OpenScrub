@@ -1,0 +1,41 @@
+# OpenScrub server image (CPU). Built and pushed to GitHub Container
+# Registry automatically on every release (.github/workflows/docker-image.yml):
+#
+#     docker run -d -p 8384:8384 \
+#       -v openscrub_data:/root/.local/share/OpenScrub \
+#       ghcr.io/austinmabry/openscrub:latest
+#
+# then open https://<host>:8384/ (self-signed cert; add --token via the
+# command below for access control):
+#     docker run ... ghcr.io/austinmabry/openscrub:latest \
+#       openscrub-web --host 0.0.0.0 --token mysecret
+#
+# Data (jobs, certs, zones, models, vault) lives in the mounted volume —
+# the container itself is disposable. To update: pull the new tag and
+# recreate the container (the in-app updater is disabled in Docker).
+# Notes: CPU OCR/encode only (no CUDA/NVENC); spaCy NER not included —
+# see the README's pip instructions if you need it.
+
+FROM python:3.12-slim
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends tesseract-ocr ffmpeg \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY pyproject.toml README.md LICENSE plate_models.json ./
+COPY openscrub.py openscrub_web.py openscrub_setup.py openscrub_update.py \
+     openscrub_vault.py zones_ui.py install.py requirements.txt \
+     test_openscrub.py ./
+COPY assets/openscrub.ico assets/
+RUN pip install --no-cache-dir . \
+ && pip install --no-cache-dir cheroot \
+ # pre-fetch the YuNet face model so first run works offline
+ && mkdir -p /root/.openscrub/models \
+ && python -c "import urllib.request, openscrub; \
+urllib.request.urlretrieve(openscrub.YUNET_URL, \
+'/root/.openscrub/models/face_detection_yunet_2023mar.onnx')"
+
+EXPOSE 8384
+VOLUME ["/root/.local/share/OpenScrub"]
+CMD ["openscrub-web", "--host", "0.0.0.0"]

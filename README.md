@@ -192,6 +192,24 @@ If you stay with pip instead, `openscrub-setup` on Windows now offers to
 create Start Menu + Desktop shortcuts for OpenScrub Web, so you never
 have to hunt for pip's `Scripts` folder.
 
+### Docker (Linux servers / homelab)
+
+Every release publishes a CPU server image to GitHub Container Registry:
+
+```
+docker run -d -p 8384:8384 \
+  -v openscrub_data:/root/.local/share/OpenScrub \
+  ghcr.io/austinmabry/openscrub:latest
+```
+
+Tesseract, FFmpeg, and the face model are baked in; jobs, certificates,
+zones, and downloaded plate models live in the mounted volume, so the
+container is disposable. Add `--token <secret>` after the image name
+(as `openscrub-web --host 0.0.0.0 --token <secret>`) for access
+control. To update, pull the new tag and recreate the container — the
+in-app updater doesn't apply inside Docker. CPU-only: no NVENC/CUDA,
+and spaCy NER isn't included.
+
 ## Guided installer (Windows / Linux / macOS best-effort)
 
 Prefer a setup that installs the system tools too? Clone or download the

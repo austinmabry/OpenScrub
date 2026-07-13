@@ -1,0 +1,46 @@
+# Builds the server Docker image on every published release and pushes it
+# to GitHub Container Registry as ghcr.io/austinmabry/openscrub:<version>
+# and :latest. Free for public repos; auth is the built-in GITHUB_TOKEN —
+# no accounts, secrets, or cost.
+
+name: Docker image
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build (e.g. v1.0.16)"
+        required: true
+
+jobs:
+  build-image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Compute tags
+        id: meta
+        run: |
+          RAW="${{ github.event.inputs.tag || github.event.release.tag_name }}"
+          echo "version=${RAW#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/austinmabry/openscrub:${{ steps.meta.outputs.version }}
+            ghcr.io/austinmabry/openscrub:latest

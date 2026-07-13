@@ -1,0 +1,11 @@
+.git
+.github
+windows
+dist
+build
+assets/*
+!assets/openscrub.ico
+openscrub_jobs
+*.onnx
+*.mp4
+__pycache__
