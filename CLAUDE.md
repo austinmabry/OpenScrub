@@ -58,7 +58,10 @@ Key classes/functions (locate with grep, line numbers drift):
   auto-enables dense faces — content anchoring on camera video produced
   giant fake offsets, edge-band smears, and displaced backtracked boxes.
   Scan-time face adds are skipped whenever dense_faces is on (unions
-  balloon across a moving face's path).
+  balloon across a moving face's path). `assign_dense_tracks` groups the
+  per-frame dense samples into tracks (`Detection.track`, additive report
+  field) so review shows ONE card per physical object with a fan-out
+  toggle (web `TRKMEM`), not hundreds of frames.
 - Install-location rules: `install_is_readonly()` (site-packages OR
   `sys.frozen`) switches every write path to `user_data_dir()`
   (%LOCALAPPDATA%/OpenScrub or ~/.local/share/OpenScrub): plate-model

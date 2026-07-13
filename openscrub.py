@@ -34,7 +34,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.20"
+VERSION = "1.0.21"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -577,6 +577,9 @@ class Detection:
     last_seen: float = 0.0     # time of last positive sighting (t_end incl. hold)
     dense: bool = False        # per-frame dense-face detection: never merged
                                # across positions (it tracks a moving face)
+    track: int = -1            # dense detections of the same physical object
+                               # share a track id, so review shows ONE item
+                               # per face instead of hundreds of frames
 
 
 class PhiMemory:
@@ -942,6 +945,40 @@ def _box_iou(a, b):
     inter = ix * iy
     ua = (a[2]-a[0])*(a[3]-a[1]) + (b[2]-b[0])*(b[3]-b[1]) - inter
     return inter / ua if ua > 0 else 0.0
+
+
+def assign_dense_tracks(dets, max_gap=0.6, reach=1.6):
+    """Group dense per-frame detections into tracks: consecutive samples of
+    the same physical object (a face crossing the frame) get one track id.
+    Purely additive metadata — rendering still uses each per-frame box; the
+    review UI collapses a track into a single keep/blur decision."""
+    tracks = []          # [id, category, last_t, last_box]
+    next_id = 0
+    for d in sorted((x for x in dets if getattr(x, "dense", False)),
+                    key=lambda x: x.t_start):
+        bx = d.cbox
+        cx0 = (bx[0] + bx[2]) / 2
+        cy0 = (bx[1] + bx[3]) / 2
+        size = max(bx[2] - bx[0], bx[3] - bx[1], 1)
+        best = None
+        for tr in tracks:
+            if tr[1] != d.category or d.t_start - tr[2] > max_gap:
+                continue
+            lb = tr[3]
+            lcx = (lb[0] + lb[2]) / 2
+            lcy = (lb[1] + lb[3]) / 2
+            dist = ((cx0 - lcx) ** 2 + (cy0 - lcy) ** 2) ** 0.5
+            if dist <= reach * size and (best is None or dist < best[0]):
+                best = (dist, tr)
+        if best is None:
+            tracks.append([next_id, d.category, d.t_start, bx])
+            d.track = next_id
+            next_id += 1
+        else:
+            tr = best[1]
+            tr[2], tr[3] = d.t_start, bx
+            d.track = tr[0]
+    return next_id
 
 
 def merge_detections(dets, hold, scans=None, bridge_gap=4.0, fuzz=None,
@@ -2710,6 +2747,11 @@ def run_scan(args, cb=None):
                                 gap_check=_gap_check) if zdrop_raw else []
     if _gap_cap["cap"] is not None:
         _gap_cap["cap"].release()
+    n_tracks = assign_dense_tracks(detections)
+    if n_tracks:
+        cb.log(f"      dense tracking: {sum(1 for d in detections if d.dense)}"
+               f" per-frame samples grouped into {n_tracks} track(s) "
+               "for review")
     if _gap_stats["checked"]:
         cb.log(f"      gap verification: {_gap_stats['checked']} long gap(s) "
                f"checked against the file, {_gap_stats['bridged']} verified "

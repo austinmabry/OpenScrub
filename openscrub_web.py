@@ -558,6 +558,7 @@ def job_detections(jid):
         items.append({"i": i, "category": d["category"], "text": d["text"],
                       "t_start": d["t_start"], "t_end": round(d["t_end"], 2),
                       "enabled": d.get("enabled", True),
+                      "track": d.get("track", -1),
                       "zone_dropped": bool(d.get("zone_dropped"))})
     return jsonify({"detections": items,
                     "fps": doc["render_state"]["fps"],
@@ -1500,7 +1501,7 @@ function cmpShow(){
 async function loadReview(){
  const d=await (await fetch(`api/jobs/${CUR}/detections`)).json();
  DUR=d.duration;
- const groups={}; const zdrop=[];
+ const groups={}; const zdrop=[]; TRKMEM={};
  d.detections.forEach(x=>{
   EN[x.i]=x.enabled;
   if(x.zone_dropped){zdrop.push(x);return;}
@@ -1533,7 +1534,23 @@ async function loadReview(){
   }
   html+=`</div></details>`;
  }
- for(const[cat,items] of Object.entries(groups)){
+ for(const[cat,rawItems] of Object.entries(groups)){
+  // collapse dense tracks: one card per physical object, not per frame
+  const byTrack={},items=[];
+  for(const x of rawItems){
+   if(x.track>=0){(byTrack[x.track]=byTrack[x.track]||[]).push(x);}
+   else{TRKMEM[x.i]=[x.i];items.push(x);}
+  }
+  for(const members of Object.values(byTrack)){
+   members.sort((a,b)=>a.t_start-b.t_start);
+   const rep={...members[Math.floor(members.length/2)]};
+   rep.t_start=members[0].t_start;
+   rep.t_end=members[members.length-1].t_end;
+   rep.frames=members.length;
+   TRKMEM[rep.i]=members.map(m=>m.i);
+   items.push(rep);
+  }
+  items.sort((a,b)=>a.t_start-b.t_start);
   html+=`<h3 style="margin:10px 0 6px">${cat} <span class="badge">${items.length}</span>
   <button class="sec" style="padding:3px 8px;font-size:12px"
    onclick="setAll('${cat}',true)">all on</button>
@@ -1544,7 +1561,7 @@ async function loadReview(){
     <img src="api/jobs/${CUR}/thumb/${x.i}"
      style="cursor:zoom-in" onclick="zoomDet(${x.i})"
      onerror="thumbRetry(this)">
-    <div>"${x.text}" <br>${x.t_start.toFixed(1)}–${x.t_end.toFixed(1)}s</div>
+    <div>"${x.text}"${x.frames?` <span class="badge">tracked ×${x.frames} frames</span>`:""} <br>${x.t_start.toFixed(1)}–${x.t_end.toFixed(1)}s</div>
     <button class="blurbtn ${EN[x.i]?"blur":"keep"}" id="bb${x.i}"
      onclick="toggleDet(${x.i})">${EN[x.i]?"Blur":"Keep"}</button>
    </div>`}
@@ -1560,8 +1577,9 @@ async function loadReview(){
  initMarquee();
 }
 
+let TRKMEM={};
 function applyDet(i,blur){
- EN[i]=blur;
+ for(const m of (TRKMEM[i]||[i]))EN[m]=blur;
  const b=document.getElementById("bb"+i),t=document.getElementById("det"+i);
  if(b){b.className="blurbtn "+(blur?"blur":"keep");
        b.textContent=blur?"Blur":"Keep";}
