@@ -406,6 +406,11 @@ def check_token():
 
 
 @app.before_request
+def _touch_activity():
+    LAST_ACTIVITY["t"] = time.time()
+
+
+@app.before_request
 def enforce_vault_lock():
     """While the vault is locked, every job operation is refused — the
     files are ciphertext, so this fails closed rather than half-working."""
@@ -1028,8 +1033,12 @@ one at a time, and every category needs a name.</div>
  <input type="password" id="vpw" placeholder="vault password">
  <button onclick="vaultUnlock()">Unlock</button>
 </div>
-<div id="vlock" style="display:none" class="row">
- <button onclick="vaultDoLock()">Lock now (encrypt all job files)</button>
+<div id="vlock" style="display:none">
+ <div class="row"><button onclick="vaultDoLock()">Lock now (encrypt all job files)</button></div>
+ <div class="row" style="font-size:13px;margin-top:8px;gap:8px">
+  <label style="margin:0"><input type="checkbox" id="valk" onchange="vaultAutolockSave()"> auto-lock after</label>
+  <input type="number" id="valkmin" min="1" max="1440" value="30" style="width:70px" onchange="vaultAutolockSave()"> idle minutes (no activity, no jobs)
+ </div>
 </div>
 </div>
 <div class="card"><h2>HTTPS certificate</h2>
@@ -1712,6 +1721,10 @@ async function vaultStatus(){
   if(!d.enabled){st.textContent="Disabled — job files (PHI) are stored in plaintext. Set a password to enable at-rest encryption.";st.style.color="#b45309";}
   else if(d.locked){st.textContent="LOCKED — "+d.encrypted_files+" file(s) encrypted on disk. Unlock to work with jobs.";st.style.color="#b91c1c";}
   else{st.textContent="Unlocked — files decrypt while you work; they re-encrypt when you lock or shut down. Losing the password makes encrypted files unrecoverable.";st.style.color="#15803d";}
+  if(d.enabled&&!d.locked){
+   document.getElementById("valk").checked=d.autolock_min>0;
+   if(d.autolock_min>0)document.getElementById("valkmin").value=d.autolock_min;
+  }
  }catch(e){}
 }
 async function vaultSetup(){
@@ -1728,6 +1741,12 @@ async function vaultUnlock(){
  if(!r.ok){alert(await r.text());return;}
  document.getElementById("vpw").value="";
  vaultStatus();loadJobs();
+}
+async function vaultAutolockSave(){
+ const on=document.getElementById("valk").checked;
+ const m=on?parseInt(document.getElementById("valkmin").value||"30",10):0;
+ await fetch("/api/vault/autolock",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({minutes:m})});
+ vaultStatus();
 }
 async function vaultDoLock(){
  if(!confirm("Encrypt all job files now?\\n\\nYou will need the password to access them again."))return;
@@ -1880,6 +1899,46 @@ import openscrub_vault as vault
 
 VAULT = {"key": None}          # data key while unlocked; None = locked
 VAULT_LOCK = threading.Lock()
+WEB_SETTINGS_PATH = os.path.join(_data_root(), "web_settings.json")
+LAST_ACTIVITY = {"t": time.time()}
+
+
+def _web_settings():
+    try:
+        with open(WEB_SETTINGS_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_web_settings(d):
+    with open(WEB_SETTINGS_PATH, "w", encoding="utf-8") as f:
+        json.dump(d, f, indent=2)
+
+
+def _autolock_watcher():
+    """Opt-in: when enabled in App settings, re-lock the vault after N
+    minutes with no web activity and no running jobs. Default OFF —
+    people should never find their data locked unless they asked for it."""
+    while True:
+        time.sleep(30)
+        try:
+            mins = int(_web_settings().get("vault_autolock_min", 0) or 0)
+            if mins <= 0 or not vault_enabled() or VAULT["key"] is None:
+                continue
+            if time.time() - LAST_ACTIVITY["t"] < mins * 60:
+                continue
+            with JOBS_LOCK:
+                busy = any(j.get("phase") in ("queued", "scanning",
+                                              "rendering", "queued_render")
+                           for j in JOBS.values())
+            if busy:
+                continue
+            n = _vault_lock_now()
+            print("vault: auto-locked after %d idle minute(s) — "
+                  "%d file(s) encrypted" % (mins, n))
+        except Exception:
+            pass
 
 
 def vault_enabled():
@@ -1919,7 +1978,9 @@ def vault_status():
     if vault_enabled():
         enc, plain = vault.tree_locked_state(JOBS_DIR)
     return jsonify({"enabled": vault_enabled(), "locked": vault_locked(),
-                    "encrypted_files": enc, "plaintext_files": plain})
+                    "encrypted_files": enc, "plaintext_files": plain,
+                    "autolock_min": int(_web_settings().get(
+                        "vault_autolock_min", 0) or 0)})
 
 
 @app.route("/api/vault/setup", methods=["POST"])
@@ -2101,6 +2162,17 @@ def extras_install(eid):
             _EXT["state"] = "error"
     threading.Thread(target=work, daemon=True).start()
     return jsonify({"ok": True})
+
+
+@app.route("/api/vault/autolock", methods=["POST"])
+def vault_autolock():
+    mins = int((request.json or {}).get("minutes") or 0)
+    if mins < 0 or mins > 24 * 60:
+        abort(400, "minutes must be between 0 (off) and 1440")
+    d = _web_settings()
+    d["vault_autolock_min"] = mins
+    _save_web_settings(d)
+    return jsonify({"ok": True, "autolock_min": mins})
 
 
 @app.route("/api/vault/lock", methods=["POST"])
@@ -2342,6 +2414,7 @@ def main():
     os.makedirs(JOBS_DIR, exist_ok=True)
     import atexit
     atexit.register(_vault_lock_atexit)
+    threading.Thread(target=_autolock_watcher, daemon=True).start()
     rehydrate_jobs()
     threading.Thread(target=worker, daemon=True).start()
     if args.retain_days > 0:

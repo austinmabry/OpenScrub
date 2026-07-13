@@ -34,7 +34,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.14"
+VERSION = "1.0.15"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -865,7 +865,8 @@ def _box_iou(a, b):
     return inter / ua if ua > 0 else 0.0
 
 
-def merge_detections(dets, hold, scans=None, bridge_gap=4.0, fuzz=None):
+def merge_detections(dets, hold, scans=None, bridge_gap=4.0, fuzz=None,
+                     gap_check=None):
     """Chain detections of the same category whose content boxes overlap.
 
     Short gaps (within `hold`) chain unconditionally, as before. Longer gaps
@@ -935,8 +936,17 @@ def merge_detections(dets, hold, scans=None, bridge_gap=4.0, fuzz=None):
                         and fuzz.partial_ratio(_mn, _dn) < 85):
                     continue
             gap = d.t_start - m.last_seen
-            if gap <= hold or (gap <= bridge_gap
-                               and not contradicted(m, m.last_seen, d.t_start)):
+            ok = gap <= hold
+            if not ok and not contradicted(m, m.last_seen, d.t_start):
+                if gap <= bridge_gap:
+                    ok = True
+                elif gap_check is not None:
+                    # beyond the configured bridge: ask the pixels. The file
+                    # is checked at points inside the gap — bridge any length
+                    # of gap the content verifiably persisted through, refuse
+                    # if it visibly changed. The knob stops mattering.
+                    ok = gap_check(m, m.last_seen, d.t_start)
+            if ok:
                 m.last_seen = max(m.last_seen, d.t_start)
                 m.t_end = max(m.t_end, d.t_end)
                 m.cbox = (min(m.cbox[0], d.cbox[0]), min(m.cbox[1], d.cbox[1]),
@@ -2329,6 +2339,17 @@ def run_scan(args, cb=None):
             scans.append((t, (cx, cy),
                           [(w, (b[0] - cx, b[1] - cy, b[2] - cx, b[3] - cy), c)
                            for w, b, c in words]))
+            if n_scans == 0 and len(words) < 3:
+                # First-scan sanity: a text-dense frame that OCR read nothing
+                # from means a broken OCR setup — say so in minute one, not
+                # after a 40-minute render.
+                _edges = cv2.Canny(small, 60, 180)
+                if float((_edges > 0).mean()) > 0.02:
+                    cb.log("      *** OCR SANITY WARNING: the first scan read "
+                           "almost no text, but the frame looks text-dense. "
+                           "If this recording contains text to redact, check "
+                           "the OCR setup (run openscrub-setup, or install "
+                           "PaddleOCR) before trusting this run.")
             n_scans += 1
             last_scan_idx = idx
             scan_cx, scan_cy = cx, cy
@@ -2501,10 +2522,74 @@ def run_scan(args, cb=None):
                    f"region(s) beyond the buffer, closing another "
                    f"{deep_gain:.2f}s of would-be exposure")
 
+    _gap_stats = {"checked": 0, "bridged": 0}
+    _gap_cap = {"cap": None}
+
+    def _gap_check(m, t_from, t_to):
+        """Visual gap verification: template-match the region at points
+        inside [t_from, t_to]. True only if the content is present at ALL
+        sampled points — then the dropout was an OCR miss and the blur may
+        bridge it, however long the gap. Any point where it's absent or
+        changed means the content genuinely went away: refuse. Dense
+        detections never reach here (they never merge)."""
+        if _gap_cap["cap"] is None:
+            _gap_cap["cap"] = cv2.VideoCapture(args.video)
+        cap3 = _gap_cap["cap"]
+
+        def _frame_small(t):
+            cap3.set(cv2.CAP_PROP_POS_MSEC, max(t, 0.0) * 1000)
+            ok, fr = cap3.read()
+            if not ok:
+                return None
+            return cv2.resize(cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY), None,
+                              fx=BT_SCALE, fy=BT_SCALE)
+        ref = _frame_small(t_from)
+        if ref is None:
+            return False
+        ox, oy = m.aoff
+        x1 = int((m.cbox[0] + ox) * BT_SCALE)
+        y1 = int((m.cbox[1] + oy) * BT_SCALE)
+        x2 = int((m.cbox[2] + ox) * BT_SCALE)
+        y2 = int((m.cbox[3] + oy) * BT_SCALE)
+        rh, rw = ref.shape[:2]
+        x1, y1, x2, y2 = max(0, x1), max(0, y1), min(rw, x2), min(rh, y2)
+        if x2 - x1 < 6 or y2 - y1 < 4:
+            return False
+        tmpl = ref[y1:y2, x1:x2]
+        if float(tmpl.std()) < 4:
+            return False                 # featureless: cannot verify
+        th_, tw_ = tmpl.shape
+        M = 10
+        n_pts = min(5, max(2, int(t_to - t_from)))
+        _gap_stats["checked"] += 1
+        for i in range(1, n_pts + 1):
+            t = t_from + (t_to - t_from) * i / (n_pts + 1)
+            sm = _frame_small(t)
+            if sm is None:
+                return False
+            bx1, by1 = max(0, x1 - M), max(0, y1 - M)
+            bx2, by2 = min(rw, x1 + tw_ + M), min(rh, y1 + th_ + M)
+            if bx2 - bx1 < tw_ or by2 - by1 < th_:
+                return False
+            reg = sm[by1:by2, bx1:bx2]
+            if float(cv2.matchTemplate(reg, tmpl,
+                                       cv2.TM_CCOEFF_NORMED).max()) < 0.6:
+                return False             # absent or changed: do not bridge
+        _gap_stats["bridged"] += 1
+        return True
+
     detections = merge_detections(raw, hold=hold, scans=scans,
-                                  bridge_gap=args.bridge_gap, fuzz=_fuzz)
+                                  bridge_gap=args.bridge_gap, fuzz=_fuzz,
+                                  gap_check=_gap_check)
     zdropped = merge_detections(zdrop_raw, hold=hold, scans=scans,
-                                bridge_gap=args.bridge_gap, fuzz=_fuzz) if zdrop_raw else []
+                                bridge_gap=args.bridge_gap, fuzz=_fuzz,
+                                gap_check=_gap_check) if zdrop_raw else []
+    if _gap_cap["cap"] is not None:
+        _gap_cap["cap"].release()
+    if _gap_stats["checked"]:
+        cb.log(f"      gap verification: {_gap_stats['checked']} long gap(s) "
+               f"checked against the file, {_gap_stats['bridged']} verified "
+               "and bridged")
     mem_note = (f" | {n_recalled} memory recalls, "
                 f"{len(memory.items)} strings remembered" if memory else "")
     cb.log(f"      {n_scans} OCR scans | {len(raw)} raw hits -> "

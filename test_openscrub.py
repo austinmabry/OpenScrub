@@ -325,3 +325,26 @@ def test_deep_backtrack_finds_true_onset(tmp_path):
         f"deep backtrack should reach the true onset, got {start}"
     assert start >= appear_at - 1.0, \
         f"must not extend far before the text existed, got {start}"
+
+
+def test_gap_verification_refuses_real_absence(tmp_path):
+    """A gap where the content GENUINELY left the screen must not be
+    bridged, no matter the verification pass — over-blur is fine but a
+    6s bogus bridge across truly-absent content means merge is wrong."""
+    path = str(tmp_path / "gap.mp4")
+    fps = 30
+    blank = np.full((720, 1280, 3), 245, np.uint8)
+    wt = blank.copy()
+    cv2.putText(wt, "SSN 123-45-6789", (60, 300), FONT, 1.1, (20, 20, 20), 2)
+    out = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), fps,
+                          (1280, 720))
+    for i in range(12 * fps):
+        t = i / fps
+        out.write(wt if (t < 3 or t >= 9) else blank)
+    out.release()
+    _, dets = run(path, "--categories", "ssn")
+    ssn = sorted((d for d in dets if d["category"] == "ssn"),
+                 key=lambda d: d["t_start"])
+    assert ssn, "SSN should be detected"
+    assert not any(d["t_start"] < 4 and d["t_end"] > 8 for d in ssn), \
+        "the true 6s absence must not be blurred straight through"
