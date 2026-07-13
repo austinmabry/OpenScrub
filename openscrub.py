@@ -1803,6 +1803,11 @@ def build_parser():
                          "risky while blurring the rest. Categories not listed "
                          "use --mode.")
     ap.add_argument("--mrn-regex", default=RE_MRN_DEFAULT)
+    ap.add_argument("--adaptive", choices=["on", "off"], default="on",
+                    help="self-tune scan pacing: stretch the sample "
+                         "interval while the screen is static, tighten it "
+                         "under heavy change, and scan sooner when "
+                         "scrolling fast. 'off' uses the fixed values.")
     ap.add_argument("--custom-regex", action="append", default=[],
                     metavar="ID=PATTERN",
                     help="user-defined regex category (repeatable), e.g. "
@@ -2033,7 +2038,9 @@ def run_scan(args, cb=None):
         cb.log("      custom categories: "
                + ", ".join(c for c, _ in custom_res))
 
-    cb.log(f"[3/4] Scanning (every {args.sample_interval}s or {args.scan_trigger}px of scroll)")
+    cb.log(f"[3/4] Scanning (every {args.sample_interval}s or {args.scan_trigger}px of scroll"
+           + (", self-tuning to screen activity and scroll speed)"
+              if getattr(args, "adaptive", "on") != "off" else ")"))
     cap = cv2.VideoCapture(args.video)
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -2074,6 +2081,9 @@ def run_scan(args, cb=None):
                  float(getattr(args, "backtrack_window", 2.5) or 2.5))
     bt_buf = deque(maxlen=max(3, int(round(fps * bt_win))))
     prev_keys = {}
+    adapt = getattr(args, "adaptive", "on") != "off"
+    scan_small = None            # gray half-res frame at the last OCR scan
+    prev_fcx = prev_fcy = 0.0    # last frame's scroll offset (velocity)
     bt_count, bt_gain, bt_capped = 0, 0.0, 0
     bt_deep = []   # regions still visible at the buffer's oldest frame:
                    # their true onset is found after the scan by seeking
@@ -2148,9 +2158,27 @@ def run_scan(args, cb=None):
                     "plate", "plate", round(pconf, 3), (cx, cy),
                     dense=True))
         moved = abs(cx - scan_cx) + abs(cy - scan_cy)
-        due = (idx - last_scan_idx >= step) or (moved >= args.scan_trigger)
+        step_eff, trig_eff = step, args.scan_trigger
+        if adapt:
+            # Self-tuning pace: when the screen has barely changed since the
+            # last scan, stretch the interval (2x) — nothing new to read, and
+            # memory/safety bands still backstop. Under heavy change, tighten
+            # it (0.5x) so new content is read sooner. Fast scrolling lowers
+            # the scroll trigger so scans fire earlier in the movement.
+            if scan_small is not None and scan_small.shape == small.shape:
+                act = float(cv2.absdiff(small, scan_small).mean())
+                if act < 1.0:
+                    step_eff = step * 2
+                elif act > 8.0:
+                    step_eff = max(2, step // 2)
+            speed = (abs(cx - prev_fcx) + abs(cy - prev_fcy)) * fps
+            if speed > 300:
+                trig_eff = max(20.0, args.scan_trigger * 0.5)
+        prev_fcx, prev_fcy = cx, cy
+        due = (idx - last_scan_idx >= step_eff) or (moved >= trig_eff)
         if due and idx - last_scan_idx >= 2:
             t = idx / fps
+            scan_small = small
             words = read_adaptive(ocr, frame, getattr(args, "ocr_upscale", "auto"))
             lines = group_lines(words)
             found = detect_phi(words, lines, t, (cx, cy), namer, mrn_re,
