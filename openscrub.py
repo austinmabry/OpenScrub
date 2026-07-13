@@ -34,7 +34,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.17"
+VERSION = "1.0.18"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -219,14 +219,38 @@ def read_adaptive(ocr, frame, mode="auto"):
     return words
 
 
+def _ocr_selftest(backend):
+    """One tiny inference at startup. GPU/cuDNN/driver failures surface at
+    the first real kernel launch, not at import — so exercise a kernel HERE,
+    where we can still fall back, instead of letting the first scan of a
+    real job crash (seen: CUDNN error 5003 on a Paddle-GPU container)."""
+    img = np.full((64, 256, 3), 255, np.uint8)
+    cv2.putText(img, "TEST 123", (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 1,
+                (0, 0, 0), 2)
+    backend.read(img)                    # must simply not raise
+    return backend
+
+
 def make_ocr(engine, device="auto"):
-    if engine == "paddle":
-        return PaddleBackend(device=device)
     if engine == "tesseract":
         return TesseractBackend()
     try:
-        return PaddleBackend(device=device)
-    except Exception:
+        return _ocr_selftest(PaddleBackend(device=device))
+    except Exception as e:
+        print("      PaddleOCR failed its self-test: %s: %s"
+              % (type(e).__name__, str(e)[:200]))
+        if device != "cpu":
+            try:
+                print("      retrying PaddleOCR on CPU "
+                      "(GPU/cuDNN/driver problems are the usual cause)…")
+                return _ocr_selftest(PaddleBackend(device="cpu"))
+            except Exception as e2:
+                print("      PaddleOCR on CPU also failed: %s"
+                      % str(e2)[:150])
+        print("      falling back to Tesseract — the job continues on "
+              "CPU OCR." + (" (--engine paddle was requested but is not "
+                            "usable on this machine)" if engine == "paddle"
+                            else ""))
         return TesseractBackend()
 
 

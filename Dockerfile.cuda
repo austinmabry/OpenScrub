@@ -41,7 +41,9 @@ RUN pip install --no-cache-dir . cheroot \
       paddlepaddle-gpu==3.2.2 \
       -i https://www.paddlepaddle.org.cn/packages/stable/cu126/ \
       --extra-index-url https://pypi.org/simple \
- && pip install --no-cache-dir -U nvidia-cudnn-cu12 \
+ # NOTE: no pip cuDNN here — the cudnn-runtime base image ships the
+ # matched version; a second, newer pip copy caused CUDNN error 5003
+ # (EXECUTION_FAILED) at the first Paddle-GPU inference.
  && pip install --no-cache-dir spacy \
  && python -m spacy download en_core_web_sm \
  && mkdir -p /root/.openscrub/models \

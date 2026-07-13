@@ -464,6 +464,27 @@ def list_jobs():
     return jsonify([job_public(j) for j in js])
 
 
+@app.route("/api/jobs/<jid>", methods=["DELETE"])
+def job_delete(jid):
+    """Delete a job and every file it owns (upload, normalized video,
+    report, thumbnails, output). Running jobs must be cancelled first."""
+    with JOBS_LOCK:
+        job = JOBS.get(jid)
+        if job is None:
+            abort(404)
+        if job.get("phase") in ("queued", "scanning", "rendering",
+                                "queued_render"):
+            abort(409, "job is queued or running — cancel it first")
+        JOBS.pop(jid, None)
+    import shutil as _sh
+    try:
+        _sh.rmtree(job["dir"])
+    except OSError as e:
+        return jsonify({"ok": False, "error": "files not fully removed: %s"
+                        % e}), 500
+    return jsonify({"ok": True})
+
+
 @app.route("/api/jobs/<jid>")
 def job_status(jid):
     job = JOBS.get(jid) or abort(404)
@@ -1159,9 +1180,17 @@ async function loadJobs(){
  jobs.innerHTML=js.length?js.map(j=>
   `<div class="row" style="justify-content:space-between;padding:4px 0">
    <a href="#" onclick="openJob('${j.id}');return false">${j.name}</a>
-   <span class="badge">${j.phase}</span></div>`).join(""):"none yet";
+   <span style="display:flex;gap:10px;align-items:center"><span class="badge">${j.phase}</span>
+   <a href="#" title="Delete this job and all of its files" style="text-decoration:none;font-size:15px" onclick="delJob('${j.id}');return false">&#128465;&#65039;</a></span></div>`).join(""):"none yet";
 }
 
+async function delJob(id){
+ if(!confirm("Delete this job and ALL of its files — upload, report, and rendered output?\\n\\nThis cannot be undone."))return;
+ const r=await fetch("api/jobs/"+id,{method:"DELETE"});
+ if(!r.ok){alert(await r.text());return;}
+ if(CUR===id){CUR=null;if(POLL)clearInterval(POLL);detail.innerHTML="";}
+ JOBSJSON="";loadJobs();
+}
 async function openJob(id){
  CUR=id; EN={}; MAN=[]; PHIST=[]; LOGN=0; SHELLPH=null;
  detail.innerHTML="";
