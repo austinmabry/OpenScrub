@@ -13,3 +13,11 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    ignore:
+      # deliberate pins — do not propose major base-image jumps:
+      # paddlepaddle-gpu wheels are built for a specific CUDA line (cu126),
+      # and the Python minor must be one our ML wheels all support.
+      - dependency-name: "nvidia/cuda"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "python"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
