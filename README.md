@@ -123,7 +123,10 @@ Tesseract, FFmpeg, and the face model are baked in; jobs, certificates,
 zones, and downloaded plate models live in the mounted volume, so the
 container is disposable. Add `--token <secret>` after the image name
 (as `openscrub-web --host 0.0.0.0 --token <secret>`) for access
-control. To update, pull the new tag and recreate the container — the
+control. The "process a file already on the server" box accepts any
+video path the process can read; set `OPENSCRUB_MEDIA_ROOT=/path` (env
+var) to confine it to one directory tree — recommended whenever the web
+UI is reachable by anyone but you. To update, pull the new tag and recreate the container — the
 in-app updater doesn't apply inside Docker. Both images include
 spaCy NER (name detection) out of the box; the default image is
 CPU-only.

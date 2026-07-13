@@ -150,6 +150,29 @@ WORK_Q = queue.Queue()
 # Job model
 # ----------------------------------------------------------------------------
 
+MEDIA_EXTS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".mpg",
+              ".mpeg", ".wmv", ".ts", ".mts", ".m2ts", ".flv", ".3gp"}
+
+
+def server_path_error(p):
+    """Validate a user-supplied server-side media path. The path picker is a
+    deliberate feature (process a file already on this machine/NAS), but the
+    value is request data: confine it to real video files, and — when
+    $OPENSCRUB_MEDIA_ROOT is set — to that directory tree only. Returns an
+    error string, or None if the path is acceptable."""
+    if not os.path.isfile(p):
+        return "server path not found or not a file"
+    if os.path.splitext(p)[1].lower() not in MEDIA_EXTS:
+        return ("server path must be a video file ("
+                + ", ".join(sorted(MEDIA_EXTS)) + ")")
+    root = os.environ.get("OPENSCRUB_MEDIA_ROOT")
+    if root:
+        r = os.path.realpath(root)
+        if p != r and not p.startswith(r.rstrip(os.sep) + os.sep):
+            return "server path is outside OPENSCRUB_MEDIA_ROOT"
+    return None
+
+
 def new_job(video_path, options, name):
     jid = uuid.uuid4().hex[:12]
     jdir = os.path.join(JOBS_DIR, jid)
@@ -443,17 +466,23 @@ def create_job():
     files = request.files.getlist("video")
     if files and files[0].filename:
         for f in files:
-            name = os.path.basename(f.filename)
+            name = os.path.basename(f.filename.replace("\\", "/"))
+            # extension comes from the client: keep it only if it's a plain
+            # known media suffix, never splice arbitrary text into the path
+            ext = os.path.splitext(name)[1].lower()
+            if ext not in MEDIA_EXTS:
+                ext = ".mp4"
             job = new_job("", options, name)
-            path = os.path.join(job["dir"], "input" + os.path.splitext(name)[1])
+            path = os.path.join(job["dir"], "input" + ext)
             f.save(path)
             job["video"] = path
             WORK_Q.put((job["id"], "scan"))
             jobs.append(job["id"])
     elif request.form.get("server_path"):
-        p = request.form["server_path"].strip()
-        if not os.path.exists(p):
-            return jsonify({"error": f"server path not found: {p}"}), 400
+        p = os.path.realpath(request.form["server_path"].strip())
+        err = server_path_error(p)
+        if err:
+            return jsonify({"error": err}), 400
         job = new_job(p, options, os.path.basename(p))
         WORK_Q.put((job["id"], "scan"))
         jobs.append(job["id"])
@@ -485,8 +514,12 @@ def job_delete(jid):
     try:
         _sh.rmtree(job["dir"])
     except OSError as e:
-        return jsonify({"ok": False, "error": "files not fully removed: %s"
-                        % e}), 500
+        # log the detail server-side only: OSError text contains filesystem
+        # paths, which don't belong in an HTTP response body
+        print(f"[web] job {jid} delete incomplete: {e}", flush=True)
+        return jsonify({"ok": False,
+                        "error": "some job files could not be removed — "
+                                 "see the server log"}), 500
     return jsonify({"ok": True})
 
 
