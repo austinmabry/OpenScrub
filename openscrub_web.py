@@ -694,15 +694,23 @@ def job_thumb(jid, i):
 @app.route("/api/jobs/<jid>/frame_at")
 def job_frame_at(jid):
     job = JOBS.get(jid) or abort(404)
-    t = float(request.args.get("t", 0))
+    t = max(0.0, float(request.args.get("t", 0)))
     path = (job["output"] if request.args.get("src") == "output"
             and job.get("output") else job["video"])
     cap = cv2.VideoCapture(path)
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    cap.set(cv2.CAP_PROP_POS_FRAMES, int(t * fps))
-    ok, frame = cap.read()
+    # seek by TIMESTAMP, not frame index: the original upload is often VFR
+    # (iPhone), where index = t*fps drifts out of sync with the CFR output
+    # and can overshoot the file entirely (broken compare pane)
+    frame = None
+    for tt in (t, max(0.0, t - 0.34), max(0.0, t - 1.0), 0.0):
+        cap.set(cv2.CAP_PROP_POS_MSEC, tt * 1000)
+        ok, fr = cap.read()
+        if ok:
+            frame = fr
+            break   # walk back instead of 404ing at the very end of the file
+        if tt == 0.0:
+            break
     cap.release()
-    frame = frame if ok else None
     if frame is None:
         abort(404)
     ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 82])
@@ -1340,7 +1348,8 @@ async function refresh(){
 
 let BE={t:0,ox:0,oy:0,boxes:[],sel:-1,ov:{},dis:{},times:{},adds:[],
         add:false,addAnchor:null,drag:null,scale:1,dur:10};
-async function loadBoxEdit(){
+async function loadBoxEdit(fromReview){
+ showPanel(fromReview?"boxedit_rev":"boxedit");
  const mi=await (await fetch(`api/jobs/${CUR}/mediainfo`)).json();
  // in review: the slot right under the Preview button; on done: the actions slot
  let c=document.getElementById("beslot")||document.getElementById("beslot_done");
@@ -1536,7 +1545,27 @@ async function beSave(){
 }
 async function cancelJob(){await fetch("api/jobs/"+CUR+"/cancel",{method:"POST"})}
 
+// the three post-render views (compare, review, box editor) are mutually
+// exclusive: opening one closes the others instead of stacking them
+function showPanel(which){
+ // "boxedit_rev" = the editor button INSIDE the review card: the editor
+ // mounts in the review's own slot, so the review stays. Everything else
+ // is standalone and closes the other panels.
+ if(which!=="compare"){
+  const c=document.getElementById("compare");if(c)c.innerHTML="";}
+ const b=document.getElementById("beslot_done");
+ const b2=document.getElementById("beslot");
+ if(which==="boxedit_rev"){if(b)b.innerHTML=""}
+ else{
+  if(which!=="boxedit"){if(b)b.innerHTML=""}
+  if(b2)b2.innerHTML="";
+  if(which!=="review"){
+   const rev=document.getElementById("review");if(rev)rev.remove();}
+ }
+}
+
 async function loadCompare(){
+ showPanel("compare");
  const d=await (await fetch(`api/jobs/${CUR}/detections`)).json();
  const c=document.getElementById("compare");
  c.innerHTML=`<div class="row" style="margin-top:8px">t=
@@ -1555,6 +1584,7 @@ function cmpShow(){
 }
 
 async function loadReview(){
+ showPanel("review");
  const d=await (await fetch(`api/jobs/${CUR}/detections`)).json();
  DUR=d.duration;
  const groups={}; const zdrop=[]; TRKMEM={};
@@ -1565,7 +1595,7 @@ async function loadReview(){
  let html=`<div class="card" id="review"><h2>Review — red = will be blurred,
  green = kept visible. Drag a box around several to bulk-set.</h2>
  <div class="row" style="margin:0 0 8px">
-  <button class="sec" onclick="loadBoxEdit()">▶ Preview video &amp; edit boxes
+  <button class="sec" onclick="loadBoxEdit(1)">▶ Preview video &amp; edit boxes
   (before rendering)</button></div>
  <div id="beslot"></div>
  <div id="detwrap" style="position:relative;user-select:none">`;

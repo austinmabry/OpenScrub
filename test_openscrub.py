@@ -498,3 +498,18 @@ def test_hdr_probe_and_tonemap(tmp_path):
     args2 = B()
     openscrub.normalize_vfr(args2, openscrub.Callbacks())
     assert args2.video == sdr, "CFR SDR input must be a no-op"
+
+
+def test_report_roundtrip_preserves_tracks(tmp_path):
+    """dense/track must survive report write -> load: rendering rewrites
+    the report through this round trip, and losing the track ids exploded
+    the re-opened review into one card per frame sample (v1.0.25 bug)."""
+    d = openscrub.Detection(1.0, 1.5, (10, 10, 50, 50), "face", "face",
+                            0.9, (0, 0), dense=True, track=3)
+    args = openscrub.build_parser().parse_args(["dummy.mp4"])
+    state = {"fps": 30.0, "cum": [(0.0, 0.0)], "bands": [(0.0, 0.0)],
+             "detections": [d], "input_sha256": "x"}
+    rp = str(tmp_path / "r.json")
+    openscrub.write_report(rp, args, state)
+    dets, _, _ = openscrub.load_report(rp)
+    assert dets[0].dense is True and dets[0].track == 3

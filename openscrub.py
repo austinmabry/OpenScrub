@@ -34,7 +34,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.25"
+VERSION = "1.0.26"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -1940,7 +1940,12 @@ def load_report(path):
             cbox=tuple(r["cbox"]), category=r["category"], text=r["text"],
             confidence=float(r.get("confidence", 1.0)),
             aoff=tuple(r.get("aoff", (0.0, 0.0))),
-            last_seen=float(r.get("last_seen", r["t_start"]))))
+            last_seen=float(r.get("last_seen", r["t_start"])),
+            # dense/track must survive the round trip: rendering rewrites the
+            # report from rehydrated detections, and losing track ids here
+            # exploded the re-opened review into one card per frame sample
+            dense=bool(r.get("dense", False)),
+            track=int(r.get("track", -1))))
     return dets, state, prov
 
 
