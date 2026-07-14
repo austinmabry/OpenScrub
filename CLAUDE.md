@@ -21,7 +21,7 @@ target is Windows 10 + NVIDIA RTX 3060.
 | `fetch_plate_models.py` | Alt path to fetch plate models via the open-image-models pip package. |
 | `openscrub_update.py` | `openscrub-update` command + web self-update backend: PyPI version check, sha256-verified sdist download, data-preserving folder update (PRESERVE set), TOFU pin carry-forward. Ships in the wheel. |
 | `openscrub_vault.py` | At-rest encryption for the job store: scrypt keystore, chunked AES-256-GCM files (`.osvault`), lock/unlock tree walkers. NO password reset by design. Ships in the wheel. |
-| `test_openscrub.py` | pytest suite (23 tests). Must stay green. |
+| `test_openscrub.py` | pytest suite (25 tests). Must stay green. |
 | `tools/make_icons.py` | Regenerates every icon/logo asset from `assets/badge_master.png`. |
 | `tools/make_wordmark.py` | Regenerates the typeset Poppins wordmarks (navy + white). |
 | `assets/` | Brand assets. `badge_master.png` (canonical, mosaic+brackets style) and `badge_master_blurbox_alt.png` (alternate) are the sources; everything else is generated. |
@@ -71,12 +71,21 @@ Key classes/functions (locate with grep, line numbers drift):
   before the detector's first hit), and adds 0.25s grace pads at both
   ends. Matching happens on 3x3-smoothed half-scale frames — sub-pixel
   motion decorrelates raw fine texture.
-- Intake normalization (`normalize_vfr`, one ffmpeg pass): VFR input →
-  CFR (`probe_vfr`), HDR input (`probe_hdr`: PQ/HLG transfer or BT.2020
-  10-bit) → proper zscale/tonemap to SDR BT.709 — the 8-bit pipeline
-  can't carry HDR, and naive decode washes colors out. Falls back with a
-  loud NOTE if ffmpeg lacks zscale/tonemap. Report provenance records
-  `hdr_tonemapped`; true HDR (10-bit HEVC) output is a known future item.
+- Intake normalization (`normalize_vfr`): VFR input → CFR (`probe_vfr`);
+  HDR input (`probe_hdr`: PQ/HLG transfer or BT.2020 10-bit) → tone-mapped
+  SDR copy (zscale/tonemap, loud NOTE if ffmpeg lacks them) that the SCAN
+  runs on. With `--hdr-output match` (default) a 10-bit CFR HDR source is
+  kept (`args.hdr_source`/`hdr_encoder`/`hdr_tags`) and `run_render`
+  dispatches to `render_hdr`: raw yuv420p10le pipe in/out, planar blur
+  (`_blur_yuv10` — no colorspace conversion ever touches unblurred
+  pixels), 10-bit HEVC out (`hevc10_encoder` ladder: hevc_nvenc →
+  libx265 with a loud CPU-slowness NOTE → SDR fallback), source color
+  tags + `hvc1`. SDR input NEVER produces HDR output. The `--from-report`
+  path resets `args.video` to provenance `original_input` before
+  normalize — rendering from the scan copy silently downgraded HDR jobs
+  to SDR (the web render phase does exactly this). Dolby Vision RPUs are
+  dropped by design (proprietary; HLG/HDR10 base layer survives). Report
+  provenance records `hdr_tonemapped` + `hdr_output`.
 - Install-location rules: `install_is_readonly()` (site-packages OR
   `sys.frozen`) switches every write path to `user_data_dir()`
   (%LOCALAPPDATA%/OpenScrub or ~/.local/share/OpenScrub): plate-model
@@ -144,7 +153,7 @@ python -c "import ast; ast.parse(open('openscrub.py').read())"   # each edited .
 # PAGE is a normal (non-raw) Python string, so \n in source JS becomes a real
 # newline when served and can break string literals (the v1.0.6 jobs bug):
 #   python -c "import openscrub_web as w, re; open('/tmp/p.js','w').write(re.search(r'<script>(.*)</script>', w.PAGE, re.S).group(1))" && node --check /tmp/p.js
-python -m pytest test_openscrub.py -q                             # 23 tests, all green
+python -m pytest test_openscrub.py -q                             # 25 tests, all green
 python -m build          # FULL build (sdist->wheel), NEVER just `-w`:
                          # the wheel is built FROM the sdist in CI, so any
                          # file the wheel force-includes must be in the

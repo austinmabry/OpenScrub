@@ -246,6 +246,9 @@ def build_args(job, for_render=False):
             "--detect-scale", str(o.get("detect_scale", 1.0)),
             "--skip-start", str(o.get("skip_start", 0)),
             "--skip-end", str(o.get("skip_end", 0)),
+            "--hdr-output", (o.get("hdr_output")
+                             if o.get("hdr_output") in ("match", "sdr")
+                             else "match"),
             "--categories", o.get("categories",
                                   "name,dob,phone,ssn,mrn,email,address,card,apikey,ipaddr,plate,face"),
             "-o", os.path.join(jdir, "output."
@@ -1008,6 +1011,9 @@ padding:8px 12px;font-size:13px}
 <div><label>Encoder<span class="qm" data-tip="Encoder for the final render. NVENC uses the GPU's dedicated encode chip (fast, frees the CPU); x264 is CPU-only. Auto tests NVENC and falls back safely.">?</span></label><select id="encoder">
 <option>auto</option><option value="nvenc">NVENC (GPU)</option>
 <option value="x264">x264 (CPU)</option></select></div>
+<div><label>HDR output<span class="qm" data-tip="Only applies when the SOURCE video is HDR (iPhone Dolby Vision, HLG, HDR10). Match source keeps the output HDR: 10-bit HEVC with the original color signal preserved. Tone-map to SDR converts to standard-range BT.709 for maximum player compatibility. SDR sources always render SDR. Note: without a GPU that encodes 10-bit HEVC, HDR output falls back to the CPU and is much slower.">?</span></label><select id="hdrout">
+<option value="match">match source (keep HDR)</option>
+<option value="sdr">tone-map to SDR</option></select></div>
 <div><label>Redaction (default)<span class="qm" data-tip="Default style for every category. blur = Gaussian blur; readable structure is destroyed but a blur is, in principle, partially reversible — short high-contrast strings (an SSN or MRN in a fixed font) are the most vulnerable. box = solid black; pixels are set to zero, so nothing is recoverable. Override per category below.">?</span></label><select id="mode" onchange="renderCats()">
 <option>blur</option><option>box</option><option>mosaic</option></select></div>
 <div><label>Sample interval (s)<span class="qm" data-tip="How often a full OCR scan runs. Lower catches short-lived PHI sooner but scans take longer. Backtracking automatically closes most of the gap between scans, so 0.5 is a good default.">?</span></label><input type="number" id="si" value="0.5" step="0.1"></div>
@@ -1199,7 +1205,7 @@ function opts(){return{
  categories:[...document.querySelectorAll(".cat:checked")].map(e=>e.value).join(","),
  mode_map:Object.entries(CATMODE).filter(([c,m])=>m==="blur"||m==="box")
    .map(([c,m])=>`${c}=${m}`).join(","),
- allow_names:allow.value,extra_names:extra.value,
+ allow_names:allow.value,extra_names:extra.value,hdr_output:hdrout.value,
  no_memory:nomem.checked,preview_mode:pmode.checked,
  dense_faces:densefaces.checked,face_threshold:+fthr.value,
  detect_scale:+dscale.value,draw_scores:drawscores.checked}}

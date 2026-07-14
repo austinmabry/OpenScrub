@@ -34,7 +34,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.26"
+VERSION = "1.0.27"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -1306,6 +1306,206 @@ def nvenc_available(encoder_pref, cb):
     return "libx264"
 
 
+_HEVC10 = {}
+
+
+def hevc10_encoder(encoder="auto", cb=None):
+    """-> "hevc_nvenc" | "libx265" | None. Which 10-bit HEVC encoder this
+    machine can actually run (verified with a real test encode) — needed to
+    PRESERVE HDR output. encoder="x264" (the CPU choice) skips the GPU."""
+    cb = cb or Callbacks()
+    order = ["libx265"] if encoder == "x264" else ["hevc_nvenc", "libx265"]
+    key = tuple(order)
+    if key in _HEVC10:
+        return _HEVC10[key]
+    found = None
+    for enc in order:
+        pixfmt = "p010le" if enc == "hevc_nvenc" else "yuv420p10le"
+        try:
+            t = subprocess.run(
+                ["ffmpeg", "-hide_banner", "-loglevel", "error",
+                 "-f", "lavfi", "-i", "color=black:s=256x256:r=30", "-t", "1",
+                 "-c:v", enc, "-pix_fmt", pixfmt, "-f", "null", "-"],
+                capture_output=True, text=True, timeout=60)
+            if t.returncode == 0:
+                found = enc
+                break
+        except Exception:
+            continue
+    _HEVC10[key] = found
+    return found
+
+
+def color_tags(path):
+    """-> dict of the stream's color metadata (only the tags that are set).
+    Used to stamp HDR output with the same primaries/transfer as the input."""
+    if not shutil.which("ffprobe"):
+        return {}
+    try:
+        p = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
+                            "-show_entries",
+                            "stream=color_transfer,color_primaries,color_space",
+                            "-of", "json", path],
+                           capture_output=True, text=True, timeout=30)
+        st = json.loads(p.stdout)["streams"][0]
+    except Exception:
+        return {}
+    out = {}
+    for k, flag in (("color_primaries", "-color_primaries"),
+                    ("color_transfer", "-color_trc"),
+                    ("color_space", "-colorspace")):
+        v = st.get(k)
+        if v and v != "unknown":
+            out[flag] = v
+    return out
+
+
+def _blur_yuv10(y, u, v, x1, y1, x2, y2, mode):
+    """blur_region for a 10-bit planar YUV420 frame: Y full-res, U/V
+    half-res. Working in the native YUV domain means untouched pixels never
+    go through ANY colorspace conversion — the HDR signal passes straight
+    through."""
+    h, w = y.shape
+    x1 = max(0, int(x1)); y1 = max(0, int(y1))
+    x2 = min(w, int(x2)); y2 = min(h, int(y2))
+    if x2 <= x1 or y2 <= y1:
+        return
+    cx1, cy1 = x1 // 2, y1 // 2
+    cx2, cy2 = min(w // 2, (x2 + 1) // 2), min(h // 2, (y2 + 1) // 2)
+    if mode == "box":
+        y[y1:y2, x1:x2] = 64            # 10-bit limited-range black
+        u[cy1:cy2, cx1:cx2] = 512
+        v[cy1:cy2, cx1:cx2] = 512
+        return
+    k = max(31, (((x2 - x1) // 3) | 1))
+    y[y1:y2, x1:x2] = cv2.GaussianBlur(y[y1:y2, x1:x2], (k, k), 0)
+    if cx2 > cx1 and cy2 > cy1:
+        kc = max(15, (((cx2 - cx1) // 3) | 1))
+        for c in (u, v):
+            c[cy1:cy2, cx1:cx2] = cv2.GaussianBlur(c[cy1:cy2, cx1:cx2],
+                                                   (kc, kc), 0)
+
+
+def render_hdr(src, dst, detections, cum, bands, fps, pad, mode,
+               encoder, tags, band_margin=25, progress_every=60, cb=None,
+               mode_map=None):
+    """render(), but 10-bit end to end: decode the HDR source to raw
+    yuv420p10le, blur the planes in place, encode 10-bit HEVC with the
+    source's color tags (PQ/HLG + BT.2020) carried over. `hvc1` tagging
+    keeps QuickTime/Apple players happy. No preview mode — previews use
+    the SDR copy."""
+    mode_map = mode_map or {}
+    def _mode_for(cat):
+        return mode_map.get(cat, mode)
+    cb = cb or Callbacks()
+    meta = cv2.VideoCapture(src)
+    w = int(meta.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(meta.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total = int(meta.get(cv2.CAP_PROP_FRAME_COUNT))
+    meta.release()
+    cb.log(f"      encoder: {encoder} 10-bit"
+           + (" (GPU)" if encoder == "hevc_nvenc" else " (CPU)"))
+
+    dec = subprocess.Popen(
+        ["ffmpeg", "-loglevel", "error", "-i", src,
+         "-f", "rawvideo", "-pix_fmt", "yuv420p10le", "pipe:1"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        bufsize=w * h * 6)
+    vargs = (["-c:v", "hevc_nvenc", "-preset", "p4", "-cq", "19",
+              "-profile:v", "main10", "-pix_fmt", "p010le"]
+             if encoder == "hevc_nvenc"
+             else ["-c:v", "libx265", "-crf", "18", "-preset", "fast",
+                   "-pix_fmt", "yuv420p10le"])
+    targs = [a for kv in (tags or {}).items() for a in kv]
+    enc = subprocess.Popen(
+        ["ffmpeg", "-y", "-loglevel", "error",
+         "-f", "rawvideo", "-pix_fmt", "yuv420p10le",
+         "-s", f"{w}x{h}", "-r", f"{fps:.6f}", "-i", "pipe:0",
+         "-i", src, "-map", "0:v:0", "-map", "1:a:0?",
+         *vargs, *targs, "-tag:v", "hvc1", "-c:a", "copy", dst],
+        stdin=subprocess.PIPE)
+
+    buckets = {}
+    for d in detections:
+        for s in range(int(d.t_start), int(d.t_end) + 2):
+            buckets.setdefault(s, []).append(d)
+
+    ysz, csz = w * h, (w // 2) * (h // 2)
+    fbytes = (ysz + 2 * csz) * 2
+
+    def cleanup_partial():
+        for pr in (dec, enc):
+            try:
+                if pr is enc:
+                    pr.stdin.close()
+            except Exception:
+                pass
+            pr.terminate()
+            pr.wait()
+        if os.path.exists(dst):
+            try:
+                os.remove(dst)
+            except OSError:
+                pass
+
+    idx = 0
+    while True:
+        if idx % 30 == 0 and cb.cancelled():
+            cleanup_partial()
+            raise PipelineCancelled()
+        raw = dec.stdout.read(fbytes)
+        if len(raw) < fbytes:
+            break
+        buf = np.frombuffer(raw, dtype=np.uint16).copy()
+        y = buf[:ysz].reshape(h, w)
+        u = buf[ysz:ysz + csz].reshape(h // 2, w // 2)
+        v = buf[ysz + csz:].reshape(h // 2, w // 2)
+        t = idx / fps
+        ox, oy = cum[min(idx, len(cum) - 1)]
+
+        for d in buckets.get(int(t), []):
+            if not (d.t_start - 0.01 <= t <= d.t_end + 0.01):
+                continue
+            drift = min(24.0, 0.05 * (abs(ox - d.aoff[0]) + abs(oy - d.aoff[1])))
+            px = pad + drift
+            _blur_yuv10(y, u, v, d.cbox[0] + ox - px, d.cbox[1] + oy - px,
+                        d.cbox[2] + ox + px, d.cbox[3] + oy + px,
+                        _mode_for(d.category))
+
+        bx, by = bands[min(idx, len(bands) - 1)]
+        vals = set(mode_map.values()) | {mode}
+        band_mode = ("box" if "box" in vals else
+                     "mosaic" if "mosaic" in vals else "blur")
+        def band(x1, y1_, x2, y2_):
+            _blur_yuv10(y, u, v, x1, y1_, x2, y2_, band_mode)
+        if by < -2:
+            band(0, h - (abs(by) + band_margin), w, h)
+        elif by > 2:
+            band(0, 0, w, by + band_margin)
+        if bx < -2:
+            band(w - (abs(bx) + band_margin), 0, w, h)
+        elif bx > 2:
+            band(0, 0, bx + band_margin, h)
+
+        enc.stdin.write(buf.tobytes())
+        idx += 1
+        if idx % progress_every == 0:
+            cb.progress("render", idx, total)
+        if idx % 300 == 0:
+            cb.log(f"  rendering… {idx}/{max(total, idx)}")
+
+    dec.stdout.close()
+    dec.wait()
+    cb.progress("render", max(total, idx), max(total, idx))
+    enc.stdin.close()
+    rc = enc.wait()
+    if rc != 0:
+        raise RuntimeError(f"HDR encode failed (ffmpeg exit {rc})")
+    cb.log(f"      HDR preserved: 10-bit HEVC, color tags "
+           + (", ".join(f"{k.lstrip('-')}={v}" for k, v in (tags or {}).items())
+              or "(none in source)"))
+
+
 def render(src, dst, detections, cum, bands, fps, pad, mode, preview,
            encoder="auto", band_margin=25, progress_every=60, cb=None,
            mode_map=None, draw_scores=False):
@@ -1894,6 +2094,7 @@ def write_report(path, args, state, output_path=None):
                            if getattr(args, "original_video", None) else None),
         "vfr_normalized": bool(getattr(args, "original_video", None)),
         "hdr_tonemapped": bool(getattr(args, "hdr_tonemapped", False)),
+        "hdr_output": bool(getattr(args, "hdr_source", None)),
         "zones": getattr(args, "zones_data", None),
         "settings": _settings_dict(args),
     }
@@ -2034,11 +2235,13 @@ _TONEMAP_VF = ("zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,"
 
 
 def normalize_vfr(args, cb):
-    """Intake normalization, one ffmpeg pass: VFR input is transcoded to
-    CFR (frame->time mapping assumes CFR), HDR input is tone-mapped to SDR
-    BT.709 (the 8-bit pipeline can't carry HDR, and decoding it naively
-    washes the colors out). Reuses NVENC when available. No-op for
-    CFR SDR input."""
+    """Intake normalization: VFR input is transcoded to CFR (frame->time
+    mapping assumes CFR); HDR input additionally gets a tone-mapped SDR
+    BT.709 copy for SCANNING (detectors are 8-bit, and naive decode washes
+    colors out). When the output should stay HDR (--hdr-output match, the
+    default), a 10-bit CFR HDR source is kept for the render and
+    args.hdr_source/hdr_encoder/hdr_tags are set. Reuses NVENC when
+    available. No-op for CFR SDR input."""
     if getattr(args, "no_vfr_fix", False) or getattr(args, "vfr", "auto") == "ignore":
         return
     is_vfr, avg = probe_vfr(args.video)
@@ -2052,43 +2255,106 @@ def normalize_vfr(args, cb):
         return
     target = int(round(avg)) if avg and 10 <= avg <= 120 else 30
     out_ref = args.output or os.path.splitext(args.video)[0] + "_redacted.mp4"
-    fixed = os.path.join(os.path.dirname(os.path.abspath(out_ref)),
-                         os.path.splitext(os.path.basename(args.video))[0]
-                         + (".cfr.mp4" if is_vfr else ".sdr.mp4"))
+    base = os.path.join(os.path.dirname(os.path.abspath(out_ref)),
+                        os.path.splitext(os.path.basename(args.video))[0])
+    src0 = args.video
+
+    def _cached(path):
+        return (os.path.exists(path)
+                and os.path.getmtime(path) > os.path.getmtime(src0))
+
+    def _encode(inp, outp, cfr, tonemap, vargs, extra=None):
+        tmargs = (["-vf", _TONEMAP_VF, "-color_primaries", "bt709",
+                   "-color_trc", "bt709", "-colorspace", "bt709"]
+                  if tonemap else [])
+        attempts = ([["-fps_mode", "cfr", "-r", str(target)],
+                     ["-vsync", "cfr", "-r", str(target)]] if cfr else [[]])
+        for cfrargs in attempts:
+            p = subprocess.run(["ffmpeg", "-y", "-loglevel", "error",
+                                "-i", inp, *cfrargs, *tmargs, *vargs,
+                                *(extra or []), "-c:a", "copy", outp],
+                               capture_output=True, text=True)
+            if p.returncode == 0:
+                return
+        raise RuntimeError("input normalization failed: "
+                           + (p.stderr or "").strip()[-300:])
+
+    codec = nvenc_available(getattr(args, "encoder", "auto"), cb)
+    sdr_vargs = ((["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "18"]
+                  if codec == "h264_nvenc"
+                  else ["-c:v", "libx264", "-crf", "18", "-preset", "fast"])
+                 + ["-pix_fmt", "yuv420p"])
     if is_vfr:
         cb.log(f"      input is VFR (avg {avg:.2f} fps) — normalizing to CFR "
                f"{target} fps first")
-    if is_hdr:
-        cb.log(f"      input is {hdesc} HDR — tone-mapping to SDR (BT.709) "
-               "for processing: colors are converted properly, but the "
-               "output is SDR (true HDR output is not yet supported)")
-    if (os.path.exists(fixed)
-            and os.path.getmtime(fixed) > os.path.getmtime(args.video)):
-        cb.log(f"      reusing existing {os.path.basename(fixed)}")
-    else:
-        codec = nvenc_available(getattr(args, "encoder", "auto"), cb)
-        vargs = (["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "18"]
-                 if codec == "h264_nvenc"
-                 else ["-c:v", "libx264", "-crf", "18", "-preset", "fast"])
-        tmargs = (["-vf", _TONEMAP_VF, "-color_primaries", "bt709",
-                   "-color_trc", "bt709", "-colorspace", "bt709"]
-                  if is_hdr else [])
-        attempts = ([["-fps_mode", "cfr", "-r", str(target)],
-                     ["-vsync", "cfr", "-r", str(target)]] if is_vfr
-                    else [[]])
-        for cfrargs in attempts:
-            p = subprocess.run(["ffmpeg", "-y", "-loglevel", "error",
-                                "-i", args.video, *cfrargs, *tmargs, *vargs,
-                                "-pix_fmt", "yuv420p", "-c:a", "copy", fixed],
-                               capture_output=True, text=True)
-            if p.returncode == 0:
-                break
+
+    if not is_hdr:
+        fixed = base + ".cfr.mp4"
+        if _cached(fixed):
+            cb.log(f"      reusing existing {os.path.basename(fixed)}")
         else:
-            raise RuntimeError("input normalization failed: "
-                               + (p.stderr or "").strip()[-300:])
-    args.original_video = args.video
-    args.hdr_tonemapped = bool(is_hdr)
-    args.video = fixed
+            _encode(src0, fixed, cfr=True, tonemap=False, vargs=sdr_vargs)
+        args.original_video = src0
+        args.hdr_tonemapped = False
+        args.video = fixed
+        return
+
+    # ---- HDR input ----
+    want_hdr = getattr(args, "hdr_output", "match") != "sdr"
+    henc = hevc10_encoder(getattr(args, "encoder", "auto"), cb) if want_hdr \
+        else None
+    if want_hdr and henc is None:
+        cb.log("      NOTE: no 10-bit HEVC encoder available (GPU NVENC or "
+               "libx265) — HDR cannot be preserved; output will be "
+               "tone-mapped SDR instead.")
+        want_hdr = False
+
+    # 1. the timeline the whole job runs on: CFR, still 10-bit HDR when the
+    #    output should stay HDR (VFR HDR sources need this extra pass so the
+    #    scan copy and the render source share exact frame times)
+    hdr_src = src0
+    if is_vfr:
+        if want_hdr:
+            hdr_src = base + ".cfr.hdr.mp4"
+            if _cached(hdr_src):
+                cb.log(f"      reusing existing {os.path.basename(hdr_src)}")
+            else:
+                hv = (["-c:v", "hevc_nvenc", "-preset", "p4", "-cq", "18",
+                       "-profile:v", "main10", "-pix_fmt", "p010le"]
+                      if henc == "hevc_nvenc"
+                      else ["-c:v", "libx265", "-crf", "18", "-preset",
+                            "fast", "-pix_fmt", "yuv420p10le"])
+                keep = [a for kv in color_tags(src0).items() for a in kv]
+                _encode(src0, hdr_src, cfr=True, tonemap=False,
+                        vargs=hv, extra=keep + ["-tag:v", "hvc1"])
+        else:
+            hdr_src = None   # no HDR render: single combined pass below
+
+    # 2. tone-mapped SDR copy for scanning (and for the output when the
+    #    user chose SDR / no 10-bit encoder exists)
+    sdr = base + ".sdr.mp4"
+    cb.log(f"      input is {hdesc} HDR — tone-mapping a copy to SDR "
+           "(BT.709) for detection"
+           + ("" if want_hdr else "; output will be SDR"))
+    if _cached(sdr):
+        cb.log(f"      reusing existing {os.path.basename(sdr)}")
+    else:
+        _encode(hdr_src or src0, sdr, cfr=(is_vfr and hdr_src is None),
+                tonemap=True, vargs=sdr_vargs)
+
+    args.original_video = src0
+    args.hdr_tonemapped = True
+    args.video = sdr
+    if want_hdr:
+        args.hdr_source = hdr_src if hdr_src else src0
+        args.hdr_encoder = henc
+        args.hdr_tags = color_tags(args.hdr_source)
+        cb.log(f"      HDR output: preserving {hdesc} — 10-bit HEVC "
+               f"via {henc}")
+        if henc == "libx265":
+            cb.log("      NOTE: the GPU here can't encode 10-bit HEVC — "
+                   "HDR will be processed on the CPU (libx265), which is "
+                   "MUCH slower. Choose SDR output for full speed.")
 
 
 # ----------------------------------------------------------------------------
@@ -2119,6 +2385,11 @@ def build_parser():
                          "cropped word/face (default 8)")
     ap.add_argument("--no-vfr-fix", action="store_true",
                     help="skip automatic CFR normalization of VFR input")
+    ap.add_argument("--hdr-output", choices=["match", "sdr"], default="match",
+                    help="for HDR input: 'match' (default) keeps the output "
+                         "HDR (10-bit HEVC, PQ/HLG preserved); 'sdr' "
+                         "tone-maps the output to SDR BT.709. SDR input "
+                         "always renders SDR — output matches the source.")
     ap.add_argument("--dense-faces", action="store_true",
                     help="run the face detector on EVERY frame (not just at "
                          "scan intervals) so fast-moving faces stay covered. "
@@ -3030,11 +3301,19 @@ def run_render(args, state, cb=None):
     dst = args.output or os.path.splitext(args.video)[0] + (
         "_preview.mp4" if args.preview else "_redacted.mp4")
     cb.log(f"[4/4] Rendering -> {dst}")
-    render(args.video, dst, state["detections"], state["cum"], state["bands"],
-           state["fps"], pad=args.pad, mode=args.mode, preview=args.preview,
-           mode_map=getattr(args, "mode_map", None),
-           draw_scores=bool(getattr(args, "draw_scores", False)),
-           encoder=args.encoder, cb=cb)
+    if getattr(args, "hdr_source", None) and not args.preview:
+        render_hdr(args.hdr_source, dst, state["detections"], state["cum"],
+                   state["bands"], state["fps"], pad=args.pad, mode=args.mode,
+                   encoder=args.hdr_encoder,
+                   tags=getattr(args, "hdr_tags", {}),
+                   mode_map=getattr(args, "mode_map", None), cb=cb)
+    else:
+        render(args.video, dst, state["detections"], state["cum"],
+               state["bands"],
+               state["fps"], pad=args.pad, mode=args.mode, preview=args.preview,
+               mode_map=getattr(args, "mode_map", None),
+               draw_scores=bool(getattr(args, "draw_scores", False)),
+               encoder=args.encoder, cb=cb)
     if args.report:
         write_report(args.report, args, state, output_path=dst)
         cb.log(f"      audit report: {args.report} (contains PHI text — protect it)")
@@ -3047,9 +3326,17 @@ def run_pipeline(args, cb=None):
     dict; raises PipelineCancelled if cb cancels."""
     cb = cb or Callbacks()
     if getattr(args, "from_report", None):
-        normalize_vfr(args, cb)
         cb.log(f"[1/2] Loading detections from {args.from_report}")
         dets, rstate, prov = load_report(args.from_report)
+        orig = prov.get("original_input")
+        if orig and os.path.exists(orig) \
+                and os.path.abspath(orig) != os.path.abspath(args.video):
+            # re-renders must start from the TRUE original so intake can
+            # re-derive the HDR/CFR context (cached intermediates are
+            # reused). Rendering straight from the tone-mapped scan copy
+            # silently downgraded HDR jobs to SDR output.
+            args.video = orig
+        normalize_vfr(args, cb)
         if rstate is None:
             raise RuntimeError("report has no render_state — re-run a scan "
                                "with --report using openscrub v4+")

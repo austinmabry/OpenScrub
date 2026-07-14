@@ -53,6 +53,13 @@ general-purpose.
 - **Human review** — every detection is shown as a thumbnail you can keep or
   blur, with an interactive box editor to resize, move, add, or time-bound
   any blur before rendering.
+- **HDR in, HDR out** — iPhone (Dolby Vision/HLG) and HDR10 footage keeps
+  its 10-bit HDR signal through redaction: output is 10-bit HEVC with the
+  original color primaries and transfer preserved, and the blur is applied
+  directly in the native color domain (untouched pixels are never
+  color-converted). Prefer compatibility instead? One toggle tone-maps the
+  output to SDR properly — no washed-out colors either way. SDR sources
+  always render SDR: output matches the source.
 - **Audit trail** — each run produces a report with SHA-256 hashes of input
   and output for provenance.
 
@@ -295,6 +302,38 @@ then gates every request (recommended). Either way this is LAN-grade
 protection — never expose the port to the internet. The jobs folder on
 the server contains PHI (uploads + reports); protect it accordingly.
 `--retain-days` auto-deletes finished job folders (default 7 days).
+
+## HDR support
+
+OpenScrub matches the output to the source:
+
+- **SDR source → SDR output.** Nothing changes.
+- **HDR source → HDR output by default.** iPhone Dolby Vision, HLG, and
+  HDR10 footage is detected at intake and rendered as **10-bit HEVC** with
+  the source's color primaries and transfer function (BT.2020 PQ/HLG)
+  preserved. Blurs are applied directly in the 10-bit native color domain,
+  so pixels outside the redacted regions never pass through a color
+  conversion. Set `--hdr-output sdr` (CLI) or the **HDR output** dropdown
+  (web) to tone-map the output to SDR BT.709 instead — the proper
+  conversion, not a washed-out naive decode.
+- Detection always runs on an internally tone-mapped SDR copy (the
+  detectors are 8-bit); it shares the exact frame timeline with the HDR
+  render, so blur timing is identical.
+
+Notes:
+
+- **Dolby Vision** clips keep their HDR10/HLG base layer — the output is
+  real HDR — but the Dolby Vision *dynamic metadata* (per-scene RPUs) is
+  dropped: it is a proprietary layer that cannot be re-authored with open
+  tools after the frames are modified. Players simply treat the result as
+  HDR10/HLG, which is how most non-Apple devices play these files anyway.
+- **Hardware:** a GPU with a 10-bit HEVC encoder (NVENC on GTX 10-series
+  or newer) renders HDR at full speed. Without one, OpenScrub says so in
+  the job log and falls back to CPU encoding (libx265) — correct output,
+  much slower. If neither encoder exists, it falls back to SDR output
+  with a clear notice; it never fails silently.
+- The audit report records `hdr_tonemapped` (detection copy was created)
+  and `hdr_output` (output kept HDR) in its provenance block.
 
 ## ⚠️ Disclaimer — read this before using openscrub on real PHI
 

@@ -513,3 +513,72 @@ def test_report_roundtrip_preserves_tracks(tmp_path):
     openscrub.write_report(rp, args, state)
     dets, _, _ = openscrub.load_report(rp)
     assert dets[0].dense is True and dets[0].track == 3
+
+
+def _hdr_clip(path):
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error",
+                    "-f", "lavfi",
+                    "-i", "testsrc2=duration=2:size=1280x720:rate=30",
+                    "-vf", "drawbox=x=50:y=260:w=400:h=60:color=white:t=fill",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                    "-color_primaries", "bt2020", "-color_trc", "smpte2084",
+                    "-colorspace", "bt2020nc", path], check=True)
+
+
+def _vstream(path):
+    p = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
+                        "-show_entries",
+                        "stream=codec_name,pix_fmt,color_transfer",
+                        "-of", "json", path], capture_output=True, text=True)
+    return json.loads(p.stdout)["streams"][0]
+
+
+def test_hdr_output_preserved(tmp_path):
+    """HDR source + default --hdr-output match: output must be 10-bit HEVC
+    with the PQ transfer preserved, and the blur must land in it."""
+    import shutil as _sh
+    if not (_sh.which("ffmpeg") and _sh.which("ffprobe")):
+        pytest.skip("ffmpeg not available")
+    if openscrub.hevc10_encoder("x264") is None:
+        pytest.skip("no 10-bit HEVC encoder in this environment")
+    src = str(tmp_path / "hdrsrc.mp4")
+    out = cv2.VideoWriter(src + ".tmp.mp4", cv2.VideoWriter_fourcc(*"mp4v"),
+                          30, (1280, 720))
+    fr = np.full((720, 1280, 3), 245, np.uint8)
+    cv2.putText(fr, "SSN 123-45-6789", (60, 300), FONT, 1.1, (20, 20, 20), 2)
+    for _ in range(60):
+        out.write(fr)
+    out.release()
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error",
+                    "-i", src + ".tmp.mp4", "-c:v", "libx264",
+                    "-color_primaries", "bt2020", "-color_trc", "smpte2084",
+                    "-colorspace", "bt2020nc", src], check=True)
+    _, dets = run(src, "--categories", "ssn", "--encoder", "x264")
+    st = _vstream(src.replace(".mp4", "_red.mp4"))
+    assert st["codec_name"] == "hevc", st
+    assert "10" in st["pix_fmt"], st
+    assert st.get("color_transfer") == "smpte2084", st
+    ssn = [d for d in dets if d["category"] == "ssn"]
+    assert ssn, "SSN detected on the tone-mapped scan copy"
+    b = ssn[0]["cbox"]
+    v = sharp(src.replace(".mp4", "_red.mp4"), 1.0,
+              (b[0] + 4, b[1] + 4, b[2] - 4, b[3] - 4))
+    assert v < 300, f"HDR output not blurred inside the detection ({v:.0f})"
+
+
+def test_hdr_output_sdr_toggle(tmp_path):
+    """--hdr-output sdr on an HDR source: output must be plain SDR H.264
+    (the tone-mapped path), never HDR."""
+    import shutil as _sh
+    if not (_sh.which("ffmpeg") and _sh.which("ffprobe")):
+        pytest.skip("ffmpeg not available")
+    if not (openscrub._ffmpeg_has("zscale") and openscrub._ffmpeg_has("tonemap")):
+        pytest.skip("ffmpeg lacks zscale/tonemap")
+    src = str(tmp_path / "hdrsrc2.mp4")
+    _hdr_clip(src)
+    _, _ = run(src, "--categories", "ssn", "--encoder", "x264",
+               "--hdr-output", "sdr")
+    st = _vstream(src.replace(".mp4", "_red.mp4"))
+    assert st["codec_name"] == "h264", st
+    assert st.get("color_transfer") in (None, "bt709", "unknown"), st
+    assert openscrub.probe_hdr(src.replace(".mp4", "_red.mp4")) == (False, None)
