@@ -1,0 +1,10 @@
+OpenScrub
+Copyright 2026 Austin Mabry
+
+This product includes software developed as part of the OpenScrub
+project (https://github.com/austinmabry/OpenScrub).
+
+The Docker images published for this project additionally contain
+third-party components (FFmpeg, Tesseract OCR, PaddleOCR, spaCy,
+OpenCV, and others) under their own licenses; those components are
+aggregated alongside OpenScrub, not part of it.

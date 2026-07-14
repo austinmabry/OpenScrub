@@ -100,5 +100,6 @@ include = [
     "requirements.txt",
     "README.md",
     "LICENSE",
+    "NOTICE",
     "test_openscrub.py",
 ]

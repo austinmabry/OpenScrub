@@ -565,3 +565,11 @@ Two reasoning layers prevent "flash of PHI" from intermittent OCR misses:
 | Benign numbers blurred as MRN | tighten --mrn-regex |
 | Blur box clips edges of text | --pad 12 |
 | Small text missed entirely | install paddleocr; record at native resolution |
+
+## License
+
+OpenScrub is licensed under the [Apache License 2.0](LICENSE)
+(© 2026 Austin Mabry — see [NOTICE](NOTICE)). The published Docker
+images additionally contain third-party components (FFmpeg, Tesseract
+OCR, PaddleOCR, spaCy, OpenCV, and others) under their own licenses;
+those are aggregated alongside OpenScrub, not relicensed by it.
