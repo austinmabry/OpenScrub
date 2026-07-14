@@ -249,6 +249,8 @@ def build_args(job, for_render=False):
             "--hdr-output", (o.get("hdr_output")
                              if o.get("hdr_output") in ("match", "sdr")
                              else "match"),
+            "--codec", (o.get("codec")
+                        if o.get("codec") in ("h264", "hevc") else "h264"),
             "--categories", o.get("categories",
                                   "name,dob,phone,ssn,mrn,email,address,card,apikey,ipaddr,plate,face"),
             "-o", os.path.join(jdir, "output."
@@ -885,9 +887,12 @@ def job_download(jid):
     job = JOBS.get(jid) or abort(404)
     if not job["output"] or not os.path.exists(job["output"]):
         abort(404)
+    # download name must carry the REAL container extension: a .mkv render
+    # saved as "_redacted.mp4" looks like the format choice was ignored
+    ext = os.path.splitext(job["output"])[1] or ".mp4"
     return send_file(job["output"], as_attachment=True,
                      download_name=os.path.splitext(job["name"])[0]
-                     + "_redacted.mp4")
+                     + "_redacted" + ext)
 
 
 @app.route("/api/jobs/<jid>/report")
@@ -998,11 +1003,19 @@ padding:8px 12px;font-size:13px}
 <input type="file" id="file" accept="video/*" multiple>
 <label>…or path on the server</label>
 <input type="text" id="spath" placeholder="C:\\recordings\\demo.mp4">
-<label>Output format<span class="qm" data-tip="Container for the redacted file. The video inside is re-encoded H.264 either way; MP4 is right for DaVinci Resolve and most tools.">?</span></label>
+<label>Output format<span class="qm" data-tip="Container for the redacted file. MP4 is right for DaVinci Resolve and most tools; the codec inside is chosen below.">?</span></label>
 <select id="outfmt" style="max-width:340px">
-<option value="mp4">MP4 — H.264 (recommended)</option>
+<option value="mp4">MP4 (recommended)</option>
 <option value="mov">MOV — QuickTime container</option>
 <option value="mkv">MKV — Matroska container</option></select>
+<label>Video codec<span class="qm" data-tip="H.264 plays everywhere and is the safe default. HEVC (H.265) makes noticeably smaller files at the same quality but needs newer players. Note: when the source is HDR and HDR output is set to match source, the render always uses 10-bit HEVC regardless of this setting.">?</span></label>
+<select id="vcodec" style="max-width:340px">
+<option value="h264">H.264 (plays everywhere)</option>
+<option value="hevc">HEVC / H.265 (smaller files)</option></select>
+<label>HDR output<span class="qm" data-tip="Only applies when the SOURCE video is HDR (iPhone Dolby Vision, HLG, HDR10). Match source keeps the output HDR: 10-bit HEVC with the original color signal preserved. Tone-map to SDR converts to standard-range BT.709 for maximum player compatibility. SDR sources always render SDR. Note: without a GPU that encodes 10-bit HEVC, HDR output falls back to the CPU and is much slower.">?</span></label>
+<select id="hdrout" style="max-width:340px">
+<option value="match">match source (keep HDR)</option>
+<option value="sdr">tone-map to SDR</option></select>
 <div class="grid2">
 <div><label>OCR engine<span class="qm" data-tip="Reads on-screen text. Paddle is the most accurate (GPU-capable); Tesseract is the lighter fallback. Auto picks Paddle when installed.">?</span></label><select id="engine">
 <option>auto</option><option>paddle</option><option>tesseract</option></select></div>
@@ -1011,9 +1024,6 @@ padding:8px 12px;font-size:13px}
 <div><label>Encoder<span class="qm" data-tip="Encoder for the final render. NVENC uses the GPU's dedicated encode chip (fast, frees the CPU); x264 is CPU-only. Auto tests NVENC and falls back safely.">?</span></label><select id="encoder">
 <option>auto</option><option value="nvenc">NVENC (GPU)</option>
 <option value="x264">x264 (CPU)</option></select></div>
-<div><label>HDR output<span class="qm" data-tip="Only applies when the SOURCE video is HDR (iPhone Dolby Vision, HLG, HDR10). Match source keeps the output HDR: 10-bit HEVC with the original color signal preserved. Tone-map to SDR converts to standard-range BT.709 for maximum player compatibility. SDR sources always render SDR. Note: without a GPU that encodes 10-bit HEVC, HDR output falls back to the CPU and is much slower.">?</span></label><select id="hdrout">
-<option value="match">match source (keep HDR)</option>
-<option value="sdr">tone-map to SDR</option></select></div>
 <div><label>Redaction (default)<span class="qm" data-tip="Default style for every category. blur = Gaussian blur; readable structure is destroyed but a blur is, in principle, partially reversible — short high-contrast strings (an SSN or MRN in a fixed font) are the most vulnerable. box = solid black; pixels are set to zero, so nothing is recoverable. Override per category below.">?</span></label><select id="mode" onchange="renderCats()">
 <option>blur</option><option>box</option><option>mosaic</option></select></div>
 <div><label>Sample interval (s)<span class="qm" data-tip="How often a full OCR scan runs. Lower catches short-lived PHI sooner but scans take longer. Backtracking automatically closes most of the gap between scans, so 0.5 is a good default.">?</span></label><input type="number" id="si" value="0.5" step="0.1"></div>
@@ -1137,7 +1147,7 @@ let CC=[];          // custom regex categories, loaded by ccLoad()
 function renderCats(){
  const gm=document.getElementById("mode").value;
  document.getElementById("cats").innerHTML=CATS.concat(CC.map(x=>x.id)).map(c=>{
-  const on=CATMODE[c]===undefined?true:CATMODE[c]!=="__off";
+  const on=CATMODE[c]===undefined?false:CATMODE[c]!=="__off";
   const m=(CATMODE[c]&&CATMODE[c]!=="__off")?CATMODE[c]:"";
   return `<span class="catrow">
    <label><input type="checkbox" class="cat" value="${c}" ${on?"checked":""}
@@ -1206,6 +1216,7 @@ function opts(){return{
  mode_map:Object.entries(CATMODE).filter(([c,m])=>m==="blur"||m==="box")
    .map(([c,m])=>`${c}=${m}`).join(","),
  allow_names:allow.value,extra_names:extra.value,hdr_output:hdrout.value,
+ codec:vcodec.value,
  no_memory:nomem.checked,preview_mode:pmode.checked,
  dense_faces:densefaces.checked,face_threshold:+fthr.value,
  detect_scale:+dscale.value,draw_scores:drawscores.checked}}
@@ -1215,6 +1226,8 @@ function startJob(){
  if(UPLOADING)return;                       // double-click guard
  if(!file.files.length&&!spath.value.trim()){
   alert("Choose a video file or enter a server path first.");return}
+ if(![...document.querySelectorAll(".cat:checked")].length){
+  alert("Select at least one category to detect (faces, SSNs, names, …) — nothing is checked.");return}
  const fd=new FormData();
  let bytes=0;
  for(const f of file.files){fd.append("video",f);bytes+=f.size}
@@ -2391,7 +2404,7 @@ def zones_page():
                     for c in load_custom_cats())
     if extra:
         page = page.replace('face:"#ec4899"', 'face:"#ec4899"%s' % extra)
-    return page
+    return page.replace("%%VERSION%%", openscrub.VERSION)
 
 
 @app.route("/api/certinfo")

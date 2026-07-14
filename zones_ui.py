@@ -471,4 +471,8 @@ function scrub(){
 }
 
 gridBg();chips();load();jobs();setMode('draw');tlSync();
-</script></body></html>"""
+</script>
+<footer style="text-align:center;color:#9ca3af;font-size:12px;padding:18px 12px 26px">
+OpenScrub v%%VERSION%% · <a href="license" style="color:#6b7280">Apache-2.0 license</a>
+· best-effort redaction — always review output before sharing PHI</footer>
+</body></html>"""

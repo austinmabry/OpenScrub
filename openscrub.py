@@ -34,7 +34,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.27"
+VERSION = "1.0.28"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -1417,12 +1417,14 @@ def render_hdr(src, dst, detections, cum, bands, fps, pad, mode,
              else ["-c:v", "libx265", "-crf", "18", "-preset", "fast",
                    "-pix_fmt", "yuv420p10le"])
     targs = [a for kv in (tags or {}).items() for a in kv]
+    if os.path.splitext(dst)[1].lower() in (".mp4", ".mov"):
+        targs += ["-tag:v", "hvc1"]          # QuickTime/Apple compatibility
     enc = subprocess.Popen(
         ["ffmpeg", "-y", "-loglevel", "error",
          "-f", "rawvideo", "-pix_fmt", "yuv420p10le",
          "-s", f"{w}x{h}", "-r", f"{fps:.6f}", "-i", "pipe:0",
          "-i", src, "-map", "0:v:0", "-map", "1:a:0?",
-         *vargs, *targs, "-tag:v", "hvc1", "-c:a", "copy", dst],
+         *vargs, *targs, "-c:a", "copy", dst],
         stdin=subprocess.PIPE)
 
     buckets = {}
@@ -1508,7 +1510,7 @@ def render_hdr(src, dst, detections, cum, bands, fps, pad, mode,
 
 def render(src, dst, detections, cum, bands, fps, pad, mode, preview,
            encoder="auto", band_margin=25, progress_every=60, cb=None,
-           mode_map=None, draw_scores=False):
+           mode_map=None, draw_scores=False, vcodec="h264"):
     # mode_map: {category: "blur"|"box"} overrides the global `mode` per
     # category. Lets you black-box the reversible-blur-vulnerable categories
     # (SSN, MRN, account numbers) while blurring faces, in one render.
@@ -1526,12 +1528,27 @@ def render(src, dst, detections, cum, bands, fps, pad, mode, preview,
     out = None
     tmp_video = None
     codec = nvenc_available(encoder, cb)
+    if vcodec == "hevc" and codec:
+        henc = hevc10_encoder(encoder, cb)   # verified hevc encoder ladder
+        if henc is None:
+            cb.log("      note: no HEVC encoder available — falling back "
+                   "to H.264")
+        else:
+            codec = henc
     if codec:
         cb.log(f"      encoder: {codec}"
-               + (" (GPU)" if codec == "h264_nvenc" else " (CPU)"))
-        vargs = (["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "19"]
-                 if codec == "h264_nvenc"
-                 else ["-c:v", "libx264", "-crf", "18", "-preset", "fast"])
+               + (" (GPU)" if codec.endswith("_nvenc") else " (CPU)"))
+        if codec == "h264_nvenc":
+            vargs = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "19"]
+        elif codec == "hevc_nvenc":
+            vargs = ["-c:v", "hevc_nvenc", "-preset", "p4", "-cq", "19"]
+        elif codec == "libx265":
+            vargs = ["-c:v", "libx265", "-crf", "20", "-preset", "fast"]
+        else:
+            vargs = ["-c:v", "libx264", "-crf", "18", "-preset", "fast"]
+        if codec in ("hevc_nvenc", "libx265") \
+                and os.path.splitext(dst)[1].lower() in (".mp4", ".mov"):
+            vargs += ["-tag:v", "hvc1"]      # QuickTime/Apple compatibility
         cmd = ["ffmpeg", "-y", "-loglevel", "error",
                "-f", "rawvideo", "-pix_fmt", "bgr24",
                "-s", f"{w}x{h}", "-r", f"{fps:.6f}", "-i", "pipe:0",
@@ -2385,6 +2402,10 @@ def build_parser():
                          "cropped word/face (default 8)")
     ap.add_argument("--no-vfr-fix", action="store_true",
                     help="skip automatic CFR normalization of VFR input")
+    ap.add_argument("--codec", choices=["h264", "hevc"], default="h264",
+                    help="video codec for the output: h264 (default, plays "
+                         "everywhere) or hevc (H.265, smaller files). HDR "
+                         "output always uses 10-bit HEVC regardless.")
     ap.add_argument("--hdr-output", choices=["match", "sdr"], default="match",
                     help="for HDR input: 'match' (default) keeps the output "
                          "HDR (10-bit HEVC, PQ/HLG preserved); 'sdr' "
@@ -2766,6 +2787,7 @@ def run_scan(args, cb=None):
                + (" inside face zone(s)" if face_zone_rects
                   else " (whole frame — set a face zone to speed this up)"))
     idx = 0
+    dense_now = []
     while True:
         if idx % 30 == 0 and cb.cancelled():
             cap.release()
@@ -2786,6 +2808,8 @@ def run_scan(args, cb=None):
             continue
         small = (cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), None,
                             fx=BT_SCALE, fy=BT_SCALE) if bt_on else None)
+        if idx % max(1, dense_stride) == 0:
+            dense_now = []      # latest dense boxes, drawn on the preview
         # dense face detection: find faces on THIS frame at their true screen
         # position, independent of the OCR scan cadence — per-frame
         # re-detection (not tracking), so a face moving fast across the frame
@@ -2808,6 +2832,7 @@ def run_scan(args, cb=None):
                      int(fx2 - cx), int(fy2 - cy)),
                     "face", "face", round(conf, 3), (cx, cy),
                     dense=True))
+                dense_now.append((fx1, fy1, fx2, fy2))
         # per-frame license-plate detection: plates on dashcam/CCTV footage move
         # fast, so (like dense faces) we re-detect every frame at the true
         # position rather than tracking. Only runs if a plate model is loaded.
@@ -2827,6 +2852,7 @@ def run_scan(args, cb=None):
                      int(px2 - cx), int(py2 - cy)),
                     "plate", "plate", round(pconf, 3), (cx, cy),
                     dense=True))
+                dense_now.append((px1, py1, px2, py2))
         moved = abs(cx - scan_cx) + abs(cy - scan_cy)
         step_eff, trig_eff = step, args.scan_trigger
         if adapt:
@@ -3027,7 +3053,13 @@ def run_scan(args, cb=None):
                                   (int(d.cbox[0] + cx), int(d.cbox[1] + cy)),
                                   (int(d.cbox[2] + cx), int(d.cbox[3] + cy)),
                                   (0, 0, 255), 2)
-                cb.scan_frame(shown, t, len(found))
+                # dense faces/plates bypass `found`, so camera footage lost
+                # its red boxes on the live preview — draw the current
+                # frame's dense detections too (display only)
+                for (dx1, dy1, dx2, dy2) in dense_now:
+                    cv2.rectangle(shown, (int(dx1), int(dy1)),
+                                  (int(dx2), int(dy2)), (0, 0, 255), 2)
+                cb.scan_frame(shown, t, len(found) + len(dense_now))
             cb.progress("scan", idx, total)
         bands.append((cx - scan_cx, cy - scan_cy) if track_on
                      else (0.0, 0.0))
@@ -3313,6 +3345,7 @@ def run_render(args, state, cb=None):
                state["fps"], pad=args.pad, mode=args.mode, preview=args.preview,
                mode_map=getattr(args, "mode_map", None),
                draw_scores=bool(getattr(args, "draw_scores", False)),
+               vcodec=getattr(args, "codec", "h264"),
                encoder=args.encoder, cb=cb)
     if args.report:
         write_report(args.report, args, state, output_path=dst)

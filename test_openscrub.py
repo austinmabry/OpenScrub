@@ -582,3 +582,33 @@ def test_hdr_output_sdr_toggle(tmp_path):
     assert st["codec_name"] == "h264", st
     assert st.get("color_transfer") in (None, "bt709", "unknown"), st
     assert openscrub.probe_hdr(src.replace(".mp4", "_red.mp4")) == (False, None)
+
+
+def test_codec_and_container_honored(tmp_path):
+    """--codec hevc must produce an HEVC stream, and a .mkv/.mov output
+    path must produce that actual container (the web download previously
+    renamed everything .mp4)."""
+    import shutil as _sh
+    if not (_sh.which("ffmpeg") and _sh.which("ffprobe")):
+        pytest.skip("ffmpeg not available")
+    if openscrub.hevc10_encoder("x264") is None:
+        pytest.skip("no HEVC encoder in this environment")
+    src = make_video(str(tmp_path / "c.mp4"), [(300, "SSN 123-45-6789")])
+    parser = openscrub.build_parser()
+    out = str(tmp_path / "out.mkv")
+    args = parser.parse_args([src, "--engine", "tesseract", "-o", out,
+                              "--categories", "ssn", "--encoder", "x264",
+                              "--codec", "hevc"])
+    args = openscrub._prep_args(args, parser)
+
+    class Quiet(openscrub.Callbacks):
+        def log(self, m):
+            pass
+    openscrub.run_pipeline(args, Quiet())
+    p = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
+                        "format=format_name", "-select_streams", "v:0",
+                        "-show_entries", "stream=codec_name",
+                        "-of", "json", out], capture_output=True, text=True)
+    doc = json.loads(p.stdout)
+    assert doc["streams"][0]["codec_name"] == "hevc", doc
+    assert "matroska" in doc["format"]["format_name"], doc
