@@ -756,3 +756,22 @@ def test_face_model_unions_with_yunet(tmp_path):
     assert fd2.net is not None and fd2.arch == "centerface"
     assert fd2.yunet is not None, "built-in must run alongside the model"
     assert any("UNIONED" in l for l in logs)
+
+
+def test_cuda_dnn_gating_cpu_fallback():
+    """On a CPU OpenCV build (CI, the CPU Docker image), cuda_dnn_available()
+    must be False and the detector factories must still return working
+    detectors — the GPU path is purely additive."""
+    assert openscrub.cuda_dnn_available() is False
+    y = openscrub._model_dir() + "/face_detection_yunet_2023mar.onnx"
+    if os.path.exists(y):
+        det = openscrub._make_yunet(y, (320, 320), 0.6)
+        assert det is not None
+    # env override is honored (forces CPU even if a GPU were present)
+    openscrub._CUDA_DNN = None
+    os.environ["OPENSCRUB_CPU_DNN"] = "1"
+    try:
+        assert openscrub.cuda_dnn_available() is False
+    finally:
+        del os.environ["OPENSCRUB_CPU_DNN"]
+        openscrub._CUDA_DNN = None

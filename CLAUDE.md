@@ -17,6 +17,7 @@ target is Windows 10 + NVIDIA RTX 3060.
 | `openscrub_setup.py` | `openscrub-setup` command: detects/installs Tesseract + FFmpeg (winget/apt), optional spaCy model + plate model, Windows Start Menu shortcuts. Ships in the wheel. |
 | `windows/` | Native Windows packaging: `openscrub.spec` (PyInstaller, two branded exes), `installer.iss` (Inno Setup → Program Files), `build_installer.bat` (runs both; attach output exe to the GitHub release). Build on Windows only. |
 | `install.py` | Windows-friendly installer (deps, GPU OCR, shortcut, `--with-plates`). |
+| `docker/` | `Dockerfile.opencv-cuda` builds the CUDA-OpenCV base image (rare, via opencv-cuda-base.yml); `Dockerfile.cuda.opencv-base` is the ready-to-activate CUDA image that FROMs it (copy over Dockerfile.cuda AFTER the base is built+GPU-validated). |
 | `plate_models.json` | Curated license-plate model registry (see PLATES.md). |
 | `face_models.json` | Curated optional face-model registry (CenterFace/SCRFD); built-in YuNet needs no file. Ships everywhere plate_models.json does (wheel, sdist, Dockerfiles, PyInstaller spec, updater pin-carry). |
 | `fetch_plate_models.py` | Alt path to fetch plate models via the open-image-models pip package. |
@@ -120,6 +121,15 @@ Key classes/functions (locate with grep, line numbers drift):
   downloads, the TOFU-pinned registry (per-user copy seeded from the
   packaged one; new release models merge in, pins never overwritten),
   web jobs/certs/zones. Folder deploys keep writing next to the code.
+
+OpenCV DNN device: the stock opencv-python wheel is CPU-only, so face
+detection (YuNet/SCRFD/CenterFace) + SFace grouping run on the CPU.
+`cuda_dnn_available()` (gated on `cv2.cuda.getCudaEnabledDeviceCount()>0`,
+overridable via `OPENSCRUB_CPU_DNN=1`) drives `_make_yunet`/`_make_sface`/
+`_apply_cuda_dnn`, which push those nets to `DNN_TARGET_CUDA` when a
+CUDA-built OpenCV + GPU are present (the CUDA Docker image, once it FROMs
+the opencv-cuda base). CPU builds are byte-identical to before — the GPU
+path is purely additive. Video frame DECODE stays on the CPU either way.
 
 Lazy loading: `run_scan` loads ONLY what the selected categories need —
 `text_cats = cats - {face, plate}`. No text cats → no OCR engine, no

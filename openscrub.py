@@ -1170,8 +1170,8 @@ def group_persons(dets, video, cb=None):
         urllib.request.urlretrieve(SFACE_URL, sface)
     if not os.path.exists(yunet) or os.path.getsize(yunet) < 10000:
         urllib.request.urlretrieve(YUNET_URL, yunet)
-    rec = cv2.FaceRecognizerSF_create(sface, "")
-    det = cv2.FaceDetectorYN_create(yunet, "", (320, 320), 0.5)
+    rec = _make_sface(sface)
+    det = _make_yunet(yunet, (320, 320), 0.5)
     cap = cv2.VideoCapture(video)
     embs = {}
     for tid, samples in tracks.items():
@@ -1809,6 +1809,63 @@ SFACE_URL = ("https://media.githubusercontent.com/media/opencv/opencv_zoo/"
              "face_recognition_sface_2021dec.onnx")
 
 
+# --- OpenCV DNN device selection -------------------------------------------
+# The stock opencv-python wheel is CPU-only, so face detection (YuNet/SCRFD/
+# CenterFace) and SFace grouping run on the CPU. The CUDA Docker image ships
+# a CUDA-built OpenCV; when a GPU is present we push those nets onto it. All
+# helpers fall back to CPU cleanly, so the CPU image behaves exactly as
+# before. Set OPENSCRUB_CPU_DNN=1 to force CPU even on a CUDA build.
+_CUDA_DNN = None
+
+
+def cuda_dnn_available():
+    global _CUDA_DNN
+    if _CUDA_DNN is None:
+        ok = False
+        if os.environ.get("OPENSCRUB_CPU_DNN", "").lower() not in (
+                "1", "true", "yes"):
+            try:
+                ok = (hasattr(cv2, "cuda")
+                      and cv2.cuda.getCudaEnabledDeviceCount() > 0
+                      and hasattr(cv2.dnn, "DNN_BACKEND_CUDA"))
+            except Exception:
+                ok = False
+        _CUDA_DNN = ok
+    return _CUDA_DNN
+
+
+def _apply_cuda_dnn(net):
+    """Push a cv2.dnn net to the GPU when available; no-op on CPU builds."""
+    if cuda_dnn_available():
+        try:
+            net.setPreferableBackend(cv2.dnn.DNN_BACKEND_CUDA)
+            net.setPreferableTarget(cv2.dnn.DNN_TARGET_CUDA)
+        except Exception:
+            pass
+    return net
+
+
+def _make_yunet(model, size, thresh):
+    if cuda_dnn_available():
+        try:
+            return cv2.FaceDetectorYN_create(
+                model, "", size, thresh, 0.3, 5000,
+                cv2.dnn.DNN_BACKEND_CUDA, cv2.dnn.DNN_TARGET_CUDA)
+        except Exception:
+            pass
+    return cv2.FaceDetectorYN_create(model, "", size, thresh)
+
+
+def _make_sface(model):
+    if cuda_dnn_available():
+        try:
+            return cv2.FaceRecognizerSF_create(
+                model, "", cv2.dnn.DNN_BACKEND_CUDA, cv2.dnn.DNN_TARGET_CUDA)
+        except Exception:
+            pass
+    return cv2.FaceRecognizerSF_create(model, "")
+
+
 def _model_dir():
     d = os.path.join(os.path.expanduser("~"), ".openscrub", "models")
     os.makedirs(d, exist_ok=True)
@@ -2015,7 +2072,7 @@ class PlateDetector:
                      "plate_yolov8.onnx or set $%s." % self.MODEL_ENV)
             return
         try:
-            net = cv2.dnn.readNetFromONNX(found)
+            net = _apply_cuda_dnn(cv2.dnn.readNetFromONNX(found))
             # honour the same CPU/GPU intent the rest of the app uses
             try:
                 if cv2.cuda.getCudaEnabledDeviceCount() > 0:
@@ -2163,7 +2220,7 @@ class FaceDetector:
         if path:
             if os.path.exists(path):
                 try:
-                    net = cv2.dnn.readNet(path)
+                    net = _apply_cuda_dnn(cv2.dnn.readNet(path))
                     nouts = len(net.getUnconnectedOutLayersNames())
                     if nouts == 4:
                         self.arch = "centerface"
@@ -2194,10 +2251,11 @@ class FaceDetector:
         if (os.path.exists(model) and os.path.getsize(model) > 10000
                 and hasattr(cv2, "FaceDetectorYN_create")):
             try:
-                self.yunet = cv2.FaceDetectorYN_create(model, "", (320, 320), self.thresh)
+                self.yunet = _make_yunet(model, (320, 320), self.thresh)
                 self.size = None
                 if self.net is None:
-                    log("      face detector: YuNet (DNN)")
+                    log("      face detector: YuNet (DNN)"
+                        + ("  [GPU]" if cuda_dnn_available() else ""))
                 return
             except Exception as e:
                 log(f"      YuNet init failed ({e}) — using Haar cascade fallback")
@@ -2975,6 +3033,9 @@ def run_scan(args, cb=None):
                f"({', '.join(sorted(cats))} only): detector-only scan")
 
     cb.log("[2/4] Detectors")
+    if cuda_dnn_available():
+        cb.log("      OpenCV DNN: CUDA (GPU-accelerated face detection "
+               "+ identity grouping)")
     if "name" in cats:
         namer = NameDetector(allow_names=args.allow_names,
                              extra_names=args.extra_names,
