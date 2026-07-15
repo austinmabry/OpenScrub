@@ -28,6 +28,9 @@
 # Net: universal GPU support, like the base CUDA image — not a per-card
 # build. Add an arch to CUDA_ARCH_BIN only to give that card native SASS
 # (skip its JIT); it already WORKS via PTX regardless.
+#
+# Only the OpenCV modules OpenScrub actually uses are built (BUILD_LIST) —
+# this keeps the image small and the compile within a free CI runner.
 
 ARG OPENCV_VERSION=4.10.0
 ARG CUDA_ARCH_BIN="6.1;7.5;8.6;8.9"
@@ -41,25 +44,34 @@ ARG CUDA_ARCH_PTX
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      build-essential cmake ninja-build git pkg-config wget unzip \
+      build-essential cmake ninja-build git pkg-config \
       python3-dev python3-numpy \
       libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
-      libgtk-3-dev libtbb-dev libjpeg-dev libpng-dev libtiff-dev \
+      libjpeg-dev libpng-dev libtiff-dev \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
+# the CUDA DNN backend requires the 'cudev' module, which lives in
+# opencv_contrib — both repos must be the same version.
 RUN git clone --depth 1 --branch ${OPENCV_VERSION} \
-      https://github.com/opencv/opencv.git
+      https://github.com/opencv/opencv.git \
+ && git clone --depth 1 --branch ${OPENCV_VERSION} \
+      https://github.com/opencv/opencv_contrib.git
 
-# FaceDetectorYN (YuNet) and FaceRecognizerSF (SFace) live in the main
-# objdetect module and the CUDA DNN backend is in the main dnn module —
-# opencv_contrib is NOT required. Bindings build against system python3.
+# BUILD_LIST limits the build to what OpenScrub calls (core/imgproc/
+# imgcodecs/videoio/dnn/objdetect/python3) plus cudev for the CUDA
+# backend; cmake pulls in their dependencies automatically. FaceDetectorYN
+# and FaceRecognizerSF live in objdetect; readNet in dnn.
 RUN cmake -S opencv -B build -G Ninja \
       -D CMAKE_BUILD_TYPE=Release \
       -D CMAKE_INSTALL_PREFIX=/opt/opencv \
+      -D OPENCV_EXTRA_MODULES_PATH=/src/opencv_contrib/modules \
+      -D BUILD_LIST=core,imgproc,imgcodecs,videoio,dnn,objdetect,python3,cudev \
       -D WITH_CUDA=ON \
       -D OPENCV_DNN_CUDA=ON \
       -D WITH_CUDNN=ON \
+      -D WITH_NVCUVID=OFF \
+      -D WITH_NVCUVENC=OFF \
       -D CUDA_ARCH_BIN=${CUDA_ARCH_BIN} \
       -D CUDA_ARCH_PTX=${CUDA_ARCH_PTX} \
       -D WITH_CUBLAS=ON \
@@ -69,6 +81,7 @@ RUN cmake -S opencv -B build -G Ninja \
       -D BUILD_opencv_python2=OFF \
       -D PYTHON3_EXECUTABLE=/usr/bin/python3 \
       -D WITH_FFMPEG=ON \
+      -D WITH_GTK=OFF \
       -D BUILD_TESTS=OFF -D BUILD_PERF_TESTS=OFF \
       -D BUILD_EXAMPLES=OFF -D BUILD_DOCS=OFF \
       -D BUILD_opencv_apps=OFF \
@@ -82,19 +95,20 @@ ENV DEBIAN_FRONTEND=noninteractive \
     NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
 
+# runtime libs for the modules we built: ffmpeg (videoio) + image codecs.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       python3 python3-pip python3-numpy \
       libavcodec58 libavformat58 libavutil56 libswscale5 \
-      libgtk-3-0 libtbb2 libjpeg8 libpng16-16 libtiff5 \
+      libjpeg-turbo8 libpng16-16 libtiff5 \
  && rm -rf /var/lib/apt/lists/* \
  && ln -sf /usr/bin/python3 /usr/local/bin/python
 
 # the compiled OpenCV: shared libs + the python cv2 module
 COPY --from=build /opt/opencv/lib /opt/opencv/lib
-COPY --from=build /opt/opencv/include /opt/opencv/include
 RUN SITE=$(python3 -c "import site;print(site.getsitepackages()[0])") \
- && cp -r /opt/opencv/lib/python3*/site-packages/cv2 "$SITE"/ \
+ && CVDIR=$(find /opt/opencv -type d -name cv2 | head -1) \
+ && cp -r "$CVDIR" "$SITE"/ \
  && echo "/opt/opencv/lib" > /etc/ld.so.conf.d/opencv.conf \
  && ldconfig \
  && python3 -c "import cv2; print('OpenCV', cv2.__version__, \
-'CUDA devices at build check:', cv2.cuda.getCudaEnabledDeviceCount())"
+'| CUDA devices at build check:', cv2.cuda.getCudaEnabledDeviceCount())"
