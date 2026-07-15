@@ -58,15 +58,27 @@ RUN grep -viE '^(opencv|numpy)' requirements.txt > /tmp/req.nocv \
  # matched version; a second, newer pip copy caused CUDNN error 5003
  # (EXECUTION_FAILED) at the first Paddle-GPU inference.
  && python -m spacy download en_core_web_sm \
- # the CUDA OpenCV base was compiled against numpy 1.26.4; PaddleOCR pulls
- # numpy 2.x, whose C ABI breaks `import cv2`. Pin to the EXACT version the
- # base built against — Paddle 3.x and spaCy both support it.
+ # Pin numpy to the EXACT version the CUDA OpenCV was built against
+ # (PaddleOCR pulls numpy 2.x, whose C ABI breaks cv2). Paddle 3.x and
+ # spaCy both support 1.26.4.
  && pip install --no-cache-dir "numpy==1.26.4" \
- # fail the build LOUDLY if the numpy ABI is still wrong, rather than
- # shipping an image whose cv2 won't load
+ # PaddleOCR installs opencv-contrib-python from pip, which SHADOWS the
+ # CUDA OpenCV (silently forcing face detection back onto the CPU) and
+ # mixes its Python glue with our native module (the gapi/GStreamer
+ # import crash). Remove any pip OpenCV and restore the CUDA build, which
+ # still lives at /opt/opencv in the base image.
+ && pip uninstall -y opencv-python opencv-contrib-python \
+      opencv-python-headless opencv-contrib-python-headless || true \
+ && CVSRC="$(find /opt/opencv -type d -name cv2 | head -1)" \
+ && SITE="$(python3 -c 'import site;print(site.getsitepackages()[0])')" \
+ && rm -rf "$SITE/cv2" && cp -r "$CVSRC" "$SITE/" \
+ && ldconfig \
+ # fail the build LOUDLY if cv2 still won't load or lost its CUDA support,
+ # rather than shipping a broken or silently-CPU image
  && python -c "import cv2, numpy; \
+assert hasattr(cv2, 'cuda') and hasattr(cv2, 'FaceDetectorYN_create'); \
 print('cv2', cv2.__version__, '| numpy', numpy.__version__, \
-'| cuda module:', hasattr(cv2, 'cuda'))"
+'| CUDA-capable OpenCV OK')"
 
 # ---- app layers: tiny, change every release
 COPY pyproject.toml README.md LICENSE NOTICE plate_models.json face_models.json ./
