@@ -1,8 +1,8 @@
 <?xml version="1.0"?>
 <Container version="2">
   <Name>OpenScrub-CUDA</Name>
-  <Repository>ghcr.io/austinmabry/openscrub:cuda</Repository>
-  <Registry>https://github.com/austinmabry/OpenScrub/pkgs/container/openscrub</Registry>
+  <Repository>pharmhero/openscrub:cuda</Repository>
+  <Registry>https://hub.docker.com/r/pharmhero/openscrub</Registry>
   <Network>bridge</Network>
   <Shell>bash</Shell>
   <Privileged>false</Privileged>
