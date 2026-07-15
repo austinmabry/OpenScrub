@@ -281,6 +281,9 @@ def build_args(job, for_render=False):
                              else "match"),
             "--codec", (o.get("codec")
                         if o.get("codec") in ("h264", "hevc") else "h264"),
+            "--face-shape", (o.get("face_shape")
+                             if o.get("face_shape") in ("ellipse", "rect")
+                             else "ellipse"),
             "--categories", o.get("categories",
                                   "name,dob,phone,ssn,mrn,email,address,card,apikey,ipaddr,plate,face"),
             "-o", os.path.join(jdir, "output."
@@ -1106,6 +1109,9 @@ padding:8px 12px;font-size:13px}
 <div><label>Sample interval (s)<span class="qm" data-tip="How often a full OCR scan runs. Lower catches short-lived PHI sooner but scans take longer. Backtracking automatically closes most of the gap between scans, so 0.5 is a good default.">?</span></label><input type="number" id="si" value="0.5" step="0.1"></div>
 <div><label>Scan trigger (px)<span class="qm" data-tip="An extra scan fires every time the page scrolls this many pixels, so scrolled-in content is read promptly. Lower = more scans while scrolling.">?</span></label><input type="number" id="st" value="60"></div>
 <div><label>Blur buffer (px)<span class="qm" data-tip="Pixels of blur beyond the tightly-cropped word or face. 8 is a safe default; 3 is a tight cosmetic look. During scrolling a small drift allowance is added automatically.">?</span></label><input type="number" id="pad" value="8"></div>
+<div><label>Face mask shape<span class="qm" data-tip="Ellipse hugs the face — no blurred background corners, the cleanest look (what deface-style tools use). Rectangle is the classic box. Text regions are always rectangular.">?</span></label><select id="fshape">
+<option value="ellipse">ellipse (recommended)</option>
+<option value="rect">rectangle</option></select></div>
 <div><label>Face expand (0-1)<span class="qm" data-tip="Enlarges detected face boxes by this fraction before the blur buffer, covering hairline and ears. 0 = raw detector box (may leave identifiable edges).">?</span></label><input type="number" id="fex" value="0.15" step="0.05"></div>
 <div><label>Face threshold<span class="qm" data-tip="Face detector confidence cutoff (0-1). Lower catches more faces but risks false positives on face-like patterns; higher is stricter. Default 0.6. Tune with preview + show scores.">?</span></label><input type="number" id="fthr" value="0.6" step="0.05" min="0" max="1"></div>
 <div><label>Detection scale<span class="qm" data-tip="Runs FACE detection on a downscaled copy of each frame for speed (0.2-1.0; e.g. 0.5 = half resolution). Output quality is unaffected — only the detection pass is faster. 1.0 = full resolution (off). Helpful with dense faces on high-res video.">?</span></label><input type="number" id="dscale" value="1.0" step="0.1" min="0.2" max="1"></div>
@@ -1310,7 +1316,7 @@ function opts(){return{
  mode_map:Object.entries(CATMODE).filter(([c,m])=>m==="blur"||m==="box")
    .map(([c,m])=>`${c}=${m}`).join(","),
  allow_names:allow.value,extra_names:extra.value,hdr_output:hdrout.value,
- codec:vcodec.value,
+ codec:vcodec.value,face_shape:fshape.value,
  no_memory:nomem.checked,preview_mode:pmode.checked,
  dense_faces:densefaces.checked,face_threshold:+fthr.value,
  detect_scale:+dscale.value,draw_scores:drawscores.checked}}

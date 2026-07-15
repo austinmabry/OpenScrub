@@ -22,7 +22,7 @@ target is Windows 10 + NVIDIA RTX 3060.
 | `fetch_plate_models.py` | Alt path to fetch plate models via the open-image-models pip package. |
 | `openscrub_update.py` | `openscrub-update` command + web self-update backend: PyPI version check, sha256-verified sdist download, data-preserving folder update (PRESERVE set), TOFU pin carry-forward. Ships in the wheel. |
 | `openscrub_vault.py` | At-rest encryption for the job store: scrypt keystore, chunked AES-256-GCM files (`.osvault`), lock/unlock tree walkers. NO password reset by design. Ships in the wheel. |
-| `test_openscrub.py` | pytest suite (28 tests). Must stay green. |
+| `test_openscrub.py` | pytest suite (30 tests). Must stay green. |
 | `tools/make_icons.py` | Regenerates every icon/logo asset from `assets/badge_master.png`. |
 | `tools/make_wordmark.py` | Regenerates the typeset Poppins wordmarks (navy + white). |
 | `assets/` | Brand assets. `badge_master.png` (canonical, mosaic+brackets style) and `badge_master_blurbox_alt.png` (alternate) are the sources; everything else is generated. |
@@ -62,13 +62,20 @@ Key classes/functions (locate with grep, line numbers drift):
   into `plate_models.json`; later downloads must match or are rejected and
   deleted. Registry reads/writes must always pass `encoding="utf-8"`
   (Windows defaults to cp1252 and mojibakes labels).
-- Camera vs screen: `probe_camera_motion` (run before scanning,
-  --scroll-track auto) detects continuous 2-axis motion; camera footage
-  disables scroll tracking + safety bands (screen-anchored boxes) and
-  auto-enables dense faces — content anchoring on camera video produced
-  giant fake offsets, edge-band smears, and displaced backtracked boxes.
-  Scan-time face adds are skipped whenever dense_faces is on (unions
-  balloon across a moving face's path). `assign_dense_tracks` groups the
+- Faces are ALWAYS dense (per-frame detection) whenever the face
+  category is selected — on every kind of footage. Scan-cadence face
+  adds merged with the OCR hold union a moving person's positions into
+  one body-sized box (the boat-video failure); scan-time face adds are
+  skipped whenever dense_faces is on. Face masks render as ELLIPSES by
+  default (`--face-shape`, deface-style; blur_region/_blur_yuv10 take
+  shape=), and `mosaic` is a real pixelation now (region-relative tiles),
+  not a silent alias of blur.
+- Scroll tracking + safety bands require TEXT categories: they exist to
+  cover unscanned text, and on real-world video the tracker reads camera/
+  subject motion as scrolling (edge-band smears, drifting boxes). Face/
+  plate-only jobs force track_on off. For text jobs, camera vs screen:
+  `probe_camera_motion` (--scroll-track auto) detects continuous 2-axis
+  motion and disables scroll tracking + safety bands on camera footage. `assign_dense_tracks` groups the
   per-frame dense samples into tracks (`Detection.track`, additive report
   field) so review shows ONE card per physical object with a fan-out
   toggle (web `TRKMEM`), not hundreds of frames. Dense samples keep their
@@ -174,7 +181,7 @@ python -c "import ast; ast.parse(open('openscrub.py').read())"   # each edited .
 # PAGE is a normal (non-raw) Python string, so \n in source JS becomes a real
 # newline when served and can break string literals (the v1.0.6 jobs bug):
 #   python -c "import openscrub_web as w, re; open('/tmp/p.js','w').write(re.search(r'<script>(.*)</script>', w.PAGE, re.S).group(1))" && node --check /tmp/p.js
-python -m pytest test_openscrub.py -q                             # 28 tests, all green
+python -m pytest test_openscrub.py -q                             # 30 tests, all green
 python -m build          # FULL build (sdist->wheel), NEVER just `-w`:
                          # the wheel is built FROM the sdist in CI, so any
                          # file the wheel force-includes must be in the

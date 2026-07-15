@@ -52,6 +52,8 @@ general-purpose.
   central subject sharp and blur everyone/everything around them, or vice versa.
 - **Redaction styles** — blur, solid black box (irreversible), or mosaic
   pixelation, choosable per category (black-box the SSNs, blur the faces).
+  Faces are masked with a tight **ellipse** by default — no smeared
+  rectangle corners — and mosaic tiles scale with the face size.
 - **Human review** — every detection is shown as a thumbnail you can keep or
   blur, with an interactive box editor to resize, move, add, or time-bound
   any blur before rendering.

@@ -659,3 +659,68 @@ def test_face_model_registry_and_fallback(tmp_path):
     assert fd.net is None, "missing model must not leave a broken detector"
     assert any("falling back" in l for l in logs)
     assert fd.yunet is not None or fd.haar is not None
+
+
+def test_mosaic_and_ellipse_blur_shapes():
+    """Mosaic must actually pixelate (it silently fell back to Gaussian
+    blur before), and the ellipse shape must leave region corners intact."""
+    rng = np.random.default_rng(1)
+    base = np.clip(rng.normal(128, 40, (200, 200, 3)), 0, 255).astype(np.uint8)
+    mos = base.copy()
+    openscrub.blur_region(mos, 40, 40, 160, 160, "mosaic")
+    blur = base.copy()
+    openscrub.blur_region(blur, 40, 40, 160, 160, "blur")
+    assert np.abs(mos.astype(int) - blur.astype(int)).mean() > 3, \
+        "mosaic must differ from Gaussian blur"
+    # mosaic tiles: many identical adjacent pixels
+    inner = mos[60:140, 60:140]
+    same = (inner[:, 1:] == inner[:, :-1]).all(axis=2).mean()
+    assert same > 0.5, "mosaic should produce flat tiles"
+
+    ell = base.copy()
+    openscrub.blur_region(ell, 40, 40, 160, 160, "blur", shape="ellipse")
+    assert (ell[41:47, 41:47] == base[41:47, 41:47]).all(), \
+        "ellipse must leave the region corner untouched"
+    c = 100
+    assert np.abs(ell[c-3:c+3, c-3:c+3].astype(int)
+                  - blur[c-3:c+3, c-3:c+3].astype(int)).mean() < 1, \
+        "ellipse center must be blurred like the rect blur"
+
+
+def test_face_only_steady_camera_no_bands_no_giant_boxes(tmp_path):
+    """The boat-video failure: a steady-camera video with a moving person,
+    face-only job. Scan-cadence merging used to union the face's positions
+    into a body-sized box, and the scroll tracker painted blur bands along
+    the frame edges. Now: faces are dense on every video, and tracking/
+    bands are off without text categories."""
+    # synthesizing a reliably-detectable face is flaky in CI; assert the
+    # MODE decisions directly on a textured video with a moving object
+    rng = np.random.default_rng(3)
+    bg = np.clip(rng.normal(150, 18, (360, 640, 3)), 0, 255).astype(np.uint8)
+    path = str(tmp_path / "steady.mp4")
+    out = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), 30,
+                          (640, 360))
+    sq = rng.integers(0, 255, (60, 60, 3)).astype(np.uint8)
+    for i in range(90):
+        fr = bg.copy()
+        x = 50 + i * 4
+        fr[150:210, x:x+60] = sq          # moving object (not a face)
+        out.write(fr)
+    out.release()
+    parser = openscrub.build_parser()
+    args = parser.parse_args([path, "--engine", "tesseract",
+                              "-o", str(tmp_path / "s_red.mp4"),
+                              "--categories", "face", "--encoder", "x264"])
+    args = openscrub._prep_args(args, parser)
+    logs = []
+
+    class CB(openscrub.Callbacks):
+        def log(self, m):
+            logs.append(m)
+    state = openscrub.run_scan(args, CB())
+    assert any("scroll tracking + safety bands off" in l for l in logs)
+    assert any("dense faces: detecting" in l for l in logs)
+    assert all(b == (0.0, 0.0) for b in state["bands"]), \
+        "face-only jobs must never emit safety bands"
+    assert all(c == (0.0, 0.0) for c in state["cum"]), \
+        "face-only jobs must never accumulate scroll offsets"

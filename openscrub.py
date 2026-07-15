@@ -1235,18 +1235,38 @@ def merge_detections(dets, hold, scans=None, bridge_gap=4.0, fuzz=None,
 # Render
 # ----------------------------------------------------------------------------
 
-def blur_region(frame, x1, y1, x2, y2, mode):
+def blur_region(frame, x1, y1, x2, y2, mode, shape="rect"):
     h, w = frame.shape[:2]
     x1 = max(0, int(x1)); y1 = max(0, int(y1))
     x2 = min(w, int(x2)); y2 = min(h, int(y2))
     if x2 <= x1 or y2 <= y1:
         return
+    roi = frame[y1:y2, x1:x2]
     if mode == "box":
-        frame[y1:y2, x1:x2] = 0
+        filled = np.zeros_like(roi)
+    elif mode == "mosaic":
+        # fragment size scales with the region (~14 tiles across) so small
+        # and large faces pixelate consistently — deface sizes fragments in
+        # absolute pixels and its users ask for exactly this (issue #60)
+        fw = max(2, (x2 - x1) // 14)
+        small = cv2.resize(roi, (max(1, (x2 - x1) // fw),
+                                 max(1, (y2 - y1) // fw)),
+                           interpolation=cv2.INTER_LINEAR)
+        filled = cv2.resize(small, (x2 - x1, y2 - y1),
+                            interpolation=cv2.INTER_NEAREST)
     else:
-        roi = frame[y1:y2, x1:x2]
         k = max(31, (((x2 - x1) // 3) | 1))
-        frame[y1:y2, x1:x2] = cv2.GaussianBlur(roi, (k, k), 0)
+        filled = cv2.GaussianBlur(roi, (k, k), 0)
+    if shape == "ellipse":
+        # elliptical mask hugs a face: no smeared background corners, which
+        # is most of why box-blurred faces read as "whole body blurred"
+        mask = np.zeros(roi.shape[:2], np.uint8)
+        cv2.ellipse(mask, ((x2 - x1) // 2, (y2 - y1) // 2),
+                    (max(1, (x2 - x1) // 2), max(1, (y2 - y1) // 2)),
+                    0, 0, 360, 255, -1)
+        roi[mask > 0] = filled[mask > 0]
+    else:
+        frame[y1:y2, x1:x2] = filled
 
 
 class PipelineCancelled(Exception):
@@ -1361,7 +1381,7 @@ def color_tags(path):
     return out
 
 
-def _blur_yuv10(y, u, v, x1, y1, x2, y2, mode):
+def _blur_yuv10(y, u, v, x1, y1, x2, y2, mode, shape="rect"):
     """blur_region for a 10-bit planar YUV420 frame: Y full-res, U/V
     half-res. Working in the native YUV domain means untouched pixels never
     go through ANY colorspace conversion — the HDR signal passes straight
@@ -1371,25 +1391,42 @@ def _blur_yuv10(y, u, v, x1, y1, x2, y2, mode):
     x2 = min(w, int(x2)); y2 = min(h, int(y2))
     if x2 <= x1 or y2 <= y1:
         return
+
+    def _fill(plane, px1, py1, px2, py2, black, kmin):
+        if px2 <= px1 or py2 <= py1:
+            return
+        roi = plane[py1:py2, px1:px2]
+        if mode == "box":
+            filled = np.full_like(roi, black)
+        elif mode == "mosaic":
+            fw = max(2, (px2 - px1) // 14)
+            small = cv2.resize(roi, (max(1, (px2 - px1) // fw),
+                                     max(1, (py2 - py1) // fw)),
+                               interpolation=cv2.INTER_LINEAR)
+            filled = cv2.resize(small, (px2 - px1, py2 - py1),
+                                interpolation=cv2.INTER_NEAREST)
+        else:
+            k = max(kmin, (((px2 - px1) // 3) | 1))
+            filled = cv2.GaussianBlur(roi, (k, k), 0)
+        if shape == "ellipse":
+            mask = np.zeros(roi.shape, np.uint8)
+            cv2.ellipse(mask, ((px2 - px1) // 2, (py2 - py1) // 2),
+                        (max(1, (px2 - px1) // 2), max(1, (py2 - py1) // 2)),
+                        0, 0, 360, 255, -1)
+            roi[mask > 0] = filled[mask > 0]
+        else:
+            plane[py1:py2, px1:px2] = filled
+
+    _fill(y, x1, y1, x2, y2, 64, 31)          # 10-bit limited-range black
     cx1, cy1 = x1 // 2, y1 // 2
     cx2, cy2 = min(w // 2, (x2 + 1) // 2), min(h // 2, (y2 + 1) // 2)
-    if mode == "box":
-        y[y1:y2, x1:x2] = 64            # 10-bit limited-range black
-        u[cy1:cy2, cx1:cx2] = 512
-        v[cy1:cy2, cx1:cx2] = 512
-        return
-    k = max(31, (((x2 - x1) // 3) | 1))
-    y[y1:y2, x1:x2] = cv2.GaussianBlur(y[y1:y2, x1:x2], (k, k), 0)
-    if cx2 > cx1 and cy2 > cy1:
-        kc = max(15, (((cx2 - cx1) // 3) | 1))
-        for c in (u, v):
-            c[cy1:cy2, cx1:cx2] = cv2.GaussianBlur(c[cy1:cy2, cx1:cx2],
-                                                   (kc, kc), 0)
+    _fill(u, cx1, cy1, cx2, cy2, 512, 15)
+    _fill(v, cx1, cy1, cx2, cy2, 512, 15)
 
 
 def render_hdr(src, dst, detections, cum, bands, fps, pad, mode,
                encoder, tags, band_margin=25, progress_every=60, cb=None,
-               mode_map=None):
+               mode_map=None, face_shape="ellipse"):
     """render(), but 10-bit end to end: decode the HDR source to raw
     yuv420p10le, blur the planes in place, encode 10-bit HEVC with the
     source's color tags (PQ/HLG + BT.2020) carried over. `hvc1` tagging
@@ -1473,7 +1510,9 @@ def render_hdr(src, dst, detections, cum, bands, fps, pad, mode,
             px = pad + drift
             _blur_yuv10(y, u, v, d.cbox[0] + ox - px, d.cbox[1] + oy - px,
                         d.cbox[2] + ox + px, d.cbox[3] + oy + px,
-                        _mode_for(d.category))
+                        _mode_for(d.category),
+                        shape=("ellipse" if d.category == "face"
+                               and face_shape == "ellipse" else "rect"))
 
         bx, by = bands[min(idx, len(bands) - 1)]
         vals = set(mode_map.values()) | {mode}
@@ -1511,7 +1550,8 @@ def render_hdr(src, dst, detections, cum, bands, fps, pad, mode,
 
 def render(src, dst, detections, cum, bands, fps, pad, mode, preview,
            encoder="auto", band_margin=25, progress_every=60, cb=None,
-           mode_map=None, draw_scores=False, vcodec="h264"):
+           mode_map=None, draw_scores=False, vcodec="h264",
+           face_shape="ellipse"):
     # mode_map: {category: "blur"|"box"} overrides the global `mode` per
     # category. Lets you black-box the reversible-blur-vulnerable categories
     # (SSN, MRN, account numbers) while blurring faces, in one render.
@@ -1617,7 +1657,9 @@ def render(src, dst, detections, cum, bands, fps, pad, mode, preview,
                 cv2.putText(frame, label, (int(max(0, x1)), int(max(12, y1 - 4))),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
             else:
-                blur_region(frame, x1, y1, x2, y2, _mode_for(d.category))
+                blur_region(frame, x1, y1, x2, y2, _mode_for(d.category),
+                            shape=("ellipse" if d.category == "face"
+                                   and face_shape == "ellipse" else "rect"))
 
         # 2. safety bands: unscanned content that scrolled into view
         bx, by = bands[min(idx, len(bands) - 1)]
@@ -2564,6 +2606,11 @@ def build_parser():
                          "OpenScrub looks for models/plate_yolov8.onnx or the "
                          "$OPENSCRUB_PLATE_MODEL env var. Plate category is "
                          "inactive without a model.")
+    ap.add_argument("--face-shape", choices=["ellipse", "rect"],
+                    default="ellipse",
+                    help="mask shape for face redaction: ellipse hugs the "
+                         "face (no blurred background corners); rect is the "
+                         "classic box. Text regions are always rectangular.")
     ap.add_argument("--face-model", default=None,
                     help="path to an optional face-detection ONNX model "
                          "(CenterFace or SCRFD, auto-recognized; see "
@@ -2895,7 +2942,16 @@ def run_scan(args, cb=None):
 
     scroll_mode = getattr(args, "scroll_track", "auto")
     track_on = scroll_mode != "off"
-    if scroll_mode == "auto":
+    if track_on and not text_cats:
+        # scroll tracking and safety bands exist to keep unscanned TEXT
+        # covered as it scrolls into view. With no text categories they can
+        # only hurt: on real-world video the tracker reads camera/subject
+        # motion as scrolling — drifting boxes and smearing blur bands
+        # along the frame edges (the boat-video failure).
+        track_on = False
+        cb.log("      scroll tracking + safety bands off (no text "
+               "categories selected — they only protect text content)")
+    elif scroll_mode == "auto":
         _cam, _movf, _mixf = probe_camera_motion(args.video)
         if _cam:
             track_on = False
@@ -2904,11 +2960,6 @@ def run_scan(args, cb=None):
                    "detections are screen-anchored. Force with "
                    "--scroll-track on if this is actually a screen "
                    "recording.")
-            # a face that moves across a camera frame must be re-detected
-            # every frame, or merge unions its positions into one huge box
-            args.dense_faces = True
-            cb.log("      camera mode: dense face tracking enabled "
-                   "(re-detect every frame)")
     tracker = ScrollTracker()
     memory = None if (args.no_memory or not text_cats) else PhiMemory(
         threshold=78 if getattr(args, "paranoid", False) else 82)
@@ -2937,7 +2988,14 @@ def run_scan(args, cb=None):
                    # their true onset is found after the scan by seeking
                    # the file itself (RAM buffer can stay small)
     face_tracks = []   # forward face tracking: detect once, hold every frame
-    dense_faces = bool(getattr(args, "dense_faces", False))
+    # faces are ALWAYS detected per-frame (dense): scan-cadence face adds
+    # merged with the OCR hold union a moving person's positions into one
+    # body-sized box (the boat-video failure). Per-frame re-detection +
+    # track smoothing is strictly better on every kind of footage; the
+    # --dense-faces flag remains for compatibility, --dense-face-stride
+    # still tunes the cost.
+    dense_faces = "face" in cats or bool(getattr(args, "dense_faces", False))
+    args.dense_faces = dense_faces   # keep camera-mode/report paths in sync
     dense_stride = max(1, int(getattr(args, "dense_face_stride", 1) or 1))
     plate_zone_px = (zones_px.get("plate") if zones_px else None)
     plate_zone_rects = plate_zone_px if plate_zone_px else None
@@ -3508,6 +3566,7 @@ def run_render(args, state, cb=None):
                    state["bands"], state["fps"], pad=args.pad, mode=args.mode,
                    encoder=args.hdr_encoder,
                    tags=getattr(args, "hdr_tags", {}),
+                   face_shape=getattr(args, "face_shape", "ellipse"),
                    mode_map=getattr(args, "mode_map", None), cb=cb)
     else:
         render(args.video, dst, state["detections"], state["cum"],
@@ -3516,6 +3575,7 @@ def run_render(args, state, cb=None):
                mode_map=getattr(args, "mode_map", None),
                draw_scores=bool(getattr(args, "draw_scores", False)),
                vcodec=getattr(args, "codec", "h264"),
+               face_shape=getattr(args, "face_shape", "ellipse"),
                encoder=args.encoder, cb=cb)
     if args.report:
         write_report(args.report, args, state, output_path=dst)
