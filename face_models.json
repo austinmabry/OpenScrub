@@ -1,0 +1,29 @@
+{
+  "_comment": "Curated optional face-detection models. The built-in YuNet needs no model file and remains the zero-setup default; these trade a download for higher recall on small/hard faces. sha256 values are PINNED: every download must hash-match or is rejected and deleted (same TOFU rules as plate_models.json).",
+  "models": [
+    {
+      "id": "centerface",
+      "label": "CenterFace (7 MB — better small/medium-face recall)",
+      "license": "MIT",
+      "family": "centerface",
+      "source_url": "https://github.com/Star-Clouds/CenterFace",
+      "attribution": "Model: Star-Clouds/CenterFace (MIT).",
+      "download_url": "https://raw.githubusercontent.com/Star-Clouds/CenterFace/master/models/onnx/centerface.onnx",
+      "sha256": "77e394b51108381b4c4f7b4baf1c64ca9f4aba73e5e803b2636419578913b5fe",
+      "notes": "WIDER FACE ~0.93/0.92/0.78 (easy/medium/hard) vs YuNet ~0.89/0.87/0.77. Runs at frame resolution, so it finds smaller faces than fixed-input detectors. Clean MIT license.",
+      "recommended": true
+    },
+    {
+      "id": "scrfd-10g",
+      "label": "SCRFD-10G (17 MB — highest accuracy; NON-COMMERCIAL license)",
+      "license": "non-commercial research",
+      "family": "scrfd",
+      "source_url": "https://github.com/deepinsight/insightface",
+      "attribution": "Model: deepinsight/insightface SCRFD det_10g (pretrained weights are for non-commercial research use — check the InsightFace terms before using this model in a commercial setting).",
+      "download_url": "https://huggingface.co/public-data/insightface/resolve/main/models/buffalo_l/det_10g.onnx",
+      "sha256": "5838f7fe053675b1c7a08b633df49e7af5495cee0493c7dcf6697200b85b5b91",
+      "notes": "WIDER FACE ~0.95/0.94/0.83 — the strongest option, especially on profiles and occlusion. InsightFace pretrained weights are licensed for non-commercial research use only; OpenScrub does not bundle them.",
+      "recommended": false
+    }
+  ]
+}

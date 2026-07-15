@@ -72,6 +72,36 @@ if os.path.isdir(_legacy_jobs) and not os.path.isdir(JOBS_DIR):
     except OSError:
         pass  # e.g. cross-device or perms: fall back to fresh dir
 ZONES_PATH = os.path.join(_data_root(), "zones.json")
+# which optional detection model is in use per kind: {"face": id, "plate": id}
+# (missing/empty = the built-in default: YuNet for faces, auto for plates)
+MODEL_SELECT_PATH = os.path.join(_data_root(), "model_select.json")
+
+
+def load_model_select():
+    try:
+        with open(MODEL_SELECT_PATH, encoding="utf-8") as f:
+            d = json.load(f)
+            return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_model_select(d):
+    with open(MODEL_SELECT_PATH, "w", encoding="utf-8") as f:
+        json.dump(d, f, indent=1)
+
+
+def find_model_file(fname):
+    """models/<fname> can live next to the code (folder deploys) or in the
+    per-user data dir (pip / frozen installs download there)."""
+    roots = [os.path.dirname(os.path.abspath(openscrub.__file__))]
+    if openscrub.install_is_readonly():
+        roots.append(openscrub.user_data_dir())
+    for r in roots:
+        p = os.path.join(r, "models", fname)
+        if os.path.exists(p):
+            return p
+    return None
 # One-time migration: zones.json used to live next to the code, which for
 # pip installs meant site-packages (lost on upgrade) and for frozen installs
 # would be read-only. Carry an existing file over to the data root.
@@ -262,6 +292,16 @@ def build_args(job, for_render=False):
     # activates the ones whose id is in --categories
     for c in load_custom_cats():
         argv += ["--custom-regex", "%s=%s" % (c["id"], c["regex"])]
+    # selected detection models (Detection models panel). A selected id
+    # whose file is missing falls back to the engine default silently-safe
+    # ladder (YuNet / plate auto-search).
+    sel = load_model_select()
+    for kind, flag in (("face", "--face-model"), ("plate", "--plate-model")):
+        mid = sel.get(kind)
+        if mid:
+            p = find_model_file("%s.onnx" % mid)
+            if p:
+                argv += [flag, p]
     if o.get("no_memory"):
         argv.append("--no-memory")
     if o.get("no_ner"):
@@ -772,25 +812,10 @@ def job_save_edits(jid):
                     "suggest_allowlist": suggest})
 
 
-@app.route("/api/plate_models")
-def plate_models():
-    """Registry entries + whether each is already installed + active model."""
-    import openscrub as engine
-    models = engine.load_plate_registry()
-    # models can live next to the code (folder deploys) or in the per-user
-    # data dir (pip / frozen installs download there) — check both, matching
-    # PlateDetector's own search.
-    roots = [os.path.dirname(os.path.abspath(engine.__file__))]
-    if engine.install_is_readonly():
-        roots.append(engine.user_data_dir())
-
-    def _find(fname):
-        for r in roots:
-            p = os.path.join(r, "models", fname)
-            if os.path.exists(p):
-                return p
-        return None
-
+def _models_state(kind):
+    """Registry entries + installed/selected/active state for one kind."""
+    models = openscrub.load_model_registry(kind)
+    sel = load_model_select().get(kind, "")
     out = []
     for m in models:
         out.append({
@@ -799,46 +824,98 @@ def plate_models():
             "notes": m.get("notes"), "recommended": bool(m.get("recommended")),
             "verified": m.get("download_url") not in (None, "", "TODO_VERIFY"),
             "pinned": bool(m.get("sha256")) and m.get("sha256") != "TODO_VERIFY",
-            "installed": bool(_find("%s.onnx" % m.get("id"))),
+            "installed": bool(find_model_file("%s.onnx" % m.get("id"))),
             "attribution": m.get("attribution", ""),
         })
-    # is any model active (i.e. would PlateDetector find one)?
-    active = os.environ.get("OPENSCRUB_PLATE_MODEL")
-    if not (active and os.path.exists(active)):
-        active = _find("plate_yolov8.onnx")
-    if not active:
-        for m in models:
-            p = _find("%s.onnx" % m.get("id"))
-            if p:
-                active = p; break
-    return jsonify({"models": out, "active": os.path.basename(active) if active else None})
+    if kind == "face":
+        p = find_model_file("%s.onnx" % sel) if sel else None
+        active = os.path.basename(p) if p else "built-in YuNet"
+        status = ("Active: " + active) if p else \
+            "Active: built-in YuNet (works out of the box — models below are optional upgrades)"
+    else:
+        active = os.environ.get("OPENSCRUB_PLATE_MODEL")
+        if not (active and os.path.exists(active)):
+            active = ((find_model_file("%s.onnx" % sel) if sel else None)
+                      or find_model_file("plate_yolov8.onnx"))
+        if not active:
+            for m in models:
+                p = find_model_file("%s.onnx" % m.get("id"))
+                if p:
+                    active = p
+                    break
+        status = ("Active model: " + os.path.basename(active)) if active else \
+            "No model installed — plate detection is INACTIVE until you install or provide one."
+    return {"models": out, "selected": sel, "status": status,
+            "active": bool(active) if kind == "plate" else True}
 
 
-_plate_dl = {"state": "idle", "pct": 0, "error": "", "id": ""}
+@app.route("/api/models/<kind>")
+def models_list(kind):
+    if kind not in ("face", "plate"):
+        abort(404)
+    return jsonify(_models_state(kind))
 
-@app.route("/api/plate_models/<mid>/download", methods=["POST"])
-def plate_model_download(mid):
+
+@app.route("/api/models/<kind>/select", methods=["POST"])
+def models_select(kind):
+    if kind not in ("face", "plate"):
+        abort(404)
+    mid = (request.get_json(force=True) or {}).get("id", "")
+    if mid and not any(m.get("id") == mid
+                       for m in openscrub.load_model_registry(kind)):
+        return jsonify({"error": "unknown model id"}), 404
+    sel = load_model_select()
+    sel[kind] = mid
+    save_model_select(sel)
+    return jsonify({"ok": True, "selected": mid})
+
+
+_model_dl = {"state": "idle", "pct": 0, "error": "", "id": "", "kind": ""}
+
+
+@app.route("/api/models/<kind>/<mid>/download", methods=["POST"])
+def model_download(kind, mid):
     """Download+verify a registry model in a background thread."""
-    import openscrub as engine
-    entry = next((m for m in engine.load_plate_registry() if m.get("id") == mid), None)
+    if kind not in ("face", "plate"):
+        abort(404)
+    entry = next((m for m in openscrub.load_model_registry(kind)
+                  if m.get("id") == mid), None)
     if entry is None:
         return jsonify({"error": "unknown model id"}), 404
-    if _plate_dl["state"] == "downloading":
+    if _model_dl["state"] == "downloading":
         return jsonify({"error": "a download is already in progress"}), 409
-    _plate_dl.update(state="downloading", pct=0, error="", id=mid)
+    _model_dl.update(state="downloading", pct=0, error="", id=mid, kind=kind)
     def work():
         try:
-            engine.download_plate_model(
-                entry, progress=lambda f: _plate_dl.update(pct=int(f * 100)))
-            _plate_dl.update(state="done", pct=100)
+            openscrub.download_model(
+                entry, kind,
+                progress=lambda f: _model_dl.update(pct=int(f * 100)))
+            _model_dl.update(state="done", pct=100)
         except Exception as e:
-            _plate_dl.update(state="error", error=str(e))
+            _model_dl.update(state="error", error=str(e))
     threading.Thread(target=work, daemon=True).start()
     return jsonify({"ok": True})
 
+
+@app.route("/api/models/download_status")
+def model_download_status():
+    return jsonify(_model_dl)
+
+
+# legacy aliases (pre-1.0.30 clients)
+@app.route("/api/plate_models")
+def plate_models():
+    return jsonify(_models_state("plate"))
+
+
+@app.route("/api/plate_models/<mid>/download", methods=["POST"])
+def plate_model_download(mid):
+    return model_download("plate", mid)
+
+
 @app.route("/api/plate_models/download_status")
 def plate_model_download_status():
-    return jsonify(_plate_dl)
+    return jsonify(_model_dl)
 
 
 @app.route("/api/allowlist", methods=["GET", "POST"])
@@ -1086,10 +1163,10 @@ one at a time, and every category needs a name.</div>
 <div class="card"><h2>App settings <a href="#" style="float:right;font-size:14px;font-weight:400" onclick="location.hash=&quot;&quot;;return false">&#8592; back to jobs</a></h2>
 <div style="font-size:12px;color:#6b7280">Server-level configuration — these apply to every job.</div>
 </div>
-<div class="card" id="platepanel" style="display:none">
-<h2>License-plate model <span class="qm" data-tip="Plate detection needs a model file (not bundled). Pick a curated open-source model to download it — the file is SHA-256 verified before use. Each entry shows its software license.">?</span></h2>
- <div id="platestatus" style="font-size:12px;color:#6b7280;margin-bottom:6px">checking…</div>
- <div id="platelist"></div>
+<div class="card" id="modelpanel" style="display:none">
+<h2>Detection models <span class="qm" data-tip="Face detection works out of the box (built-in YuNet); optional higher-accuracy models can be downloaded and selected here. Plate detection needs a model file (not bundled). Every download is SHA-256 verified against a pinned hash before use, and each entry shows its license — some are non-commercial.">?</span></h2>
+ <div id="msec_face" style="display:none"></div>
+ <div id="msec_plate" style="display:none"></div>
 </div>
 <div class="card"><h2>Optional detection engines</h2>
 <div id="extras" style="font-size:13px">loading…</div>
@@ -1168,43 +1245,60 @@ function onCatToggle(c,on){
 }
 renderCats();
 
-async function refreshPlatePanel(){
- const on=[...document.querySelectorAll(".cat:checked")].some(e=>e.value==="plate");
- const pp=document.getElementById("platepanel");
- pp.style.display=on?"block":"none";
- if(!on)return;
- try{
-  const r=await fetch("/api/plate_models"); const d=await r.json();
-  const st=document.getElementById("platestatus");
-  st.textContent=d.active?("Active model: "+d.active):"No model installed — plate detection is INACTIVE until you install or provide one.";
-  st.style.color=d.active?"#15803d":"#b45309";
-  document.getElementById("platelist").innerHTML=d.models.map(m=>`
-   <div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-top:1px solid #eee">
-    <div style="flex:1;min-width:0">
-     <div style="font-size:12.5px;font-weight:600">${m.label} ${m.recommended?'<span style="color:#15803d;font-size:11px">★ recommended</span>':''}</div>
-     <div style="font-size:11px;color:#6b7280">${m.notes||""}</div>
-    </div>
-    <a href="${m.source_url}" target="_blank" style="font-size:11px;background:#eef2ff;color:#3730a3;border-radius:5px;padding:2px 7px;text-decoration:none" title="${m.attribution||''}">${m.license}</a>
-    ${m.installed?'<span style="font-size:11px;color:#15803d;font-weight:700">installed</span>'
-      :(m.verified?`<button onclick="dlPlate('${m.id}',this)" title="${m.pinned?'SHA-256 verified against pinned hash':'first download: hash will be computed and pinned'}" style="font-size:11.5px;padding:3px 10px">Download</button>`
-      :'<span style="font-size:11px;color:#9ca3af" title="registry entry has no download URL">unavailable</span>')}
-   </div>`).join("");
- }catch(e){document.getElementById("platestatus").textContent="model registry unavailable";}
+async function refreshModelPanel(){
+ const fon=[...document.querySelectorAll(".cat:checked")].some(e=>e.value==="face");
+ const pon=[...document.querySelectorAll(".cat:checked")].some(e=>e.value==="plate");
+ document.getElementById("modelpanel").style.display=(fon||pon)?"block":"none";
+ for(const [kind,on] of [["face",fon],["plate",pon]]){
+  const sec=document.getElementById("msec_"+kind);
+  sec.style.display=on?"block":"none";
+  if(!on)continue;
+  try{
+   const d=await(await fetch("/api/models/"+kind)).json();
+   const dflt=kind==="face"?"Built-in YuNet (no download needed)"
+                           :"Automatic — first installed model";
+   const row=(val,checked,disabled,inner,right)=>`
+    <div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-top:1px solid #eee">
+     <input type="radio" name="msel_${kind}" ${checked?"checked":""} ${disabled?"disabled":""}
+      onchange="selModel('${kind}','${val}')" style="margin:0" title="${disabled?'download the model first':'use this model'}">
+     <div style="flex:1;min-width:0">${inner}</div>${right||""}
+    </div>`;
+   let h=`<div style="font-weight:600;font-size:13.5px;margin:8px 0 2px">${kind==="face"?"Face":"License-plate"} model</div>
+    <div style="font-size:12px;margin-bottom:4px;color:${d.active?'#15803d':'#b45309'}">${d.status}</div>`;
+   h+=row("",!d.selected,false,
+     `<div style="font-size:12.5px;font-weight:600">${dflt}</div>`);
+   for(const m of d.models){
+    h+=row(m.id,d.selected===m.id,!m.installed,
+     `<div style="font-size:12.5px;font-weight:600">${m.label} ${m.recommended?'<span style="color:#15803d;font-size:11px">★ recommended</span>':''}</div>
+      <div style="font-size:11px;color:#6b7280">${m.notes||""}</div>`,
+     `<a href="${m.source_url}" target="_blank" style="font-size:11px;background:#eef2ff;color:#3730a3;border-radius:5px;padding:2px 7px;text-decoration:none" title="${m.attribution||''}">${m.license}</a>
+      ${m.installed?'<span style="font-size:11px;color:#15803d;font-weight:700">installed</span>'
+       :(m.verified?`<button onclick="dlModel('${kind}','${m.id}',this)" title="${m.pinned?'SHA-256 verified against pinned hash':'first download: hash will be computed and pinned'}" style="font-size:11.5px;padding:3px 10px">Download</button>`
+       :'<span style="font-size:11px;color:#9ca3af" title="registry entry has no download URL">manual install</span>')}`);
+   }
+   sec.innerHTML=h;
+  }catch(e){sec.textContent="model registry unavailable";}
+ }
 }
-async function dlPlate(id,btn){
+async function selModel(kind,id){
+ await fetch(`/api/models/${kind}/select`,{method:"POST",
+  headers:{"Content-Type":"application/json"},body:JSON.stringify({id})});
+ refreshModelPanel();
+}
+async function dlModel(kind,id,btn){
  btn.disabled=true;btn.textContent="0%";
- const r=await fetch(`/api/plate_models/${id}/download`,{method:"POST"});
+ const r=await fetch(`/api/models/${kind}/${id}/download`,{method:"POST"});
  if(!r.ok){const d=await r.json();btn.textContent="error";btn.title=d.error||"";return;}
  const t=setInterval(async()=>{
-  const s=await(await fetch("/api/plate_models/download_status")).json();
+  const s=await(await fetch("/api/models/download_status")).json();
   if(s.state==="downloading"){btn.textContent=(s.pct||0)+"%";}
   else{clearInterval(t);
-   if(s.state==="done"){refreshPlatePanel();}
+   if(s.state==="done"){refreshModelPanel();}
    else{btn.disabled=false;btn.textContent="retry";btn.title=s.error||"download failed";}}
  },500);
 }
-document.getElementById("cats").addEventListener("change",refreshPlatePanel);
-refreshPlatePanel();
+document.getElementById("cats").addEventListener("change",refreshModelPanel);
+refreshModelPanel();
 let CUR=null, EN={}, MAN=[], DUR=0, POLL=null, PHIST=[], LOGN=0, SHELLPH=null, JOBSJSON="";
 
 function opts(){return{

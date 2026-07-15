@@ -52,7 +52,7 @@ RUN pip install --no-cache-dir -r requirements.txt \
  && python -m spacy download en_core_web_sm
 
 # ---- app layers: tiny, change every release
-COPY pyproject.toml README.md LICENSE NOTICE plate_models.json ./
+COPY pyproject.toml README.md LICENSE NOTICE plate_models.json face_models.json ./
 COPY openscrub.py openscrub_web.py openscrub_setup.py openscrub_update.py \
      openscrub_vault.py zones_ui.py install.py test_openscrub.py ./
 COPY assets/openscrub.ico assets/

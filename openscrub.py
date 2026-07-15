@@ -34,7 +34,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.29"
+VERSION = "1.0.30"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -1694,18 +1694,20 @@ def user_data_dir():
     return d
 
 
-def plate_registry_path():
-    """Path of the WRITABLE plate registry (TOFU pins are written back here).
+def model_registry_path(kind="plate"):
+    """Path of the WRITABLE model registry for `kind` ("plate" or "face" —
+    TOFU pins are written back here).
 
-    Folder deploys use plate_models.json next to the code. Read-only
+    Folder deploys use <kind>_models.json next to the code. Read-only
     installs (pip / frozen) use a per-user copy seeded from the packaged
     registry; new models added by a release are merged into that copy on
     read (never overwriting an existing entry's pinned hash)."""
+    fname = "%s_models.json" % kind
     here = os.path.dirname(os.path.abspath(__file__))
-    packaged = os.path.join(here, "plate_models.json")
+    packaged = os.path.join(here, fname)
     if not install_is_readonly():
         return packaged
-    user = os.path.join(user_data_dir(), "plate_models.json")
+    user = os.path.join(user_data_dir(), fname)
     try:
         if not os.path.exists(user) and os.path.exists(packaged):
             shutil.copy2(packaged, user)
@@ -1726,22 +1728,31 @@ def plate_registry_path():
     return user if os.path.exists(user) else packaged
 
 
-def load_plate_registry():
-    """Return the curated plate-model list, or [] if the registry is absent."""
+def plate_registry_path():
+    return model_registry_path("plate")
+
+
+def load_model_registry(kind="plate"):
+    """Return the curated model list for `kind`, or [] if absent."""
     try:
-        with open(plate_registry_path(), encoding="utf-8") as f:
+        with open(model_registry_path(kind), encoding="utf-8") as f:
             return json.load(f).get("models", [])
     except Exception:
         return []
 
 
-def download_plate_model(entry, dest_dir=None, cb=None, progress=None):
+def load_plate_registry():
+    return load_model_registry("plate")
+
+
+def download_model(entry, kind="plate", dest_dir=None, cb=None,
+                   progress=None):
     """Download a registry model to models/<id>.onnx, verifying its SHA-256.
 
-    entry: a dict from load_plate_registry(). progress: optional callable
-    (fraction_0_to_1). Returns the saved path. Raises on any failure
-    (bad URL, hash mismatch) after removing a partial/incorrect file — a
-    privacy tool must never silently run an unverified model.
+    entry: a dict from load_model_registry(kind). progress: optional
+    callable (fraction_0_to_1). Returns the saved path. Raises on any
+    failure (bad URL, hash mismatch) after removing a partial/incorrect
+    file — a privacy tool must never silently run an unverified model.
     """
     import hashlib, urllib.request
     log = (cb.log if cb else print)
@@ -1755,9 +1766,9 @@ def download_plate_model(entry, dest_dir=None, cb=None, progress=None):
         else os.path.join(os.path.dirname(os.path.abspath(__file__)),
                           "models"))
     os.makedirs(dest_dir, exist_ok=True)
-    dest = os.path.join(dest_dir, "%s.onnx" % entry.get("id", "plate_model"))
+    dest = os.path.join(dest_dir, "%s.onnx" % entry.get("id", kind + "_model"))
     tmp = dest + ".part"
-    log("      downloading plate model: %s" % entry.get("label", entry.get("id")))
+    log("      downloading %s model: %s" % (kind, entry.get("label", entry.get("id"))))
     h = hashlib.sha256()
     with urllib.request.urlopen(url) as r, open(tmp, "wb") as f:
         total = int(r.headers.get("Content-Length", 0))
@@ -1779,18 +1790,23 @@ def download_plate_model(entry, dest_dir=None, cb=None, progress=None):
         # later download of this model must match this exact file.
         log("      first download of this model: pinning sha256=%s" % digest[:16] + "…")
         try:
-            with open(plate_registry_path(), encoding="utf-8") as f:
+            with open(model_registry_path(kind), encoding="utf-8") as f:
                 reg = json.load(f)
             for m in reg.get("models", []):
                 if m.get("id") == entry.get("id"):
                     m["sha256"] = digest
-            with open(plate_registry_path(), "w", encoding="utf-8") as f:
+            with open(model_registry_path(kind), "w", encoding="utf-8") as f:
                 json.dump(reg, f, indent=2)
         except Exception as e:
             log("      (could not pin hash into registry: %s)" % e)
     os.replace(tmp, dest)
     log("      saved verified model -> %s" % dest)
     return dest
+
+
+def download_plate_model(entry, dest_dir=None, cb=None, progress=None):
+    return download_model(entry, "plate", dest_dir=dest_dir, cb=cb,
+                          progress=progress)
 
 
 class PlateDetector:
@@ -1959,17 +1975,72 @@ class PlateDetector:
         return res
 
 
-class FaceDetector:
-    """YuNet DNN detector when its model is available (auto-downloaded on
-    first use, ~230 KB), otherwise OpenCV's built-in Haar cascade. Boxes are
-    expanded 15% so hairline/chin aren't left identifiable at the blur edge."""
+def _nms_boxes(boxes, thr=0.4):
+    """Greedy IoU NMS over [x1,y1,x2,y2,score] lists."""
+    if not boxes:
+        return []
+    b = np.array(boxes, dtype=np.float64)
+    idx = b[:, 4].argsort()[::-1]
+    keep = []
+    while len(idx):
+        i = idx[0]
+        keep.append(boxes[i])
+        rest = idx[1:]
+        xx1 = np.maximum(b[i, 0], b[rest, 0])
+        yy1 = np.maximum(b[i, 1], b[rest, 1])
+        xx2 = np.minimum(b[i, 2], b[rest, 2])
+        yy2 = np.minimum(b[i, 3], b[rest, 3])
+        inter = np.maximum(0, xx2 - xx1) * np.maximum(0, yy2 - yy1)
+        a1 = (b[i, 2] - b[i, 0]) * (b[i, 3] - b[i, 1])
+        a2 = (b[rest, 2] - b[rest, 0]) * (b[rest, 3] - b[rest, 1])
+        iou = inter / np.maximum(a1 + a2 - inter, 1e-6)
+        idx = rest[iou < thr]
+    return keep
 
-    def __init__(self, cb=None, expand=0.15, thresh=0.6):
+
+class FaceDetector:
+    """Face detector with three tiers:
+    1. an optional user-installed ONNX model (--face-model / registry:
+       CenterFace or SCRFD, auto-recognized by output signature) — higher
+       recall on small/hard faces;
+    2. YuNet DNN (auto-downloaded on first use, ~230 KB) — the zero-setup
+       default;
+    3. OpenCV's built-in Haar cascade as the last resort.
+    Boxes are expanded 15% so hairline/chin aren't left identifiable at the
+    blur edge. A model that fails to load falls back LOUDLY to YuNet —
+    detection never silently disappears."""
+
+    def __init__(self, cb=None, expand=0.15, thresh=0.6, model_path=None):
         self.expand = expand
         self.thresh = float(thresh)
         log = (cb.log if cb else print)
         self.yunet = None
         self.haar = None
+        self.net = None
+        self.arch = None
+        path = model_path or os.environ.get("OPENSCRUB_FACE_MODEL")
+        if path:
+            if os.path.exists(path):
+                try:
+                    net = cv2.dnn.readNet(path)
+                    nouts = len(net.getUnconnectedOutLayersNames())
+                    if nouts == 4:
+                        self.arch = "centerface"
+                    elif nouts in (6, 9):
+                        self.arch = "scrfd"
+                    else:
+                        raise ValueError("unrecognized face-model output "
+                                         "signature (%d outputs)" % nouts)
+                    self.net = net
+                    log("      face detector: %s ONNX model (%s)"
+                        % (self.arch, os.path.basename(path)))
+                    return
+                except Exception as e:
+                    log(f"      face model failed to load ({e}) — "
+                        "falling back to built-in YuNet")
+            else:
+                log(f"      face model not found: {path} — "
+                    "falling back to built-in YuNet")
         model = os.path.join(_model_dir(), "face_detection_yunet_2023mar.onnx")
         if not os.path.exists(model) or os.path.getsize(model) < 10000:
             try:
@@ -2001,7 +2072,12 @@ class FaceDetector:
                   if s < 1.0 else frame)
         dh, dw = dframe.shape[:2]
         out = []
-        if self.yunet is not None:
+        if self.net is not None:
+            raw = (self._find_centerface(dframe) if self.arch == "centerface"
+                   else self._find_scrfd(dframe))
+            out = [(x1 / s, y1 / s, x2 / s, y2 / s, conf)
+                   for x1, y1, x2, y2, conf in raw]
+        elif self.yunet is not None:
             if self.size != (dw, dh):
                 self.yunet.setInputSize((dw, dh))
                 self.size = (dw, dh)
@@ -2022,6 +2098,68 @@ class FaceDetector:
             expanded.append((max(0, x1 - ex), max(0, y1 - ey),
                              min(w, x2 + ex), min(h, y2 + ey), conf))
         return expanded
+
+    def _find_centerface(self, frame):
+        """CenterFace decode: heatmap + exp(scale)*4 + offset on a stride-4
+        grid, input padded up to a multiple of 32 (validated against the
+        reference implementation on a known face)."""
+        h, w = frame.shape[:2]
+        iw, ih = (w + 31) // 32 * 32, (h + 31) // 32 * 32
+        blob = cv2.dnn.blobFromImage(frame, 1.0, (iw, ih), (0, 0, 0),
+                                     swapRB=True, crop=False)
+        self.net.setInput(blob)
+        hm, scale, off, _lms = self.net.forward(
+            self.net.getUnconnectedOutLayersNames())
+        heat = hm[0, 0]
+        ys, xs = np.where(heat > self.thresh)
+        sx, sy = w / iw, h / ih
+        boxes = []
+        for y, x in zip(ys, xs):
+            s0 = float(np.exp(scale[0, 0, y, x])) * 4
+            s1 = float(np.exp(scale[0, 1, y, x])) * 4
+            o0 = float(off[0, 0, y, x])
+            o1 = float(off[0, 1, y, x])
+            x1 = max(0.0, (x + o1 + 0.5) * 4 - s1 / 2)
+            y1 = max(0.0, (y + o0 + 0.5) * 4 - s0 / 2)
+            boxes.append([x1 * sx, y1 * sy,
+                          min(iw, x1 + s1) * sx, min(ih, y1 + s0) * sy,
+                          float(heat[y, x])])
+        return _nms_boxes(boxes)
+
+    def _find_scrfd(self, frame):
+        """SCRFD decode: per-stride (8/16/32) score + bbox-distance heads,
+        2 anchors per cell; outputs are grouped by row count so the export's
+        output ordering doesn't matter (validated against det_10g)."""
+        h, w = frame.shape[:2]
+        S = 640
+        blob = cv2.dnn.blobFromImage(frame, 1.0 / 128, (S, S),
+                                     (127.5, 127.5, 127.5),
+                                     swapRB=True, crop=False)
+        self.net.setInput(blob)
+        outs = self.net.forward(self.net.getUnconnectedOutLayersNames())
+        groups = {}
+        for o in outs:
+            o = o.reshape(o.shape[-2], o.shape[-1]) if o.ndim == 3 else o
+            groups.setdefault(o.shape[0], {})[o.shape[1]] = o
+        sx, sy = w / S, h / S
+        boxes = []
+        for n, g in groups.items():
+            if 1 not in g or 4 not in g:
+                continue
+            stride = int(round((2 * S * S / n) ** 0.5))
+            cols = S // stride
+            scores = g[1][:, 0]
+            bb = g[4]
+            for i in np.where(scores > self.thresh)[0]:
+                cell = i // 2                       # 2 anchors per cell
+                cx = (cell % cols) * stride
+                cy = (cell // cols) * stride
+                boxes.append([(cx - bb[i, 0] * stride) * sx,
+                              (cy - bb[i, 1] * stride) * sy,
+                              (cx + bb[i, 2] * stride) * sx,
+                              (cy + bb[i, 3] * stride) * sy,
+                              float(scores[i])])
+        return _nms_boxes(boxes)
 
 
 # ----------------------------------------------------------------------------
@@ -2426,6 +2564,12 @@ def build_parser():
                          "OpenScrub looks for models/plate_yolov8.onnx or the "
                          "$OPENSCRUB_PLATE_MODEL env var. Plate category is "
                          "inactive without a model.")
+    ap.add_argument("--face-model", default=None,
+                    help="path to an optional face-detection ONNX model "
+                         "(CenterFace or SCRFD, auto-recognized; see "
+                         "face_models.json). Falls back to $OPENSCRUB_FACE_MODEL, "
+                         "then to the built-in YuNet — face detection always "
+                         "works without a model file.")
     ap.add_argument("--plate-threshold", type=float, default=0.35,
                     help="license-plate detector confidence cutoff (0-1). "
                          "Default 0.35.")
@@ -2689,7 +2833,8 @@ def run_scan(args, cb=None):
         namer = None
         cb.log("      names: skipped (name category not selected)")
     facer = (FaceDetector(cb, expand=args.face_expand,
-                          thresh=getattr(args, "face_threshold", 0.6))
+                          thresh=getattr(args, "face_threshold", 0.6),
+                          model_path=getattr(args, "face_model", None))
              if "face" in cats else None)
     plater = (PlateDetector(cb, model_path=getattr(args, "plate_model", None),
                             thresh=getattr(args, "plate_threshold", 0.35))

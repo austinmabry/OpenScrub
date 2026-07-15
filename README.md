@@ -34,7 +34,9 @@ general-purpose.
 
 - **Blur faces** — detected with a DNN model and visually tracked, so a
   single detection covers a face across frames where it would otherwise
-  be missed.
+  be missed. Works out of the box; optional higher-accuracy models
+  (CenterFace, SCRFD) can be downloaded and selected in the web UI's
+  Detection models panel — every download is hash-verified.
 - **Blur license plates** — via an optional ONNX detector model
   (see [PLATES.md](PLATES.md)); plates re-detect every frame, so a plate
   crossing the frame stays covered.

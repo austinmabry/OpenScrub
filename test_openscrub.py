@@ -641,3 +641,21 @@ def test_detector_only_scan_skips_ocr(tmp_path, monkeypatch):
     # the SSN text in the video must NOT be detected (face-only job) and
     # the run must complete cleanly
     assert not [d for d in state["detections"] if d.category == "ssn"]
+
+
+def test_face_model_registry_and_fallback(tmp_path):
+    """The face-model registry loads with pinned hashes, and a face model
+    that can't load falls back LOUDLY to the built-in YuNet — face
+    detection must never silently disappear."""
+    reg = openscrub.load_model_registry("face")
+    assert any(m["id"] == "centerface" for m in reg)
+    assert all(m.get("sha256") for m in reg), "face models must ship pinned"
+    logs = []
+
+    class CB(openscrub.Callbacks):
+        def log(self, m):
+            logs.append(m)
+    fd = openscrub.FaceDetector(CB(), model_path=str(tmp_path / "nope.onnx"))
+    assert fd.net is None, "missing model must not leave a broken detector"
+    assert any("falling back" in l for l in logs)
+    assert fd.yunet is not None or fd.haar is not None

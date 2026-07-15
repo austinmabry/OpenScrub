@@ -18,10 +18,11 @@ target is Windows 10 + NVIDIA RTX 3060.
 | `windows/` | Native Windows packaging: `openscrub.spec` (PyInstaller, two branded exes), `installer.iss` (Inno Setup → Program Files), `build_installer.bat` (runs both; attach output exe to the GitHub release). Build on Windows only. |
 | `install.py` | Windows-friendly installer (deps, GPU OCR, shortcut, `--with-plates`). |
 | `plate_models.json` | Curated license-plate model registry (see PLATES.md). |
+| `face_models.json` | Curated optional face-model registry (CenterFace/SCRFD); built-in YuNet needs no file. Ships everywhere plate_models.json does (wheel, sdist, Dockerfiles, PyInstaller spec, updater pin-carry). |
 | `fetch_plate_models.py` | Alt path to fetch plate models via the open-image-models pip package. |
 | `openscrub_update.py` | `openscrub-update` command + web self-update backend: PyPI version check, sha256-verified sdist download, data-preserving folder update (PRESERVE set), TOFU pin carry-forward. Ships in the wheel. |
 | `openscrub_vault.py` | At-rest encryption for the job store: scrypt keystore, chunked AES-256-GCM files (`.osvault`), lock/unlock tree walkers. NO password reset by design. Ships in the wheel. |
-| `test_openscrub.py` | pytest suite (27 tests). Must stay green. |
+| `test_openscrub.py` | pytest suite (28 tests). Must stay green. |
 | `tools/make_icons.py` | Regenerates every icon/logo asset from `assets/badge_master.png`. |
 | `tools/make_wordmark.py` | Regenerates the typeset Poppins wordmarks (navy + white). |
 | `assets/` | Brand assets. `badge_master.png` (canonical, mosaic+brackets style) and `badge_master_blurbox_alt.png` (alternate) are the sources; everything else is generated. |
@@ -36,7 +37,16 @@ Key classes/functions (locate with grep, line numbers drift):
 - `Detection` dataclass — has `dense: bool`. **Dense detections are per-frame
   position samples and must NEVER be merged** (see `merge_detections`), or
   boxes balloon across a moving object's path.
-- `FaceDetector` — YuNet DNN (auto-downloaded ~230KB) with Haar fallback.
+- `FaceDetector` — three tiers: optional ONNX model (CenterFace or SCRFD,
+  auto-recognized by output-layer count: 4 → centerface, 6/9 → scrfd;
+  decoders validated against reference output) → YuNet DNN
+  (auto-downloaded ~230KB, zero-setup default) → Haar fallback. Model
+  resolution: `--face-model` → `$OPENSCRUB_FACE_MODEL` → built-in. A model
+  that fails to load falls back LOUDLY to YuNet. `face_models.json` is the
+  curated registry (CenterFace pinned/MIT; SCRFD pinned/non-commercial —
+  never bundle it). Registry plumbing is shared with plates:
+  `model_registry_path/load_model_registry/download_model(kind)` with
+  plate-named wrappers kept for compatibility.
 - `PlateDetector` — YOLO ONNX via cv2.dnn, NO torch dependency. Auto-detects
   two output formats: raw YOLOv8 `(1,5,8400)` and end2end `(1,N,6)` (what
   open-image-models YOLOv9 emits). INERT without a model file (logs and
@@ -115,9 +125,13 @@ defined — there was a real UnboundLocalError from ordering once.
 - Jobs live in `openscrub_jobs/` next to the script. On startup there is a
   ONE-TIME migration renaming a legacy `phi_blur_jobs/` dir if present —
   **the literal string "phi_blur_jobs" is deliberate; do not "fix" it.**
-- Plate model picker: `/api/plate_models` (+ `/download`, `/download_status`).
-  A model shows a Download button only if its registry `download_url` is real.
-  New models are picked up on the next job (detector instantiated per run).
+- Detection models panel (face + plate): `/api/models/<kind>` (+
+  `/<mid>/download`, `/download_status`, `/select`). Selection persists in
+  `model_select.json` (data root); build_args passes the selected file as
+  `--face-model`/`--plate-model` (missing file → engine default ladder).
+  Old `/api/plate_models*` routes remain as aliases. A model shows a
+  Download button only if its registry `download_url` is real. New models
+  are picked up on the next job (detector instantiated per run).
 - Server: cheroot with `BuiltinSSLAdapter` (self-signed or user cert), Flask
   dev server fallback if cheroot missing. `ssl_ctx` is a `(cert, key)` tuple.
 - Self-update: `/api/update_check` (6h-cached PyPI poll, offline-silent),
@@ -160,7 +174,7 @@ python -c "import ast; ast.parse(open('openscrub.py').read())"   # each edited .
 # PAGE is a normal (non-raw) Python string, so \n in source JS becomes a real
 # newline when served and can break string literals (the v1.0.6 jobs bug):
 #   python -c "import openscrub_web as w, re; open('/tmp/p.js','w').write(re.search(r'<script>(.*)</script>', w.PAGE, re.S).group(1))" && node --check /tmp/p.js
-python -m pytest test_openscrub.py -q                             # 27 tests, all green
+python -m pytest test_openscrub.py -q                             # 28 tests, all green
 python -m build          # FULL build (sdist->wheel), NEVER just `-w`:
                          # the wheel is built FROM the sdist in CI, so any
                          # file the wheel force-includes must be in the

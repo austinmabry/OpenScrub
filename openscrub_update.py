@@ -170,7 +170,8 @@ def update_source(latest, log):
             os.makedirs(os.path.dirname(dest), exist_ok=True)
             with open(tmp, "wb") as f:
                 f.write(data)
-            if rel == "plate_models.json" and os.path.exists(dest):
+            if rel in ("plate_models.json", "face_models.json") \
+                    and os.path.exists(dest):
                 _merge_registry_file(dest, tmp, log)
             if os.path.exists(dest):
                 os.makedirs(os.path.join(bak, os.path.dirname(rel))
