@@ -13,6 +13,17 @@
 name: OpenCV CUDA base image
 
 on:
+  # rebuild ONLY when the base recipe itself changes — NOT on every
+  # release. Rebuilding per-release would give the ~1 GB CUDA-OpenCV layer
+  # a new digest each time and force users to re-download it on every
+  # version bump (the exact slow-pull problem the base image exists to
+  # avoid). The CUDA app image FROMs a fixed base tag, so every release
+  # already ships the latest app code on top of this stable base.
+  push:
+    branches: [main]
+    paths:
+      - "docker/Dockerfile.opencv-cuda"
+      - ".github/workflows/opencv-cuda-base.yml"
   workflow_dispatch:
     inputs:
       opencv_version:
@@ -56,8 +67,8 @@ jobs:
           file: docker/Dockerfile.opencv-cuda
           push: true
           build-args: |
-            OPENCV_VERSION=${{ github.event.inputs.opencv_version }}
-            CUDA_ARCH_BIN=${{ github.event.inputs.arches }}
+            OPENCV_VERSION=${{ github.event.inputs.opencv_version || '4.10.0' }}
+            CUDA_ARCH_BIN=${{ github.event.inputs.arches || '6.1;7.5;8.6;8.9' }}
           tags: |
-            ghcr.io/austinmabry/opencv-cuda:${{ github.event.inputs.opencv_version }}-cu126
+            ghcr.io/austinmabry/opencv-cuda:${{ github.event.inputs.opencv_version || '4.10.0' }}-cu126
             ghcr.io/austinmabry/opencv-cuda:latest

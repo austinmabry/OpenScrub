@@ -1,5 +1,6 @@
 # OpenScrub server image — NVIDIA GPU build (CUDA OCR via PaddleOCR-GPU,
-# NVENC hardware encoding via ffmpeg). Published on every release as
+# CUDA face detection via a source-built OpenCV, NVENC hardware encoding
+# via ffmpeg). Published on every release as
 # ghcr.io/austinmabry/openscrub:<version>-cuda and :cuda (also on Docker
 # Hub as pharmhero/openscrub with the same tags).
 #
@@ -15,33 +16,40 @@
 #     -v openscrub_data:/root/.local/share/OpenScrub \
 #     ghcr.io/austinmabry/openscrub:cuda
 #
-# GPU features light up automatically: the engine's --device auto picks the
-# CUDA PaddleOCR build, and the NVENC test-encode selects h264_nvenc when
-# the driver is exposed (NVIDIA_DRIVER_CAPABILITIES includes "video").
+# GPU features light up automatically: PaddleOCR uses the CUDA build,
+# OpenCV DNN runs face detection + identity grouping on the GPU (the base
+# image below is a CUDA-built OpenCV — see docker/Dockerfile.opencv-cuda),
+# and NVENC selects h264_nvenc/hevc_nvenc when the driver is exposed.
+# Set OPENSCRUB_CPU_DNN=1 to force face detection back onto the CPU.
 #
-# LAYER ORDER MATTERS: the multi-GB CUDA/Paddle dependency stack installs
-# BEFORE the app code is copied, so a release that only changes code
-# rebuilds (and users only re-download) the small app layers at the
-# bottom. Combined with the workflow's registry build cache, unchanged
-# dependency layers keep the same digest across releases.
+# LAYER ORDER MATTERS: the multi-GB CUDA/OpenCV/Paddle stack lives BELOW
+# the app COPY layers, so a release that only changes code rebuilds (and
+# users only re-download) the small app layers. The CUDA-OpenCV layer is
+# inherited from the opencv-cuda base image, which is rebuilt rarely
+# (docker/Dockerfile.opencv-cuda) and keeps a stable digest across releases.
 
-FROM nvidia/cuda:12.6.3-cudnn-runtime-ubuntu22.04
+# CUDA-enabled OpenCV base (built by .github/workflows/opencv-cuda-base.yml).
+# Bump this tag only when that base image is rebuilt.
+FROM ghcr.io/austinmabry/opencv-cuda:4.10.0-cu126
 
 ENV DEBIAN_FRONTEND=noninteractive \
     NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends \
-      python3 python3-pip tesseract-ocr ffmpeg \
- && rm -rf /var/lib/apt/lists/* \
- && ln -sf /usr/bin/python3 /usr/local/bin/python
+ && apt-get install -y --no-install-recommends tesseract-ocr ffmpeg \
+ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
 
-# ---- heavy dependency layer: rebuilds ONLY when requirements.txt changes
+# ---- heavy dependency layer: rebuilds ONLY when requirements.txt changes.
+# OpenCV is ALREADY provided (CUDA build) by the base image — install every
+# requirement EXCEPT opencv (the CPU wheel would shadow the CUDA one) and
+# numpy (the base image's numpy is the ABI OpenCV was compiled against; a
+# pip numpy of a different ABI would break `import cv2`).
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt \
+RUN grep -viE '^(opencv|numpy)' requirements.txt > /tmp/req.nocv \
+ && pip install --no-cache-dir -r /tmp/req.nocv \
  && pip install --no-cache-dir paddleocr \
       paddlepaddle-gpu==3.2.2 \
       -i https://www.paddlepaddle.org.cn/packages/stable/cu126/ \
@@ -49,7 +57,12 @@ RUN pip install --no-cache-dir -r requirements.txt \
  # NOTE: no pip cuDNN here — the cudnn-runtime base image ships the
  # matched version; a second, newer pip copy caused CUDNN error 5003
  # (EXECUTION_FAILED) at the first Paddle-GPU inference.
- && python -m spacy download en_core_web_sm
+ && python -m spacy download en_core_web_sm \
+ # fail the build LOUDLY if anything (paddle's deps) broke the CUDA
+ # OpenCV's numpy ABI, rather than shipping an image whose cv2 won't load
+ && python -c "import cv2, numpy; \
+print('cv2', cv2.__version__, '| numpy', numpy.__version__, \
+'| cuda module:', hasattr(cv2, 'cuda'))"
 
 # ---- app layers: tiny, change every release
 COPY pyproject.toml README.md LICENSE NOTICE plate_models.json face_models.json ./
