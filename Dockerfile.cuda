@@ -58,8 +58,12 @@ RUN grep -viE '^(opencv|numpy)' requirements.txt > /tmp/req.nocv \
  # matched version; a second, newer pip copy caused CUDNN error 5003
  # (EXECUTION_FAILED) at the first Paddle-GPU inference.
  && python -m spacy download en_core_web_sm \
- # fail the build LOUDLY if anything (paddle's deps) broke the CUDA
- # OpenCV's numpy ABI, rather than shipping an image whose cv2 won't load
+ # the CUDA OpenCV base was compiled against numpy 1.x; PaddleOCR pulls
+ # numpy 2.x, whose C ABI breaks `import cv2` (_ARRAY_API not found). Pin
+ # back to 1.x — Paddle 3.x, spaCy, and this OpenCV all support it.
+ && pip install --no-cache-dir "numpy<2" \
+ # fail the build LOUDLY if the numpy ABI is still wrong, rather than
+ # shipping an image whose cv2 won't load
  && python -c "import cv2, numpy; \
 print('cv2', cv2.__version__, '| numpy', numpy.__version__, \
 '| cuda module:', hasattr(cv2, 'cuda'))"
