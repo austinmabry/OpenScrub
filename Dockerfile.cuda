@@ -60,7 +60,9 @@ RUN pip install --no-cache-dir --no-deps . \
  && mkdir -p /root/.openscrub/models \
  && python -c "import urllib.request, openscrub; \
 urllib.request.urlretrieve(openscrub.YUNET_URL, \
-'/root/.openscrub/models/face_detection_yunet_2023mar.onnx')"
+'/root/.openscrub/models/face_detection_yunet_2023mar.onnx'); \
+urllib.request.urlretrieve(openscrub.SFACE_URL, \
+'/root/.openscrub/models/face_recognition_sface_2021dec.onnx')"
 
 EXPOSE 8384
 VOLUME ["/root/.local/share/OpenScrub"]

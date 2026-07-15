@@ -510,9 +510,11 @@ def test_report_roundtrip_preserves_tracks(tmp_path):
     state = {"fps": 30.0, "cum": [(0.0, 0.0)], "bands": [(0.0, 0.0)],
              "detections": [d], "input_sha256": "x"}
     rp = str(tmp_path / "r.json")
+    d.person = 2
     openscrub.write_report(rp, args, state)
     dets, _, _ = openscrub.load_report(rp)
     assert dets[0].dense is True and dets[0].track == 3
+    assert dets[0].person == 2, "person id must survive the round trip"
 
 
 def _hdr_clip(path):

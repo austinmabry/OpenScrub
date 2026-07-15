@@ -647,6 +647,8 @@ def job_detections(jid):
                       "t_start": d["t_start"], "t_end": round(d["t_end"], 2),
                       "enabled": d.get("enabled", True),
                       "track": d.get("track", -1),
+                      "person": d.get("person", -1),
+                      "confidence": d.get("confidence", 0),
                       "zone_dropped": bool(d.get("zone_dropped"))})
     return jsonify({"detections": items,
                     "fps": doc["render_state"]["fps"],
@@ -1748,21 +1750,28 @@ async function loadReview(){
  }
  for(const[cat,rawItems] of Object.entries(groups)){
   // collapse dense tracks: one card per physical object, not per frame
-  const byTrack={},items=[];
+  const byGroup={},items=[];
   for(const x of rawItems){
-   if(x.track>=0){(byTrack[x.track]=byTrack[x.track]||[]).push(x);}
+   // identity first: one card per PERSON (all their tracks); then per
+   // track; ungrouped detections stand alone
+   const key=x.person>=0?("p"+x.person):(x.track>=0?("t"+x.track):null);
+   if(key){(byGroup[key]=byGroup[key]||[]).push(x);}
    else{TRKMEM[x.i]=[x.i];items.push(x);}
   }
-  for(const members of Object.values(byTrack)){
+  for(const [key,members] of Object.entries(byGroup)){
    members.sort((a,b)=>a.t_start-b.t_start);
-   const rep={...members[Math.floor(members.length/2)]};
+   let best=members[0];             // clearest thumbnail = highest-confidence
+   for(const m of members)if((m.confidence||0)>(best.confidence||0))best=m;
+   const rep={...best};
    rep.t_start=members[0].t_start;
    rep.t_end=members[members.length-1].t_end;
    rep.frames=members.length;
+   rep.personcard=key[0]==="p";
    TRKMEM[rep.i]=members.map(m=>m.i);
    items.push(rep);
   }
-  items.sort((a,b)=>a.t_start-b.t_start);
+  // person cards first, then everything else chronologically
+  items.sort((a,b)=>((b.personcard?1:0)-(a.personcard?1:0))||a.t_start-b.t_start);
   html+=`<h3 style="margin:10px 0 6px">${cat} <span class="badge">${items.length}</span>
   <button class="sec" style="padding:3px 8px;font-size:12px"
    onclick="setAll('${cat}',true)">all on</button>
@@ -1773,7 +1782,7 @@ async function loadReview(){
     <img src="api/jobs/${CUR}/thumb/${x.i}"
      style="cursor:zoom-in" onclick="zoomDet(${x.i})"
      onerror="thumbRetry(this)">
-    <div>"${x.text}"${x.frames?` <span class="badge">tracked ×${x.frames} frames</span>`:""} <br>${x.t_start.toFixed(1)}–${x.t_end.toFixed(1)}s</div>
+    <div>${x.personcard?`<b>Person ${x.person+1}</b> — one decision for ALL their appearances`:`"${x.text}"`}${x.frames?` <span class="badge">×${x.frames} frames</span>`:""} <br>${x.t_start.toFixed(1)}–${x.t_end.toFixed(1)}s</div>
     <button class="blurbtn ${EN[x.i]?"blur":"keep"}" id="bb${x.i}"
      onclick="toggleDet(${x.i})">${EN[x.i]?"Blur":"Keep"}</button>
    </div>`}

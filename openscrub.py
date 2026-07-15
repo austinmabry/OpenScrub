@@ -34,7 +34,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.32"
+VERSION = "1.0.33"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -580,6 +580,9 @@ class Detection:
     track: int = -1            # dense detections of the same physical object
                                # share a track id, so review shows ONE item
                                # per face instead of hundreds of frames
+    person: int = -1           # face tracks clustered by facial IDENTITY
+                               # (SFace embeddings): one review decision per
+                               # PERSON, applied to all their appearances
 
 
 class PhiMemory:
@@ -1131,6 +1134,99 @@ def smooth_dense_tracks(dets, fps, video, cum=None, win_start=0.0):
         cap.release()
     dets.extend(added)
     return (n_gaps, n_lead, lead_s)
+
+
+def group_persons(dets, video, cb=None):
+    """Cluster dense FACE tracks by facial IDENTITY so review shows one
+    card per PERSON — one blur/keep decision applied to every appearance.
+    Nobody blurs a face in one clip and leaves the same face visible in
+    another; per-person is the decision users are actually making.
+
+    Uses SFace embeddings (OpenCV zoo, Apache-2.0, auto-downloaded ~38 MB
+    like YuNet) aligned via YuNet landmarks on each track's best frames.
+    The 0.40 cosine threshold is CONSERVATIVE (same person measures ~0.9,
+    different people ~0.0-0.35): a missed merge only shows an extra card,
+    but a wrong merge could hide someone inside a kept person. Tracks
+    where no face embeds (junk detections, extreme profiles) keep
+    person=-1 and stay individual cards. Returns (embedded_tracks,
+    n_persons)."""
+    cb = cb or Callbacks()
+    tracks = {}
+    for d in dets:
+        if getattr(d, "dense", False) and d.category == "face" \
+                and getattr(d, "track", -1) >= 0:
+            tracks.setdefault(d.track, []).append(d)
+    if not tracks:
+        return (0, 0)
+    if not (hasattr(cv2, "FaceRecognizerSF_create")
+            and hasattr(cv2, "FaceDetectorYN_create")):
+        return (0, 0)
+    mdir = _model_dir()
+    sface = os.path.join(mdir, "face_recognition_sface_2021dec.onnx")
+    yunet = os.path.join(mdir, "face_detection_yunet_2023mar.onnx")
+    import urllib.request
+    if not os.path.exists(sface) or os.path.getsize(sface) < 10000:
+        cb.log("      downloading SFace identity model (~38 MB, one time)…")
+        urllib.request.urlretrieve(SFACE_URL, sface)
+    if not os.path.exists(yunet) or os.path.getsize(yunet) < 10000:
+        urllib.request.urlretrieve(YUNET_URL, yunet)
+    rec = cv2.FaceRecognizerSF_create(sface, "")
+    det = cv2.FaceDetectorYN_create(yunet, "", (320, 320), 0.5)
+    cap = cv2.VideoCapture(video)
+    embs = {}
+    for tid, samples in tracks.items():
+        best = sorted(samples, key=lambda d: -d.confidence)[:3]
+        feats = []
+        for d in best:
+            t = min(max(d.last_seen, d.t_start), d.t_end)
+            cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, t) * 1000)
+            ok, fr = cap.read()
+            if not ok:
+                continue
+            det.setInputSize((fr.shape[1], fr.shape[0]))
+            _, rows = det.detect(fr)
+            if rows is None:
+                continue
+            sb = (d.cbox[0] + d.aoff[0], d.cbox[1] + d.aoff[1],
+                  d.cbox[2] + d.aoff[0], d.cbox[3] + d.aoff[1])
+            rbest, riou = None, 0.2
+            for r in rows:
+                rb = (r[0], r[1], r[0] + r[2], r[1] + r[3])
+                iou = _box_iou(rb, sb)
+                if iou > riou:
+                    rbest, riou = r, iou
+            if rbest is None:
+                continue
+            f = rec.feature(rec.alignCrop(fr, rbest)).flatten()
+            n = float(np.linalg.norm(f))
+            if n > 0:
+                feats.append(f / n)
+        if feats:
+            e = np.mean(feats, axis=0)
+            embs[tid] = e / np.linalg.norm(e)
+    cap.release()
+    # single-link agglomerative merge via union-find
+    parent = {t: t for t in embs}
+
+    def _find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    tids = sorted(embs)
+    for i, a in enumerate(tids):
+        for b in tids[i + 1:]:
+            if float(np.dot(embs[a], embs[b])) >= 0.40:
+                parent[_find(a)] = _find(b)
+    roots = {}
+    for t in tids:
+        r = _find(t)
+        if r not in roots:
+            roots[r] = len(roots)
+        for d in tracks[t]:
+            d.person = roots[r]
+    return (len(embs), len(roots))
 
 
 def merge_detections(dets, hold, scans=None, bridge_gap=4.0, fuzz=None,
@@ -1708,6 +1804,9 @@ def render(src, dst, detections, cum, bands, fps, pad, mode, preview,
 
 YUNET_URL = ("https://media.githubusercontent.com/media/opencv/opencv_zoo/"
              "main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx")
+SFACE_URL = ("https://media.githubusercontent.com/media/opencv/opencv_zoo/"
+             "main/models/face_recognition_sface/"
+             "face_recognition_sface_2021dec.onnx")
 
 
 def _model_dir():
@@ -2357,7 +2456,8 @@ def load_report(path):
             # report from rehydrated detections, and losing track ids here
             # exploded the re-opened review into one card per frame sample
             dense=bool(r.get("dense", False)),
-            track=int(r.get("track", -1))))
+            track=int(r.get("track", -1)),
+            person=int(r.get("person", -1))))
     return dets, state, prov
 
 
@@ -3533,6 +3633,15 @@ def run_scan(args, cb=None):
             cb.log(f"      dense continuity: {n_gaps} flicker gap(s) "
                    f"interpolated; onsets walked back {lead_s:.2f}s total "
                    f"({n_lead} pre-detection sample(s) matched in the file)")
+        try:
+            n_emb, n_people = group_persons(detections, args.video, cb)
+            if n_people:
+                cb.log(f"      person grouping: {n_emb} face track(s) "
+                       f"identity-matched into {n_people} person(s) — "
+                       "review shows one card per person")
+        except Exception as e:
+            cb.log(f"      person grouping unavailable ({e}) — review "
+                   "shows per-track cards instead")
     if _gap_stats["checked"]:
         cb.log(f"      gap verification: {_gap_stats['checked']} long gap(s) "
                f"checked against the file, {_gap_stats['bridged']} verified "

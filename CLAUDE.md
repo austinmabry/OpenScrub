@@ -91,7 +91,14 @@ Key classes/functions (locate with grep, line numbers drift):
   file to the object's true first visible frame (closes the onset leak
   before the detector's first hit), and adds 0.25s grace pads at both
   ends. Matching happens on 3x3-smoothed half-scale frames — sub-pixel
-  motion decorrelates raw fine texture.
+  motion decorrelates raw fine texture. `group_persons` then clusters
+  face tracks by IDENTITY (SFace embeddings, auto-downloaded ~38MB like
+  YuNet + baked into Docker images; YuNet landmarks for alignment;
+  conservative 0.40 cosine — same person ≈0.9, different ≈0.0-0.35):
+  `Detection.person` (additive report field, survives load_report) —
+  review shows ONE card per person, best-confidence thumbnail, one
+  decision for all appearances. Ungrouped tracks stay person=-1 with
+  per-track cards.
 - Intake normalization (`normalize_vfr`): VFR input → CFR (`probe_vfr`);
   HDR input (`probe_hdr`: PQ/HLG transfer or BT.2020 10-bit) → tone-mapped
   SDR copy (zscale/tonemap, loud NOTE if ffmpeg lacks them) that the SCAN
