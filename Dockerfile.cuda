@@ -1,9 +1,10 @@
 # OpenScrub server image — NVIDIA GPU build (CUDA OCR via PaddleOCR-GPU,
 # NVENC hardware encoding via ffmpeg). Published on every release as
-# ghcr.io/austinmabry/openscrub:<version>-cuda and :cuda.
+# ghcr.io/austinmabry/openscrub:<version>-cuda and :cuda (also on Docker
+# Hub as pharmhero/openscrub with the same tags).
 #
 # Unraid (with the Nvidia Driver plugin installed):
-#   Repository:   ghcr.io/austinmabry/openscrub:cuda
+#   Repository:   pharmhero/openscrub:cuda
 #   Extra Params: --runtime=nvidia
 #   Variables:    NVIDIA_VISIBLE_DEVICES=all   (already set in the image)
 #   Port:         8384 -> 8384
@@ -17,6 +18,12 @@
 # GPU features light up automatically: the engine's --device auto picks the
 # CUDA PaddleOCR build, and the NVENC test-encode selects h264_nvenc when
 # the driver is exposed (NVIDIA_DRIVER_CAPABILITIES includes "video").
+#
+# LAYER ORDER MATTERS: the multi-GB CUDA/Paddle dependency stack installs
+# BEFORE the app code is copied, so a release that only changes code
+# rebuilds (and users only re-download) the small app layers at the
+# bottom. Combined with the workflow's registry build cache, unchanged
+# dependency layers keep the same digest across releases.
 
 FROM nvidia/cuda:12.6.3-cudnn-runtime-ubuntu22.04
 
@@ -31,12 +38,10 @@ RUN apt-get update \
  && ln -sf /usr/bin/python3 /usr/local/bin/python
 
 WORKDIR /src
-COPY pyproject.toml README.md LICENSE plate_models.json ./
-COPY openscrub.py openscrub_web.py openscrub_setup.py openscrub_update.py \
-     openscrub_vault.py zones_ui.py install.py requirements.txt \
-     test_openscrub.py ./
-COPY assets/openscrub.ico assets/
-RUN pip install --no-cache-dir . cheroot \
+
+# ---- heavy dependency layer: rebuilds ONLY when requirements.txt changes
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt \
  && pip install --no-cache-dir paddleocr \
       paddlepaddle-gpu==3.2.2 \
       -i https://www.paddlepaddle.org.cn/packages/stable/cu126/ \
@@ -44,8 +49,14 @@ RUN pip install --no-cache-dir . cheroot \
  # NOTE: no pip cuDNN here — the cudnn-runtime base image ships the
  # matched version; a second, newer pip copy caused CUDNN error 5003
  # (EXECUTION_FAILED) at the first Paddle-GPU inference.
- && pip install --no-cache-dir spacy \
- && python -m spacy download en_core_web_sm \
+ && python -m spacy download en_core_web_sm
+
+# ---- app layers: tiny, change every release
+COPY pyproject.toml README.md LICENSE NOTICE plate_models.json ./
+COPY openscrub.py openscrub_web.py openscrub_setup.py openscrub_update.py \
+     openscrub_vault.py zones_ui.py install.py test_openscrub.py ./
+COPY assets/openscrub.ico assets/
+RUN pip install --no-cache-dir --no-deps . \
  && mkdir -p /root/.openscrub/models \
  && python -c "import urllib.request, openscrub; \
 urllib.request.urlretrieve(openscrub.YUNET_URL, \
