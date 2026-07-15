@@ -500,6 +500,13 @@ def set_cookie(resp):
     if TOKEN is not None and request.args.get("token") == TOKEN:
         resp.set_cookie("phiblur_token", TOKEN, max_age=90 * 86400,
                         samesite="Lax")
+    # the UI is a single served page: without this, browsers (iOS Safari
+    # especially) keep showing a STALE cached copy after the server is
+    # updated — new panels invisibly missing until the cache expires
+    # minutes later. HTML and JSON must always revalidate; images
+    # (thumbnails, frames) keep their own caching.
+    if resp.mimetype in ("text/html", "application/json"):
+        resp.headers["Cache-Control"] = "no-cache"
     return resp
 
 
