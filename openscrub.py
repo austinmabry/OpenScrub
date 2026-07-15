@@ -34,7 +34,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.30"
+VERSION = "1.0.31"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -2074,9 +2074,10 @@ class FaceDetector:
                         raise ValueError("unrecognized face-model output "
                                          "signature (%d outputs)" % nouts)
                     self.net = net
-                    log("      face detector: %s ONNX model (%s)"
+                    log("      face detector: %s ONNX model (%s) + built-in "
+                        "YuNet (detections are UNIONED — an optional model "
+                        "can only add faces, never lose the baseline's)"
                         % (self.arch, os.path.basename(path)))
-                    return
                 except Exception as e:
                     log(f"      face model failed to load ({e}) — "
                         "falling back to built-in YuNet")
@@ -2096,7 +2097,8 @@ class FaceDetector:
             try:
                 self.yunet = cv2.FaceDetectorYN_create(model, "", (320, 320), self.thresh)
                 self.size = None
-                log("      face detector: YuNet (DNN)")
+                if self.net is None:
+                    log("      face detector: YuNet (DNN)")
                 return
             except Exception as e:
                 log(f"      YuNet init failed ({e}) — using Haar cascade fallback")
@@ -2113,21 +2115,23 @@ class FaceDetector:
         dframe = (cv2.resize(frame, (max(1, int(w * s)), max(1, int(h * s))))
                   if s < 1.0 else frame)
         dh, dw = dframe.shape[:2]
-        out = []
+        raw = []
         if self.net is not None:
-            raw = (self._find_centerface(dframe) if self.arch == "centerface"
-                   else self._find_scrfd(dframe))
-            out = [(x1 / s, y1 / s, x2 / s, y2 / s, conf)
-                   for x1, y1, x2, y2, conf in raw]
-        elif self.yunet is not None:
+            raw += (self._find_centerface(dframe) if self.arch == "centerface"
+                    else self._find_scrfd(dframe))
+        if self.yunet is not None:
             if self.size != (dw, dh):
                 self.yunet.setInputSize((dw, dh))
                 self.size = (dw, dh)
             _, faces = self.yunet.detect(dframe)
             for f in (faces if faces is not None else []):
                 x, y, fw, fh, conf = f[0], f[1], f[2], f[3], float(f[-1])
-                out.append((x / s, y / s, (x + fw) / s, (y + fh) / s, conf))
+                raw.append([x, y, x + fw, y + fh, conf])
+        if raw or self.net is not None or self.yunet is not None:
+            out = [(x1 / s, y1 / s, x2 / s, y2 / s, conf)
+                   for x1, y1, x2, y2, conf in _nms_boxes(raw)]
         else:
+            out = []
             gray = cv2.cvtColor(dframe, cv2.COLOR_BGR2GRAY)
             for (x, y, fw, fh) in self.haar.detectMultiScale(gray, 1.1, 5,
                                                              minSize=(36, 36)):
@@ -2171,10 +2175,20 @@ class FaceDetector:
     def _find_scrfd(self, frame):
         """SCRFD decode: per-stride (8/16/32) score + bbox-distance heads,
         2 anchors per cell; outputs are grouped by row count so the export's
-        output ordering doesn't matter (validated against det_10g)."""
+        output ordering doesn't matter (validated against det_10g).
+
+        Input is LETTERBOXED (aspect preserved, padded to 32-multiples) up
+        to 1280 on the long side — the original fixed 640x640 squeeze
+        distorted faces and shrank 1080p frames 3x, making the "best" model
+        detect fewer faces than the built-in YuNet."""
         h, w = frame.shape[:2]
-        S = 640
-        blob = cv2.dnn.blobFromImage(frame, 1.0 / 128, (S, S),
+        S = min(1280, max(640, (max(h, w) + 31) // 32 * 32))
+        scale = min(S / w, S / h)
+        nw, nh = int(round(w * scale)), int(round(h * scale))
+        iw, ih = (nw + 31) // 32 * 32, (nh + 31) // 32 * 32
+        canvas = np.zeros((ih, iw, 3), np.uint8)
+        canvas[:nh, :nw] = cv2.resize(frame, (nw, nh))
+        blob = cv2.dnn.blobFromImage(canvas, 1.0 / 128, (iw, ih),
                                      (127.5, 127.5, 127.5),
                                      swapRB=True, crop=False)
         self.net.setInput(blob)
@@ -2183,23 +2197,22 @@ class FaceDetector:
         for o in outs:
             o = o.reshape(o.shape[-2], o.shape[-1]) if o.ndim == 3 else o
             groups.setdefault(o.shape[0], {})[o.shape[1]] = o
-        sx, sy = w / S, h / S
         boxes = []
         for n, g in groups.items():
             if 1 not in g or 4 not in g:
                 continue
-            stride = int(round((2 * S * S / n) ** 0.5))
-            cols = S // stride
+            stride = int(round((2 * iw * ih / n) ** 0.5))
+            cols = iw // stride
             scores = g[1][:, 0]
             bb = g[4]
             for i in np.where(scores > self.thresh)[0]:
                 cell = i // 2                       # 2 anchors per cell
                 cx = (cell % cols) * stride
                 cy = (cell // cols) * stride
-                boxes.append([(cx - bb[i, 0] * stride) * sx,
-                              (cy - bb[i, 1] * stride) * sy,
-                              (cx + bb[i, 2] * stride) * sx,
-                              (cy + bb[i, 3] * stride) * sy,
+                boxes.append([(cx - bb[i, 0] * stride) / scale,
+                              (cy - bb[i, 1] * stride) / scale,
+                              (cx + bb[i, 2] * stride) / scale,
+                              (cy + bb[i, 3] * stride) / scale,
                               float(scores[i])])
         return _nms_boxes(boxes)
 

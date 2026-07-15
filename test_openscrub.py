@@ -724,3 +724,33 @@ def test_face_only_steady_camera_no_bands_no_giant_boxes(tmp_path):
         "face-only jobs must never emit safety bands"
     assert all(c == (0.0, 0.0) for c in state["cum"]), \
         "face-only jobs must never accumulate scroll offsets"
+
+
+def test_face_model_unions_with_yunet(tmp_path):
+    """An optional face model must AUGMENT the built-in YuNet, never
+    replace it: the union guarantees a model upgrade can only add faces.
+    (SCRFD through a squeezed 640x640 input detected FEWER faces than the
+    built-in — the v1.0.30 'upgrade made it worse' report.)"""
+    logs = []
+
+    class CB(openscrub.Callbacks):
+        def log(self, m):
+            logs.append(m)
+    # a fake ONNX path fails to load -> falls back, yunet still active
+    fd = openscrub.FaceDetector(CB(), model_path=str(tmp_path / "x.onnx"))
+    assert fd.yunet is not None or fd.haar is not None
+    # when a real model IS loaded, yunet must be loaded alongside it — the
+    # union log line is the contract
+    class FakeNet:
+        def getUnconnectedOutLayersNames(self):
+            return ("a", "b", "c", "d")
+    import unittest.mock as mock
+    with mock.patch.object(openscrub.cv2.dnn, "readNet",
+                           return_value=FakeNet()):
+        p = tmp_path / "cf.onnx"
+        p.write_bytes(b"x" * 20000)
+        logs.clear()
+        fd2 = openscrub.FaceDetector(CB(), model_path=str(p))
+    assert fd2.net is not None and fd2.arch == "centerface"
+    assert fd2.yunet is not None, "built-in must run alongside the model"
+    assert any("UNIONED" in l for l in logs)
