@@ -612,3 +612,32 @@ def test_codec_and_container_honored(tmp_path):
     doc = json.loads(p.stdout)
     assert doc["streams"][0]["codec_name"] == "hevc", doc
     assert "matroska" in doc["format"]["format_name"], doc
+
+
+def test_detector_only_scan_skips_ocr(tmp_path, monkeypatch):
+    """A faces/plates-only job must not load the OCR engine, spaCy, or
+    PHI memory — detector-only scan. Loading them anyway cost seconds of
+    startup and gigabytes of RAM for detectors that read no text."""
+    called = []
+    monkeypatch.setattr(openscrub, "make_ocr",
+                        lambda *a, **k: called.append("ocr"))
+    monkeypatch.setattr(openscrub, "NameDetector",
+                        lambda *a, **k: called.append("namer"))
+    src = make_video(str(tmp_path / "f.mp4"), [(300, "SSN 123-45-6789")])
+    parser = openscrub.build_parser()
+    args = parser.parse_args([src, "--engine", "tesseract",
+                              "-o", str(tmp_path / "f_red.mp4"),
+                              "--categories", "face", "--encoder", "x264"])
+    args = openscrub._prep_args(args, parser)
+    logs = []
+
+    class CB(openscrub.Callbacks):
+        def log(self, m):
+            logs.append(m)
+    state = openscrub.run_scan(args, CB())
+    assert called == [], f"loaded needlessly: {called}"
+    assert any("detector-only scan" in l for l in logs)
+    assert any("names: skipped" in l for l in logs)
+    # the SSN text in the video must NOT be detected (face-only job) and
+    # the run must complete cleanly
+    assert not [d for d in state["detections"] if d.category == "ssn"]

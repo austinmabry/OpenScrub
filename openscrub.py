@@ -34,7 +34,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.28"
+VERSION = "1.0.29"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -720,8 +720,9 @@ def detect_phi(words, lines, t, offset, namer, mrn_re, custom_res=()):
                  max(b[2] for b in boxes), max(b[3] for b in boxes)),
                 "dob", joined, min(w[2] for w in trio))
 
-    for box, txt in namer.find(lines):
-        add(box, "name", txt, 1.0)
+    if namer is not None:      # None when the name category isn't selected
+        for box, txt in namer.find(lines):
+            add(box, "name", txt, 1.0)
 
     # Addresses span one to several stacked lines:
     #     111 Main St
@@ -2654,22 +2655,39 @@ def run_scan(args, cb=None):
             setattr(args, attr, default)
     normalize_vfr(args, cb)
     cats = {c.strip() for c in args.categories.split(",")}
+    # everything except the pixel detectors is text: it exists only to feed
+    # OCR output into detect_phi. Load ONLY what the selected categories
+    # actually need — a faces-only job must not pay for PaddleOCR (seconds
+    # of startup + 2-3 GB of RAM) or spaCy.
+    text_cats = cats - {"face", "plate"}
 
     cb.log(f"[1/4] OCR engine   (openscrub v{VERSION})")
-    ocr = make_ocr(args.engine, device=args.device)
-    cb.log(f"      using {type(ocr).__name__}")
+    if text_cats:
+        ocr = make_ocr(args.engine, device=args.device)
+        cb.log(f"      using {type(ocr).__name__}")
+    else:
+        ocr = None
+        cb.log("      skipped — no text categories selected "
+               f"({', '.join(sorted(cats))} only): detector-only scan")
 
     cb.log("[2/4] Detectors")
-    namer = NameDetector(allow_names=args.allow_names, extra_names=args.extra_names,
-                         use_ner=not args.no_ner, heuristic=args.heuristic_names)
-    modes = []
-    if namer.nlp is not None:
-        modes.append("spaCy NER")
-    modes.append("label heuristic")
-    if namer.heuristic:
-        modes.append("capitalized-pair heuristic")
-    cb.log(f"      names: {', '.join(modes)}"
-           + (f" | allowlist: {len(namer.allow)} tokens" if namer.allow else ""))
+    if "name" in cats:
+        namer = NameDetector(allow_names=args.allow_names,
+                             extra_names=args.extra_names,
+                             use_ner=not args.no_ner,
+                             heuristic=args.heuristic_names)
+        modes = []
+        if namer.nlp is not None:
+            modes.append("spaCy NER")
+        modes.append("label heuristic")
+        if namer.heuristic:
+            modes.append("capitalized-pair heuristic")
+        cb.log(f"      names: {', '.join(modes)}"
+               + (f" | allowlist: {len(namer.allow)} tokens" if namer.allow
+                  else ""))
+    else:
+        namer = None
+        cb.log("      names: skipped (name category not selected)")
     facer = (FaceDetector(cb, expand=args.face_expand,
                           thresh=getattr(args, "face_threshold", 0.6))
              if "face" in cats else None)
@@ -2747,7 +2765,7 @@ def run_scan(args, cb=None):
             cb.log("      camera mode: dense face tracking enabled "
                    "(re-detect every frame)")
     tracker = ScrollTracker()
-    memory = None if args.no_memory else PhiMemory(
+    memory = None if (args.no_memory or not text_cats) else PhiMemory(
         threshold=78 if getattr(args, "paranoid", False) else 82)
     cum = []
     bands = []
@@ -2875,11 +2893,15 @@ def run_scan(args, cb=None):
         if due and idx - last_scan_idx >= 2:
             t = idx / fps
             scan_small = small
-            words = read_adaptive(ocr, frame, getattr(args, "ocr_upscale", "auto"))
-            lines = group_lines(words)
-            found = detect_phi(words, lines, t, (cx, cy), namer, mrn_re,
-                               custom_res)
-            found = [d for d in found if d.category in cats]
+            if ocr is not None:
+                words = read_adaptive(ocr, frame,
+                                      getattr(args, "ocr_upscale", "auto"))
+                lines = group_lines(words)
+                found = detect_phi(words, lines, t, (cx, cy), namer, mrn_re,
+                                   custom_res)
+                found = [d for d in found if d.category in cats]
+            else:
+                words, found = [], []   # detector-only scan: no text pass
 
             # in dense mode the frame loop already detects faces on EVERY
             # frame — adding scan-time copies only feeds merge_detections
@@ -3025,10 +3047,12 @@ def run_scan(args, cb=None):
                                 "last_ok": t, "last_emit": t,
                                 "conf": d.confidence})
             raw.extend(found)
-            scans.append((t, (cx, cy),
-                          [(w, (b[0] - cx, b[1] - cy, b[2] - cx, b[3] - cy), c)
-                           for w, b, c in words]))
-            if n_scans == 0 and len(words) < 3:
+            if ocr is not None:
+                scans.append((t, (cx, cy),
+                              [(w, (b[0] - cx, b[1] - cy,
+                                    b[2] - cx, b[3] - cy), c)
+                               for w, b, c in words]))
+            if ocr is not None and n_scans == 0 and len(words) < 3:
                 # First-scan sanity: a text-dense frame that OCR read nothing
                 # from means a broken OCR setup — say so in minute one, not
                 # after a 40-minute render.
@@ -3299,7 +3323,8 @@ def run_scan(args, cb=None):
                "and bridged")
     mem_note = (f" | {n_recalled} memory recalls, "
                 f"{len(memory.items)} strings remembered" if memory else "")
-    cb.log(f"      {n_scans} OCR scans | {len(raw)} raw hits -> "
+    cb.log(f"      {n_scans} {'OCR' if ocr is not None else 'detector'} "
+           f"scans | {len(raw)} raw hits -> "
            f"{len(detections)} merged regions{mem_note}")
     if bt_count:
         cb.log(f"      backtrack: {bt_count} region(s) start moved earlier "
