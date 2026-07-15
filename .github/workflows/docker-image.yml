@@ -1,7 +1,16 @@
-# Builds the server Docker image on every published release and pushes it
-# to GitHub Container Registry as ghcr.io/austinmabry/openscrub:<version>
-# and :latest. Free for public repos; auth is the built-in GITHUB_TOKEN —
-# no accounts, secrets, or cost.
+# Builds the server Docker images on every published release and pushes
+# them to BOTH registries, fully automatically — publish the release and
+# walk away:
+#   ghcr.io/austinmabry/openscrub:<version>, :latest   (+ -cuda, :cuda)
+#   docker.io/pharmhero/openscrub:<version>, :latest   (+ -cuda, :cuda)
+#
+# GHCR auth is the built-in GITHUB_TOKEN. Docker Hub auth needs ONE repo
+# secret: DOCKERHUB_TOKEN (a Docker Hub personal access token with
+# Read & Write scope, created at hub.docker.com -> Account settings ->
+# Personal access tokens). Until that secret exists, the workflow simply
+# pushes GHCR-only — it never fails on a missing token.
+# Free on both sides: Actions is free for public repos, Docker Hub's free
+# plan hosts unlimited public repositories.
 
 name: Docker image
 
@@ -15,12 +24,17 @@ on:
           runs build with the Dockerfiles of the branch you dispatch on."
         required: true
 
+env:
+  DOCKERHUB_USER: pharmhero
+
 jobs:
   build-image:
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+    env:
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v7
 
@@ -28,7 +42,16 @@ jobs:
         id: meta
         run: |
           RAW="${{ github.event.inputs.tag || github.event.release.tag_name }}"
-          echo "version=${RAW#v}" >> "$GITHUB_OUTPUT"
+          V="${RAW#v}"
+          TAGS="ghcr.io/austinmabry/openscrub:${V}"
+          TAGS="$TAGS,ghcr.io/austinmabry/openscrub:latest"
+          if [ -n "$DOCKERHUB_TOKEN" ]; then
+            TAGS="$TAGS,docker.io/${DOCKERHUB_USER}/openscrub:${V}"
+            TAGS="$TAGS,docker.io/${DOCKERHUB_USER}/openscrub:latest"
+          else
+            echo "::notice::DOCKERHUB_TOKEN secret not set — pushing to GHCR only"
+          fi
+          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
 
       - uses: docker/login-action@v4
         with:
@@ -36,19 +59,26 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Log in to Docker Hub
+        if: env.DOCKERHUB_TOKEN != ''
+        uses: docker/login-action@v4
+        with:
+          username: ${{ env.DOCKERHUB_USER }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - uses: docker/build-push-action@v7
         with:
           context: .
           push: true
-          tags: |
-            ghcr.io/austinmabry/openscrub:${{ steps.meta.outputs.version }}
-            ghcr.io/austinmabry/openscrub:latest
+          tags: ${{ steps.meta.outputs.tags }}
 
   build-image-cuda:
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+    env:
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v7
 
@@ -61,7 +91,16 @@ jobs:
         id: meta
         run: |
           RAW="${{ github.event.inputs.tag || github.event.release.tag_name }}"
-          echo "version=${RAW#v}" >> "$GITHUB_OUTPUT"
+          V="${RAW#v}"
+          TAGS="ghcr.io/austinmabry/openscrub:${V}-cuda"
+          TAGS="$TAGS,ghcr.io/austinmabry/openscrub:cuda"
+          if [ -n "$DOCKERHUB_TOKEN" ]; then
+            TAGS="$TAGS,docker.io/${DOCKERHUB_USER}/openscrub:${V}-cuda"
+            TAGS="$TAGS,docker.io/${DOCKERHUB_USER}/openscrub:cuda"
+          else
+            echo "::notice::DOCKERHUB_TOKEN secret not set — pushing to GHCR only"
+          fi
+          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
 
       - uses: docker/login-action@v4
         with:
@@ -69,11 +108,16 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Log in to Docker Hub
+        if: env.DOCKERHUB_TOKEN != ''
+        uses: docker/login-action@v4
+        with:
+          username: ${{ env.DOCKERHUB_USER }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - uses: docker/build-push-action@v7
         with:
           context: .
           file: Dockerfile.cuda
           push: true
-          tags: |
-            ghcr.io/austinmabry/openscrub:${{ steps.meta.outputs.version }}-cuda
-            ghcr.io/austinmabry/openscrub:cuda
+          tags: ${{ steps.meta.outputs.tags }}

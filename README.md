@@ -126,6 +126,11 @@ docker run -d -p 8384:8384 \
   ghcr.io/austinmabry/openscrub:latest
 ```
 
+The same images are also published to **Docker Hub** as
+[`pharmhero/openscrub`](https://hub.docker.com/r/pharmhero/openscrub)
+(`pharmhero/openscrub:latest`, `:cuda`, and versioned tags) — use
+whichever registry pulls faster for you; the images are identical.
+
 Tesseract, FFmpeg, and the face model are baked in; jobs, certificates,
 zones, and downloaded plate models live in the mounted volume, so the
 container is disposable. Add `--token <secret>` after the image name
