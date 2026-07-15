@@ -20,7 +20,8 @@ on:
         required: true
         default: "4.10.0"
       arches:
-        description: "CUDA_ARCH_BIN (semicolon-separated compute caps)"
+        description: "CUDA_ARCH_BIN — arches to compile NATIVE SASS for
+          (all other NVIDIA GPUs still work via the embedded PTX 5.2 JIT)"
         required: true
         default: "6.1;7.5;8.6;8.9"
 

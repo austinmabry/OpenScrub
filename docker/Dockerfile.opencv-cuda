@@ -15,17 +15,29 @@
 # OPENCV_DNN_CUDA, the same nets run on the GPU (the engine sets
 # DNN_TARGET_CUDA when a GPU is present).
 #
-# GPU architectures compiled: 6.1 (Pascal — Quadro P2000), 7.5 (Turing),
-# 8.6 (Ampere — RTX 3060), 8.9 (Ada). Add archs to CUDA_ARCH_BIN below if
-# you deploy on other GPUs; more archs = larger binary + longer build.
+# Works on ALL NVIDIA GPUs (Maxwell 5.2 and newer), NOT just specific
+# cards. Two mechanisms:
+#   - CUDA_ARCH_BIN: native machine code (SASS) is compiled for the common
+#     consumer arches — Pascal (GTX 10 / P2000), Turing (RTX 20), Ampere
+#     (RTX 30 / 3060), Ada (RTX 40) — so those run at full speed with no
+#     first-run delay.
+#   - CUDA_ARCH_PTX=5.2: forward-compatible PTX is also embedded, which the
+#     driver JIT-compiles for ANY other GPU — Maxwell, Volta, Hopper,
+#     Blackwell (RTX 50), and future cards. Those pay a one-time JIT cost
+#     on first use (cached by the driver afterward), then run on the GPU.
+# Net: universal GPU support, like the base CUDA image — not a per-card
+# build. Add an arch to CUDA_ARCH_BIN only to give that card native SASS
+# (skip its JIT); it already WORKS via PTX regardless.
 
 ARG OPENCV_VERSION=4.10.0
 ARG CUDA_ARCH_BIN="6.1;7.5;8.6;8.9"
+ARG CUDA_ARCH_PTX="5.2"
 
 # ---------- build stage: full CUDA toolkit (nvcc), thrown away after ----------
 FROM nvidia/cuda:12.6.3-cudnn-devel-ubuntu22.04 AS build
 ARG OPENCV_VERSION
 ARG CUDA_ARCH_BIN
+ARG CUDA_ARCH_PTX
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -49,7 +61,7 @@ RUN cmake -S opencv -B build -G Ninja \
       -D OPENCV_DNN_CUDA=ON \
       -D WITH_CUDNN=ON \
       -D CUDA_ARCH_BIN=${CUDA_ARCH_BIN} \
-      -D CUDA_ARCH_PTX= \
+      -D CUDA_ARCH_PTX=${CUDA_ARCH_PTX} \
       -D WITH_CUBLAS=ON \
       -D ENABLE_FAST_MATH=ON \
       -D CUDA_FAST_MATH=ON \
