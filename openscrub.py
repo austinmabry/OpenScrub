@@ -1954,14 +1954,17 @@ def model_registry_path(kind="plate"):
     installs (pip / frozen) use a per-user copy seeded from the packaged
     registry; new models added by a release are merged into that copy on
     read (never overwriting an existing entry's pinned hash)."""
-    # Whitelist the kind before it ever forms a filename. The web layer
-    # validates `/api/models/<kind>` with abort(404), but CodeQL doesn't
-    # treat abort() as a barrier, so this explicit raise is what stops the
-    # "uncontrolled data in path expression" flow — and it's real defense:
-    # `kind` can now never inject a path component.
+    # Whitelist the kind before it ever forms a filename (real defense:
+    # `kind` arrives raw from the `/api/models/<kind>` route).
     if kind not in MODEL_KINDS:
         raise ValueError("unknown model kind: %r" % (kind,))
-    fname = "%s_models.json" % kind
+    # Then build the filename from LITERALS, branching on equality — the
+    # request-tainted value never becomes part of a path expression. The
+    # raise above already guarantees kind is valid, but CodeQL doesn't
+    # credit membership-in-a-module-constant as a taint barrier (its
+    # "uncontrolled data in path expression" alerts survived it); a literal
+    # in every branch leaves nothing to flag, for this or any scanner.
+    fname = "face_models.json" if kind == "face" else "plate_models.json"
     here = os.path.dirname(os.path.abspath(__file__))
     packaged = os.path.join(here, fname)
     if not install_is_readonly():
