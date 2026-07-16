@@ -263,7 +263,12 @@ class WebCallbacks(openscrub.Callbacks):
         self.job["log"].append(msg)
 
     def progress(self, stage, cur, total):
-        base, span = (0, 0.5) if stage == "scan" else (0.5, 0.5)
+        # scan frame loop -> first 45% of the bar; "post" (dense-track
+        # smoothing after the loop — previously a silent stall) -> 45-50%;
+        # render -> back half. Jobs without a post stage jump 45 -> 50,
+        # which reads as instant rather than stuck.
+        base, span = {"scan": (0, 0.45),
+                      "post": (0.45, 0.05)}.get(stage, (0.5, 0.5))
         self.job["progress"] = round(base + span * cur / max(total, 1), 3)
 
     def scan_frame(self, frame, t, found):

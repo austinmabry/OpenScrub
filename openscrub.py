@@ -29,6 +29,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, asdict
 
 import cv2
@@ -985,7 +986,7 @@ def assign_dense_tracks(dets, max_gap=0.6, reach=1.6):
     return next_id
 
 
-def smooth_dense_tracks(dets, fps, video, cum=None, win_start=0.0):
+def smooth_dense_tracks(dets, fps, video, cum=None, win_start=0.0, cb=None):
     """Make each dense track leak-free from true first appearance to exit.
 
     Dense samples are instantaneous per-frame boxes; three gaps remain
@@ -1054,9 +1055,20 @@ def smooth_dense_tracks(dets, fps, video, cum=None, win_start=0.0):
         # offset), while a smoothed match stays >0.8 present and ~0 absent
         return cv2.GaussianBlur(g, (3, 3), 0)
 
+    # This is the longest silent stretch of a dense scan (the onset walk-back
+    # re-reads the video per track), so report progress: the bar moves via
+    # the "post" stage and the log shows a time-gated track counter.
+    cb = cb or Callbacks()
+    n_total = len(tracks)
+    _last_log = time.time()
     n_gaps, n_lead, lead_s = 0, 0, 0.0
     added = []
-    for tid, samples in tracks.items():
+    for n_done, (tid, samples) in enumerate(tracks.items()):
+        cb.progress("post", n_done, n_total)
+        if time.time() - _last_log >= 3.0:
+            _last_log = time.time()
+            cb.log("        …track %d/%d (matching each track's onset "
+                   "backward through the video)" % (n_done + 1, n_total))
         samples.sort(key=lambda d: d.t_start)
 
         # 1. flicker gaps: chain, and interpolate the box across the gap
@@ -1132,6 +1144,7 @@ def smooth_dense_tracks(dets, fps, video, cum=None, win_start=0.0):
 
     if cap is not None:
         cap.release()
+    cb.progress("post", n_total, n_total)
     dets.extend(added)
     return (n_gaps, n_lead, lead_s)
 
@@ -1173,8 +1186,15 @@ def group_persons(dets, video, cb=None):
     rec = _make_sface(sface)
     det = _make_yunet(yunet, (320, 320), 0.5)
     cap = cv2.VideoCapture(video)
+    cb.log("      person grouping: matching %d face track(s) by identity…"
+           % len(tracks))
+    _last_log = time.time()
     embs = {}
-    for tid, samples in tracks.items():
+    for n_done, (tid, samples) in enumerate(tracks.items()):
+        if time.time() - _last_log >= 3.0:
+            _last_log = time.time()
+            cb.log("        …track %d/%d embedded"
+                   % (n_done + 1, len(tracks)))
         best = sorted(samples, key=lambda d: -d.confidence)[:3]
         feats = []
         for d in best:
@@ -3865,8 +3885,12 @@ def run_scan(args, cb=None):
         cb.log(f"      dense tracking: {sum(1 for d in detections if d.dense)}"
                f" per-frame samples grouped into {n_tracks} track(s) "
                "for review")
+        cb.log(f"      dense continuity: smoothing {n_tracks} track(s) — "
+               "interpolating flicker gaps and walking each onset back "
+               "through the video (the slow part of a dense scan)…")
         n_gaps, n_lead, lead_s = smooth_dense_tracks(
-            detections, fps, args.video, cum=cum, win_start=win_start)
+            detections, fps, args.video, cum=cum, win_start=win_start,
+            cb=cb)
         if n_gaps or n_lead or lead_s:
             cb.log(f"      dense continuity: {n_gaps} flicker gap(s) "
                    f"interpolated; onsets walked back {lead_s:.2f}s total "
