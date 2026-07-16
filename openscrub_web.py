@@ -187,19 +187,23 @@ MEDIA_EXTS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".mpg",
 def server_path_error(p):
     """Validate a user-supplied server-side media path. The path picker is a
     deliberate feature (process a file already on this machine/NAS), but the
-    value is request data: confine it to real video files, and — when
-    $OPENSCRUB_MEDIA_ROOT is set — to that directory tree only. Returns an
-    error string, or None if the path is acceptable."""
-    if not os.path.isfile(p):
-        return "server path not found or not a file"
-    if os.path.splitext(p)[1].lower() not in MEDIA_EXTS:
-        return ("server path must be a video file ("
-                + ", ".join(sorted(MEDIA_EXTS)) + ")")
+    value is request data, so it is confined BEFORE any filesystem use:
+    canonicalized, restricted to a known video extension, and — when
+    $OPENSCRUB_MEDIA_ROOT is set — required to live inside that directory
+    tree. Returns an error string, or None if the path is acceptable."""
+    # canonicalize first, then apply the containment guard up front so the
+    # confinement precedes the filesystem access (path-injection barrier).
+    p = os.path.realpath(p)
     root = os.environ.get("OPENSCRUB_MEDIA_ROOT")
     if root:
         r = os.path.realpath(root)
         if p != r and not p.startswith(r.rstrip(os.sep) + os.sep):
             return "server path is outside OPENSCRUB_MEDIA_ROOT"
+    if os.path.splitext(p)[1].lower() not in MEDIA_EXTS:
+        return ("server path must be a video file ("
+                + ", ".join(sorted(MEDIA_EXTS)) + ")")
+    if not os.path.isfile(p):
+        return "server path not found or not a file"
     return None
 
 
@@ -708,9 +712,17 @@ def job_boxes_at(jid):
 @app.route("/api/jobs/<jid>/thumb/<int:i>")
 def job_thumb(jid, i):
     job = JOBS.get(jid) or abort(404)
-    cache = os.path.join(job["dir"], f"thumb2_{i}.jpg")
+    # i is already a Flask <int:> route var, but CodeQL doesn't trust the
+    # converter — format it as an explicit non-negative integer so the
+    # cache filename can never carry anything but digits.
+    i = int(i)
+    if i < 0:
+        abort(404)
+    cache = os.path.join(job["dir"], "thumb2_%d.jpg" % i)
     if not os.path.exists(cache):
         doc = _load_job_report(job)
+        if i >= len(doc["detections"]):
+            abort(404)
         d = doc["detections"][i]
         rs = doc["render_state"]
         # cut the thumbnail at a moment the detector actually SAW the object.

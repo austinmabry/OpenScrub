@@ -1892,6 +1892,9 @@ def user_data_dir():
     return d
 
 
+MODEL_KINDS = ("plate", "face")
+
+
 def model_registry_path(kind="plate"):
     """Path of the WRITABLE model registry for `kind` ("plate" or "face" —
     TOFU pins are written back here).
@@ -1900,6 +1903,13 @@ def model_registry_path(kind="plate"):
     installs (pip / frozen) use a per-user copy seeded from the packaged
     registry; new models added by a release are merged into that copy on
     read (never overwriting an existing entry's pinned hash)."""
+    # Whitelist the kind before it ever forms a filename. The web layer
+    # validates `/api/models/<kind>` with abort(404), but CodeQL doesn't
+    # treat abort() as a barrier, so this explicit raise is what stops the
+    # "uncontrolled data in path expression" flow — and it's real defense:
+    # `kind` can now never inject a path component.
+    if kind not in MODEL_KINDS:
+        raise ValueError("unknown model kind: %r" % (kind,))
     fname = "%s_models.json" % kind
     here = os.path.dirname(os.path.abspath(__file__))
     packaged = os.path.join(here, fname)
@@ -1953,6 +1963,8 @@ def download_model(entry, kind="plate", dest_dir=None, cb=None,
     file — a privacy tool must never silently run an unverified model.
     """
     import hashlib, urllib.request
+    if kind not in MODEL_KINDS:
+        raise ValueError("unknown model kind: %r" % (kind,))
     log = (cb.log if cb else print)
     url = entry.get("download_url", "")
     want = (entry.get("sha256", "") or "").lower()
@@ -1964,7 +1976,11 @@ def download_model(entry, kind="plate", dest_dir=None, cb=None,
         else os.path.join(os.path.dirname(os.path.abspath(__file__)),
                           "models"))
     os.makedirs(dest_dir, exist_ok=True)
-    dest = os.path.join(dest_dir, "%s.onnx" % entry.get("id", kind + "_model"))
+    # the id comes from a JSON registry file — reduce it to a strict
+    # basename so a crafted id ("../evil") can never escape dest_dir
+    safe_id = re.sub(r"[^A-Za-z0-9._-]", "_", str(entry.get("id")
+                                                  or (kind + "_model")))
+    dest = os.path.join(dest_dir, "%s.onnx" % safe_id)
     tmp = dest + ".part"
     log("      downloading %s model: %s" % (kind, entry.get("label", entry.get("id"))))
     h = hashlib.sha256()
