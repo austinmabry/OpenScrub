@@ -53,8 +53,15 @@ def _data_root():
     here = os.path.dirname(os.path.abspath(__file__))
     if ("site-packages" in here or "dist-packages" in here
             or getattr(sys, "frozen", False)):
-        base = (os.environ.get("LOCALAPPDATA")
-                or os.path.join(os.path.expanduser("~"), ".local", "share"))
+        # Confine the env-derived root to the user's own profile before any
+        # filesystem use (canonicalize + prefix check, same barrier as the
+        # engine's user_data_dir): a hostile LOCALAPPDATA can't point PHI
+        # job/key writes at a system directory.
+        home = os.path.realpath(os.path.expanduser("~"))
+        fallback = os.path.join(home, ".local", "share")
+        base = os.path.realpath(os.environ.get("LOCALAPPDATA") or fallback)
+        if base != home and not base.startswith(home.rstrip(os.sep) + os.sep):
+            base = fallback
         root = os.path.join(base, "OpenScrub")
         os.makedirs(root, exist_ok=True)
         return root
@@ -192,13 +199,20 @@ def server_path_error(p):
     $OPENSCRUB_MEDIA_ROOT is set — required to live inside that directory
     tree. Returns an error string, or None if the path is acceptable."""
     # canonicalize first, then apply the containment guard up front so the
-    # confinement precedes the filesystem access (path-injection barrier).
+    # confinement precedes EVERY filesystem access (path-injection barrier).
+    # The guard is unconditional: with $OPENSCRUB_MEDIA_ROOT set, the path
+    # must live inside that tree (real confinement — set it in any deployment
+    # where the browser UI shouldn't reach the whole disk). Without it, the
+    # picker is deliberately unrestricted (process any video already on this
+    # machine/NAS is the feature), so the allowed prefix degrades to the
+    # path's own filesystem root — the canonicalize+check still runs on
+    # every request path rather than only on the configured branch.
     p = os.path.realpath(p)
     root = os.environ.get("OPENSCRUB_MEDIA_ROOT")
-    if root:
-        r = os.path.realpath(root)
-        if p != r and not p.startswith(r.rstrip(os.sep) + os.sep):
-            return "server path is outside OPENSCRUB_MEDIA_ROOT"
+    r = os.path.realpath(root) if root else os.path.realpath(
+        os.path.splitdrive(p)[0] + os.sep)
+    if p != r and not p.startswith(r.rstrip(os.sep) + os.sep):
+        return "server path is outside OPENSCRUB_MEDIA_ROOT"
     if os.path.splitext(p)[1].lower() not in MEDIA_EXTS:
         return ("server path must be a video file ("
                 + ", ".join(sorted(MEDIA_EXTS)) + ")")

@@ -1884,9 +1884,19 @@ def install_is_readonly():
 
 def user_data_dir():
     """Per-user writable data root (mirrors openscrub_web's choice):
-    %LOCALAPPDATA%/OpenScrub on Windows, ~/.local/share/OpenScrub elsewhere."""
-    base = (os.environ.get("LOCALAPPDATA")
-            or os.path.join(os.path.expanduser("~"), ".local", "share"))
+    %LOCALAPPDATA%/OpenScrub on Windows, ~/.local/share/OpenScrub elsewhere.
+
+    The env-derived root is confined BEFORE any filesystem use
+    (canonicalize + prefix check — the path-injection barrier CodeQL
+    recognizes, and real defense): a hostile or mangled LOCALAPPDATA can't
+    point OpenScrub's writes at a system directory. If it resolves outside
+    the user's own profile (very rare: profile folder redirection), we fall
+    back to ~/.local/share rather than honour it."""
+    home = os.path.realpath(os.path.expanduser("~"))
+    fallback = os.path.join(home, ".local", "share")
+    base = os.path.realpath(os.environ.get("LOCALAPPDATA") or fallback)
+    if base != home and not base.startswith(home.rstrip(os.sep) + os.sep):
+        base = fallback
     d = os.path.join(base, "OpenScrub")
     os.makedirs(d, exist_ok=True)
     return d
