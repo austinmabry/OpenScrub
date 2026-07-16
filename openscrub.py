@@ -1160,9 +1160,17 @@ def group_persons(dets, video, cb=None):
     The 0.40 cosine threshold is CONSERVATIVE (same person measures ~0.9,
     different people ~0.0-0.35): a missed merge only shows an extra card,
     but a wrong merge could hide someone inside a kept person. Tracks
-    where no face embeds (junk detections, extreme profiles) keep
-    person=-1 and stay individual cards. Returns (embedded_tracks,
-    n_persons)."""
+    where no face embeds (junk detections, extreme profiles, faces too
+    small to identify) keep person=-1 and stay individual cards.
+
+    Clustering is CENTROID-linkage, not single-link: a track joins a
+    cluster only if it matches the cluster's average identity. Single-link
+    union-find chained on crowd footage — with 20 children shoulder to
+    shoulder, one noisy small-face embedding bridging two kids merged 83%
+    of all face samples into ONE review card (the KARK video), hiding most
+    of the room behind a single thumbnail. Embeddings are also only taken
+    from re-detected faces at least 32 px across — SFace on smaller crops
+    is noise that links strangers. Returns (embedded_tracks, n_persons)."""
     cb = cb or Callbacks()
     tracks = {}
     for d in dets:
@@ -1217,6 +1225,8 @@ def group_persons(dets, video, cb=None):
                     rbest, riou = r, iou
             if rbest is None:
                 continue
+            if float(rbest[2]) < 32 or float(rbest[3]) < 32:
+                continue    # too small to identify: noise embedding
             f = rec.feature(rec.alignCrop(fr, rbest)).flatten()
             n = float(np.linalg.norm(f))
             if n > 0:
@@ -1225,28 +1235,30 @@ def group_persons(dets, video, cb=None):
             e = np.mean(feats, axis=0)
             embs[tid] = e / np.linalg.norm(e)
     cap.release()
-    # single-link agglomerative merge via union-find
-    parent = {t: t for t in embs}
-
-    def _find(a):
-        while parent[a] != a:
-            parent[a] = parent[parent[a]]
-            a = parent[a]
-        return a
-
-    tids = sorted(embs)
-    for i, a in enumerate(tids):
-        for b in tids[i + 1:]:
-            if float(np.dot(embs[a], embs[b])) >= 0.40:
-                parent[_find(a)] = _find(b)
-    roots = {}
-    for t in tids:
-        r = _find(t)
-        if r not in roots:
-            roots[r] = len(roots)
-        for d in tracks[t]:
-            d.person = roots[r]
-    return (len(embs), len(roots))
+    # centroid-linkage: big stable tracks seed clusters; each remaining
+    # track joins only if it matches the cluster's AVERAGE identity. This
+    # cannot chain through one noisy link the way single-link union-find
+    # did (crowd footage merged most of the room into one "person").
+    order = sorted(embs, key=lambda t: (-len(tracks[t]), t))
+    clusters = []            # [running_sum_vector, [track ids]]
+    for t in order:
+        e = embs[t]
+        best, best_s = None, 0.40
+        for c in clusters:
+            cen = c[0] / np.linalg.norm(c[0])
+            s = float(np.dot(cen, e))
+            if s >= best_s:
+                best, best_s = c, s
+        if best is None:
+            clusters.append([e.copy(), [t]])
+        else:
+            best[0] = best[0] + e
+            best[1].append(t)
+    for pid, c in enumerate(clusters):
+        for t in c[1]:
+            for d in tracks[t]:
+                d.person = pid
+    return (len(embs), len(clusters))
 
 
 def merge_detections(dets, hold, scans=None, bridge_gap=4.0, fuzz=None,
