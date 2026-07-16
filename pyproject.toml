@@ -83,6 +83,7 @@ pattern = "VERSION = \"(?P<version>[^\"]+)\""
 "assets/openscrub.ico" = "openscrub.ico"
 
 [tool.hatch.build.targets.wheel]
+exclude = ["google*.html"]
 include = [
     "openscrub.py",
     "openscrub_web.py",
@@ -92,7 +93,13 @@ include = [
     "openscrub_vault.py",
 ]
 
+# The google*.html file in the repo root is Google Search Console site
+# verification — repo-only, never distributed. Both targets already use
+# explicit include lists (so it can't ship by accident); the excludes
+# document that intent and keep it out even if someone switches to
+# pattern-based includes later.
 [tool.hatch.build.targets.sdist]
+exclude = ["google*.html"]
 include = [
     "plate_models.json",
     "face_models.json",
