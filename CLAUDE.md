@@ -109,8 +109,14 @@ Key classes/functions (locate with grep, line numbers drift):
   ends. Matching happens on 3x3-smoothed half-scale frames — sub-pixel
   motion decorrelates raw fine texture. `group_persons` then clusters
   face tracks by IDENTITY (SFace embeddings, auto-downloaded ~38MB like
-  YuNet + baked into Docker images; YuNet landmarks for alignment;
-  conservative 0.40 cosine — same person ≈0.9, different ≈0.0-0.35):
+  YuNet + baked into Docker images; YuNet landmarks for alignment).
+  Three defenses against WRONG merges (validated on real crowd footage
+  where single-link at 0.40 collapsed 83% of samples into ONE card):
+  temporal cannot-link (tracks co-visible >0.5s never merge — different
+  people by definition), centroid-linkage (match the cluster AVERAGE,
+  no single-link chaining), embeddings only from re-detected faces
+  ≥32px. Cosine 0.55 (same person ≈0.9; similar-age children measure
+  0.4-0.6 apart, so 0.40 merged different kids):
   `Detection.person` (additive report field, survives load_report) —
   review shows ONE card per person, best-confidence thumbnail, one
   decision for all appearances. Ungrouped tracks stay person=-1 with

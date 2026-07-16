@@ -1163,14 +1163,28 @@ def group_persons(dets, video, cb=None):
     where no face embeds (junk detections, extreme profiles, faces too
     small to identify) keep person=-1 and stay individual cards.
 
-    Clustering is CENTROID-linkage, not single-link: a track joins a
-    cluster only if it matches the cluster's average identity. Single-link
-    union-find chained on crowd footage — with 20 children shoulder to
-    shoulder, one noisy small-face embedding bridging two kids merged 83%
-    of all face samples into ONE review card (the KARK video), hiding most
-    of the room behind a single thumbnail. Embeddings are also only taken
-    from re-detected faces at least 32 px across — SFace on smaller crops
-    is noise that links strangers. Returns (embedded_tracks, n_persons)."""
+    Three defenses against WRONG merges (each validated on real crowd
+    footage — a news studio with ~20 schoolchildren, where the original
+    single-link union-find at 0.40 merged 83% of all face samples into
+    ONE review card, hiding most of the room behind a single thumbnail):
+      1. TEMPORAL CANNOT-LINK: tracks co-visible in the same frames for
+         >0.5s are different people BY DEFINITION and never merge, no
+         matter how similar their embeddings — the strongest signal, and
+         model-free. (Embeddings measurably fail on similar-age children
+         at broadcast resolution; co-visibility does not.) The 0.5s
+         tolerance absorbs boundary flicker; the rare true dual
+         appearance (a monitor wall showing the anchor) just costs an
+         extra card — fail closed.
+      2. CENTROID-linkage, not single-link: a track joins a cluster only
+         if it matches the cluster's AVERAGE identity, so one noisy
+         embedding can't chain strangers together.
+      3. Embeddings only from re-detected faces >=32 px across — SFace on
+         smaller crops is noise that links strangers.
+    Cosine threshold 0.55: children of similar age measure 0.4-0.6 apart
+    (adults ~0.0-0.35), so the old "conservative" 0.40 merged different
+    kids; same-person tracks measure ~0.9 and still group fine. On the
+    validation video: 21 persons in a room of ~22, every surviving merge
+    a genuine re-appearance. Returns (embedded_tracks, n_persons)."""
     cb = cb or Callbacks()
     tracks = {}
     for d in dets:
@@ -1239,12 +1253,23 @@ def group_persons(dets, video, cb=None):
     # track joins only if it matches the cluster's AVERAGE identity. This
     # cannot chain through one noisy link the way single-link union-find
     # did (crowd footage merged most of the room into one "person").
+    spans = {tid: (min(d.t_start for d in ds), max(d.t_end for d in ds))
+             for tid, ds in tracks.items()}
+
+    def _covis(a, b):
+        return max(0.0, min(spans[a][1], spans[b][1])
+                   - max(spans[a][0], spans[b][0]))
+
     order = sorted(embs, key=lambda t: (-len(tracks[t]), t))
     clusters = []            # [running_sum_vector, [track ids]]
     for t in order:
         e = embs[t]
-        best, best_s = None, 0.40
+        best, best_s = None, 0.55
         for c in clusters:
+            # temporal cannot-link: on-screen at the same time for >0.5s
+            # means different people, whatever the embeddings say
+            if any(_covis(t, m) > 0.5 for m in c[1]):
+                continue
             cen = c[0] / np.linalg.norm(c[0])
             s = float(np.dot(cen, e))
             if s >= best_s:
