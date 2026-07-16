@@ -2024,17 +2024,29 @@ def download_plate_model(entry, dest_dir=None, cb=None, progress=None):
 
 
 class PlateDetector:
-    """License-plate detector using a single-class YOLOv8 ONNX model run through
-    OpenCV's DNN module (no PyTorch / ultralytics dependency at runtime).
+    """License-plate detector using a single-class YOLO ONNX model (no PyTorch
+    / ultralytics dependency at runtime).
+
+    Two inference backends, tried in order per model:
+      1. OpenCV DNN — fast, honours the app's CUDA target. Handles raw YOLO
+         detect heads (1,5,8400) and any graph OpenCV can build.
+      2. onnxruntime — fallback for "end2end" exports whose baked-in ONNX
+         NonMaxSuppression node OpenCV's DNN CANNOT build (readNetFromONNX
+         raises 'Can't create layer ... NonMaxSuppression'). EVERY
+         open-image-models YOLOv9 plate model in the registry is such an
+         export, so without onnxruntime the plate category would silently do
+         nothing — a fail-open hole in a fail-closed privacy tool.
+
+    Three output conventions are auto-detected by shape (see _decode): a raw
+    YOLO head (1,5,8400), a 6-col end2end (N,6)=x1,y1,x2,y2,score,class, and a
+    7-col end2end (N,7)=batch,x1,y1,x2,y2,class,score — the last is what the
+    current open-image-models YOLOv9 models emit.
 
     The model file is NOT bundled — it's downloaded/placed by the optional
-    installer or the GUI model picker. Two ONNX output conventions are
-    supported, auto-detected: a raw YOLOv8 detect head (1,5,8400), and an
-    "end2end" export with NMS baked in that emits decoded boxes (1,N,6) —
-    the latter is what open-image-models' YOLOv9 plate models produce.
-    If the model is absent the detector is INERT (find() returns []), so the
-    plate category simply does nothing rather than erroring. This mirrors how
-    FaceDetector degrades, and keeps plates an opt-in capability.
+    installer or the model picker. If the model is absent (or neither backend
+    can load it) the detector is INERT (find() returns []), so the plate
+    category simply does nothing rather than erroring — mirroring how
+    FaceDetector degrades, and keeping plates an opt-in capability.
     """
 
     INPUT = 640          # YOLOv8 square input
@@ -2047,7 +2059,10 @@ class PlateDetector:
         self.thresh = float(thresh)
         self.nms = float(nms)
         self.expand = float(expand)
-        self.net = None
+        self.net = None          # OpenCV DNN backend (raw-head models)
+        self.ort = None          # onnxruntime backend (end2end/NMS models)
+        self._ort_in = None
+        self._ort_out = None
         # resolve model: explicit arg > env var > conventional locations
         candidates = []
         if model_path:
@@ -2087,6 +2102,21 @@ class PlateDetector:
                      "inactive. Place a YOLOv8 plate ONNX at models/"
                      "plate_yolov8.onnx or set $%s." % self.MODEL_ENV)
             return
+        base = os.path.basename(found)
+        # Backend 1 — OpenCV DNN. Handles raw YOLO detect heads (1,5,8400) and
+        # any graph OpenCV can build; fast, and honours the app's CUDA target.
+        # OpenCV prints a red ERROR to stderr when it can't build a node (e.g.
+        # the end2end NonMaxSuppression) even though we catch it and fall back
+        # to onnxruntime — silence its logger just around this probe so a
+        # working fallback doesn't look like a failure to the user. (Top-level
+        # cv2.setLogLevel is thread-safe and present on 4.x/5.x; the older
+        # cv2.utils.logging module is absent on headless 4.x builds.)
+        _prev_ll = None
+        try:
+            _prev_ll = cv2.getLogLevel()
+            cv2.setLogLevel(0)   # 0 = SILENT
+        except Exception:
+            _prev_ll = None
         try:
             net = _apply_cuda_dnn(cv2.dnn.readNetFromONNX(found))
             # honour the same CPU/GPU intent the rest of the app uses
@@ -2097,14 +2127,60 @@ class PlateDetector:
             except Exception:
                 pass
             self.net = net
-            self.log("      plate detector: loaded %s" % os.path.basename(found))
+            cv2_err = None
         except Exception as e:
-            self.log("      plate detector: failed to load model (%s) — plate "
-                     "category inactive." % e)
+            cv2_err = e
+        finally:
+            if _prev_ll is not None:
+                try:
+                    cv2.setLogLevel(_prev_ll)
+                except Exception:
+                    pass
+        if self.net is not None:
+            self.log("      plate detector: loaded %s (OpenCV DNN)" % base)
+            return
+        # Backend 2 — onnxruntime. REQUIRED for "end2end" exports whose baked-in
+        # NonMaxSuppression node OpenCV's DNN cannot build — that includes EVERY
+        # open-image-models YOLOv9 plate model in the registry. cv2.dnn raises
+        # 'Can\'t create layer ... of type "NonMaxSuppression"' on those, which
+        # would otherwise leave the plate category silently inactive (plates
+        # never blurred) — a fail-OPEN hole in a fail-closed privacy tool.
+        try:
+            import onnxruntime as ort
+        except Exception:
+            self.log("      plate detector: OpenCV DNN can't load %s (%s) and "
+                     "onnxruntime is not installed — plate category INACTIVE. "
+                     "Install onnxruntime (pip install onnxruntime) to enable "
+                     "the license-plate models." % (base, cv2_err))
+            return
+        try:
+            # Run plates on the GPU when possible: prefer CUDA if this
+            # onnxruntime build offers it (onnxruntime-gpu, shipped in the CUDA
+            # Docker image), else CPU (the plain onnxruntime wheel). Listing
+            # CPU as the second provider lets onnxruntime fall back per-node if
+            # CUDA init fails at runtime, so a cuDNN mismatch degrades to CPU
+            # rather than killing the job. OPENSCRUB_CPU_DNN=1 forces CPU, the
+            # same escape hatch the OpenCV DNN path honours.
+            avail = ort.get_available_providers()
+            force_cpu = os.environ.get("OPENSCRUB_CPU_DNN") == "1"
+            providers = (["CUDAExecutionProvider", "CPUExecutionProvider"]
+                         if ("CUDAExecutionProvider" in avail and not force_cpu)
+                         else ["CPUExecutionProvider"])
+            sess = ort.InferenceSession(found, providers=providers)
+            self.ort = sess
+            self._ort_in = sess.get_inputs()[0].name
+            self._ort_out = [o.name for o in sess.get_outputs()]
+            self.log("      plate detector: loaded %s (onnxruntime, %s)"
+                     % (base, sess.get_providers()[0]))
+        except Exception as e:
+            self.log("      plate detector: failed to load model — OpenCV DNN "
+                     "(%s) and onnxruntime (%s) both errored. Plate category "
+                     "INACTIVE." % (cv2_err, e))
             self.net = None
+            self.ort = None
 
     def available(self):
-        return self.net is not None
+        return self.net is not None or self.ort is not None
 
     def find(self, frame, detect_scale=1.0):
         """-> [(x1,y1,x2,y2,conf)] in full-frame pixels. Empty if no model.
@@ -2113,7 +2189,7 @@ class PlateDetector:
         intentionally unused: the letterbox below already resizes every frame
         to the model's fixed input size, so an extra pre-downscale would only
         lose detail without saving time."""
-        if self.net is None:
+        if self.net is None and self.ort is None:
             return []
         h, w = frame.shape[:2]
         # letterbox to a square INPUT (preserve aspect, pad 114 like YOLO)
@@ -2122,40 +2198,71 @@ class PlateDetector:
         resized = cv2.resize(frame, (nw, nh))
         canvas = np.full((self.INPUT, self.INPUT, 3), 114, np.uint8)
         canvas[:nh, :nw] = resized
-        blob = cv2.dnn.blobFromImage(canvas, 1 / 255.0, (self.INPUT, self.INPUT),
-                                     swapRB=True, crop=False)
-        self.net.setInput(blob)
-        out = self.net.forward()
-        out = np.squeeze(out)
+        if self.ort is not None:
+            # onnxruntime: BGR->RGB, HWC->CHW, /255, batched fp32 (identical
+            # preprocessing to the cv2 blob below — only the runtime differs).
+            inp = np.ascontiguousarray(
+                canvas[:, :, ::-1].transpose(2, 0, 1)[None]).astype(np.float32)
+            inp /= 255.0
+            out = self.ort.run(self._ort_out, {self._ort_in: inp})[0]
+        else:
+            blob = cv2.dnn.blobFromImage(canvas, 1 / 255.0,
+                                         (self.INPUT, self.INPUT),
+                                         swapRB=True, crop=False)
+            self.net.setInput(blob)
+            out = self.net.forward()
+        return self._decode(np.asarray(out), s, w, h)
+
+    def _decode(self, out, s, w, h):
+        """Turn a raw model output tensor into [(x1,y1,x2,y2,conf)] full-frame
+        boxes. Backend-agnostic (OpenCV DNN and onnxruntime feed the same
+        arrays) and pure — unit-testable without a model. `s` is the letterbox
+        scale, (w,h) the original frame size."""
+        # Drop leading singleton (batch) axes WITHOUT collapsing a lone
+        # detection row: np.squeeze on (1,1,C) would yield a 1-D vector and
+        # lose the single box. cv2 may return (N,C) or (1,N,C) by version.
+        while out.ndim > 2 and out.shape[0] == 1:
+            out = out[0]
         if out.ndim != 2:
             return []
-        # Two ONNX output conventions are supported, auto-detected by shape:
+        # Three ONNX output conventions are supported, auto-detected by shape:
         #
-        #  (A) raw YOLOv8 detect head: shape (5, 8400) after squeeze — rows are
-        #      cx,cy,w,h,score for a single class; needs decode + NMS here.
-        #  (B) "end2end" export (e.g. open-image-models YOLOv9): shape (N, 6) —
-        #      boxes are ALREADY decoded to x1,y1,x2,y2,score,class in the
-        #      letterboxed 640-space, with NMS baked into the graph. We just
-        #      scale them back to full-frame pixels.
+        #  (A) raw YOLOv8 detect head: shape (5, 8400) — rows are cx,cy,w,h,
+        #      score for a single class; needs decode + NMS here.
+        #  (B) "end2end" export, 6 cols: (N, 6) = x1,y1,x2,y2,score,class,
+        #      NMS baked into the graph. Scale back to full-frame pixels.
+        #  (C) "end2end" export, 7 cols: (N, 7) = batch,x1,y1,x2,y2,class,
+        #      score — the layout the CURRENT open-image-models YOLOv9 models
+        #      emit (their postprocess reads cols 1:5 / 5 / 6). Earlier code
+        #      only knew (B) and mis-read (C) as a raw head, IndexError-ing on
+        #      row[4] and crashing the whole scan (a moving object with a
+        #      plate would take the job down). Both end2end widths now parse.
         #
-        # Distinguish by the last-axis width: 6 => end2end rows; else raw head.
-        end2end = (out.shape[1] == 6) or (out.shape[0] == 6 and out.shape[1] != 8400)
-        if out.shape[1] == 6:
-            rows = out
-        elif out.shape[0] == 6 and out.shape[1] != 8400:
-            rows = out.T
-        else:
-            end2end = False
-            rows = None
+        # ONNX emits end2end as (batch,N,C), so after stripping batch the LAST
+        # axis is the attribute axis (C in {6,7}) and rows are axis 0. Accept a
+        # transposed export (C on axis 0) only when the other axis is clearly a
+        # box count (larger, and not the 8400-anchor raw head).
+        a, b = out.shape
+        cols = None
+        if b in (6, 7):
+            rows, cols = out, b
+        elif a in (6, 7) and b != 8400 and b > a:
+            rows, cols = out.T, a
 
         res = []
-        if end2end:
+        if cols is not None:
             for r in rows:
-                x1, y1, x2, y2, score = (float(r[0]), float(r[1]), float(r[2]),
-                                         float(r[3]), float(r[4]))
+                if cols == 7:      # batch,x1,y1,x2,y2,class,score
+                    x1, y1, x2, y2, score = (float(r[1]), float(r[2]),
+                                             float(r[3]), float(r[4]),
+                                             float(r[6]))
+                else:              # x1,y1,x2,y2,score,class
+                    x1, y1, x2, y2, score = (float(r[0]), float(r[1]),
+                                             float(r[2]), float(r[3]),
+                                             float(r[4]))
                 if score < self.thresh:
                     continue
-                # scale from letterboxed 640-space back to full frame
+                # scale from letterboxed INPUT-space back to full frame
                 bx1, by1, bx2, by2 = x1 / s, y1 / s, x2 / s, y2 / s
                 bw, bh = bx2 - bx1, by2 - by1
                 ex, ey = bw * self.expand, bh * self.expand

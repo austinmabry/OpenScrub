@@ -1,5 +1,6 @@
 opencv-python
 numpy
+onnxruntime
 rapidfuzz
 pytesseract
 pillow

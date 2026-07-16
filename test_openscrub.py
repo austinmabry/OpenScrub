@@ -689,6 +689,47 @@ def test_mosaic_and_ellipse_blur_shapes():
         "ellipse center must be blurred like the rect blur"
 
 
+def test_plate_decode_output_formats():
+    """PlateDetector._decode must parse all three ONNX plate-model output
+    conventions. The 7-column end2end layout (current open-image-models YOLOv9)
+    used to fall through to the raw-head branch and IndexError on row[4],
+    crashing the whole scan; regression-guard every layout here.
+
+    A no-model PlateDetector still has thresh/expand/nms set, so _decode is
+    exercisable without loading anything."""
+    det = openscrub.PlateDetector(thresh=0.5, expand=0.0, input_size=640)
+    assert not det.available()          # no model resolved -> inert
+    s, w, h = 1.0, 640, 640             # s=1 so box coords map 1:1
+
+    # (C) 7-col end2end: batch,x1,y1,x2,y2,class,score  (the bug's format)
+    out7 = np.array([[0, 100, 50, 200, 90, 0, 0.9],
+                     [0, 10, 10, 20, 20, 0, 0.1]], np.float32)   # 2nd filtered
+    r = det._decode(out7, s, w, h)
+    assert len(r) == 1
+    assert tuple(round(v) for v in r[0][:4]) == (100, 50, 200, 90)
+    assert abs(r[0][4] - 0.9) < 1e-3
+
+    # 7-col with a leading batch axis (1,N,7), as some runtimes emit
+    assert len(det._decode(out7[None], s, w, h)) == 1
+
+    # (B) 6-col end2end: x1,y1,x2,y2,score,class
+    out6 = np.array([[100, 50, 200, 90, 0.9, 0]], np.float32)
+    r = det._decode(out6, s, w, h)
+    assert len(r) == 1
+    assert tuple(round(v) for v in r[0][:4]) == (100, 50, 200, 90)
+
+    # (A) raw YOLOv8 head: (5, N) cx,cy,w,h,score — one live anchor, rest zero
+    raw = np.zeros((5, 10), np.float32)
+    raw[:, 0] = [150, 70, 100, 40, 0.9]      # -> box (100,50,200,90)
+    r = det._decode(raw, s, w, h)
+    assert len(r) == 1
+    assert tuple(round(v) for v in r[0][:4]) == (100, 50, 200, 90)
+
+    # empty / degenerate outputs must return [] cleanly, never raise
+    assert det._decode(np.zeros((0, 7), np.float32), s, w, h) == []
+    assert det._decode(np.zeros((7,), np.float32), s, w, h) == []
+
+
 def test_face_only_steady_camera_no_bands_no_giant_boxes(tmp_path):
     """The boat-video failure: a steady-camera video with a moving person,
     face-only job. Scan-cadence merging used to union the face's positions

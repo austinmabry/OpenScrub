@@ -52,10 +52,25 @@ Key classes/functions (locate with grep, line numbers drift):
   pinned/non-commercial — never bundle it). Registry plumbing is shared with plates:
   `model_registry_path/load_model_registry/download_model(kind)` with
   plate-named wrappers kept for compatibility.
-- `PlateDetector` — YOLO ONNX via cv2.dnn, NO torch dependency. Auto-detects
-  two output formats: raw YOLOv8 `(1,5,8400)` and end2end `(1,N,6)` (what
-  open-image-models YOLOv9 emits). INERT without a model file (logs and
-  returns `[]`). Model resolution: `--plate-model` arg → `$OPENSCRUB_PLATE_MODEL`
+- `PlateDetector` — YOLO ONNX, NO torch dependency. **Two backends tried per
+  model:** (1) cv2.dnn (fast, honours the CUDA target; handles raw YOLO heads),
+  (2) **onnxruntime** fallback for "end2end" exports. cv2.dnn CANNOT build the
+  baked-in ONNX `NonMaxSuppression` node — `readNetFromONNX` raises `Can't
+  create layer ... NonMaxSuppression` on EVERY open-image-models YOLOv9 model
+  in the registry, so before onnxruntime the plate category was silently inert
+  (a fail-OPEN hole; plates never blurred). The cv2 probe is wrapped in
+  `cv2.setLogLevel(0)`/restore so its expected red ERROR doesn't scare users.
+  onnxruntime is a hard dep (requirements + pyproject); the CUDA image installs
+  `onnxruntime-gpu --no-deps` so plates run on the GPU (CUDAExecutionProvider,
+  CPU listed as runtime fallback; `OPENSCRUB_CPU_DNN=1` forces CPU). Frozen
+  Windows build bundles it via `collect_all("onnxruntime")` in the spec.
+  `_decode` (pure, unit-tested) auto-detects THREE output layouts by shape:
+  raw YOLO head `(1,5,8400)`, 6-col end2end `(N,6)=x1,y1,x2,y2,score,class`,
+  and **7-col end2end `(N,7)=batch,x1,y1,x2,y2,class,score`** — the layout the
+  CURRENT open-image-models export emits (their `postprocess` reads cols
+  1:5/5/6). The old code only knew 6-col and IndexError-crashed the whole scan
+  on 7-col output. INERT without a model file (or if neither backend loads it).
+  Model resolution: `--plate-model` arg → `$OPENSCRUB_PLATE_MODEL`
   → `models/plate_yolov8.onnx` → `models/<registry-id>.onnx` (recommended
   first, adopts registry `input_size`).
 - `detect_phi` — text-category detection over OCR line dicts. Word-loop

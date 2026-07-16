@@ -22,15 +22,25 @@ import os
 ROOT = os.path.abspath(os.path.join(SPECPATH, ".."))
 ICON = os.path.join(ROOT, "assets", "openscrub.ico")
 
+# onnxruntime ships native DLLs + a capi package that PyInstaller won't pick up
+# from a bare import — collect its binaries/datas/hidden imports explicitly, or
+# the frozen build's license-plate detection (which needs onnxruntime to run
+# the end2end YOLOv9 models OpenCV's DNN can't load) would be silently inert.
+try:
+    from PyInstaller.utils.hooks import collect_all
+    _ort_datas, _ort_bins, _ort_hidden = collect_all("onnxruntime")
+except Exception:
+    _ort_datas, _ort_bins, _ort_hidden = [], [], []
+
 DATAS = [
     (os.path.join(ROOT, "plate_models.json"), "."),
     (os.path.join(ROOT, "face_models.json"), "."),
     (os.path.join(ROOT, "LICENSE"), "."),
-]
+] + _ort_datas
 HIDDEN = [
     "cheroot", "cheroot.wsgi", "cheroot.ssl", "cheroot.ssl.builtin",
     "openscrub_update", "openscrub_setup", "openscrub_vault", "zones_ui",
-]
+] + _ort_hidden
 EXCLUDES = [
     "spacy", "paddleocr", "paddle", "torch", "torchvision",
     "matplotlib", "IPython", "jupyter", "PyQt5", "PySide2",
@@ -38,11 +48,13 @@ EXCLUDES = [
 
 a_web = Analysis(
     [os.path.join(ROOT, "openscrub_web.py")],
-    pathex=[ROOT], datas=DATAS, hiddenimports=HIDDEN, excludes=EXCLUDES,
+    pathex=[ROOT], binaries=_ort_bins,
+    datas=DATAS, hiddenimports=HIDDEN, excludes=EXCLUDES,
 )
 a_cli = Analysis(
     [os.path.join(ROOT, "openscrub.py")],
-    pathex=[ROOT], datas=DATAS, hiddenimports=[], excludes=EXCLUDES,
+    pathex=[ROOT], binaries=_ort_bins,
+    datas=DATAS, hiddenimports=_ort_hidden, excludes=EXCLUDES,
 )
 
 pyz_web = PYZ(a_web.pure)

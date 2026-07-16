@@ -36,6 +36,11 @@ classifiers = [
 dependencies = [
     "opencv-python",
     "numpy",
+    # License-plate models (open-image-models YOLOv9) are "end2end" ONNX
+    # exports with a baked-in NonMaxSuppression node that OpenCV's DNN module
+    # cannot build. onnxruntime runs them; without it the plate category would
+    # silently do nothing (a fail-open hole in a fail-closed privacy tool).
+    "onnxruntime",
     "rapidfuzz",
     "pytesseract",
     "pillow",
