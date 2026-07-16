@@ -689,6 +689,51 @@ def test_mosaic_and_ellipse_blur_shapes():
         "ellipse center must be blurred like the rect blur"
 
 
+def test_ellipse_blur_covers_frame_border():
+    """A face cut off by the frame border used to get an ellipse inscribed in
+    the CLAMPED box — a squat ellipse that pinched away from the border,
+    leaking the face right at the frame edge (the boat-video top-of-frame
+    leak). An edge-touching region must now be covered all the way to the
+    border; a region away from every border keeps the corner-preserving
+    inscribed ellipse."""
+    rng = np.random.default_rng(2)
+    base = np.clip(rng.normal(128, 40, (200, 200, 3)), 0, 255).astype(np.uint8)
+
+    # region touching the TOP border: full width of the region must be
+    # blurred at the border, including both border-side corners
+    img = base.copy()
+    openscrub.blur_region(img, 40, 0, 160, 90, "blur", shape="ellipse")
+    assert (img[0:4, 42:52] != base[0:4, 42:52]).any(), \
+        "border-side left corner must be blurred"
+    assert (img[0:4, 148:158] != base[0:4, 148:158]).any(), \
+        "border-side right corner must be blurred"
+    assert (img[0:2, 95:105] != base[0:2, 95:105]).any(), \
+        "border row center must be blurred"
+
+    # two-border corner contact (top-left): the corner itself must be covered
+    img = base.copy()
+    openscrub.blur_region(img, 0, 0, 100, 100, "blur", shape="ellipse")
+    assert (img[0:4, 0:4] != base[0:4, 0:4]).any(), \
+        "frame corner must be blurred when the region sits in the corner"
+
+    # away from every border: inscribed ellipse still leaves region corners
+    # untouched (the existing aesthetic contract)
+    img = base.copy()
+    openscrub.blur_region(img, 40, 40, 160, 160, "blur", shape="ellipse")
+    assert (img[41:47, 41:47] == base[41:47, 41:47]).all(), \
+        "interior regions keep corner-preserving inscribed ellipse"
+
+    # HDR twin: same coverage guarantee on the 10-bit luma plane
+    yp = np.clip(rng.normal(512, 100, (200, 200)), 64, 940).astype(np.uint16)
+    up = np.full((100, 100), 512, np.uint16)
+    vp = np.full((100, 100), 512, np.uint16)
+    ybase = yp.copy()
+    openscrub._blur_yuv10(yp, up, vp, 40, 0, 160, 90, "blur",
+                          shape="ellipse")
+    assert (yp[0:4, 42:52] != ybase[0:4, 42:52]).any(), \
+        "HDR path must cover the border-side corner too"
+
+
 def test_plate_decode_output_formats():
     """PlateDetector._decode must parse all three ONNX plate-model output
     conventions. The 7-column end2end layout (current open-image-models YOLOv9)

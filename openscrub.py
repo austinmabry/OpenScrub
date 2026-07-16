@@ -34,7 +34,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.34"
+VERSION = "1.0.35"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -1356,10 +1356,27 @@ def blur_region(frame, x1, y1, x2, y2, mode, shape="rect"):
     if shape == "ellipse":
         # elliptical mask hugs a face: no smeared background corners, which
         # is most of why box-blurred faces read as "whole body blurred"
+        rw, rh = x2 - x1, y2 - y1
         mask = np.zeros(roi.shape[:2], np.uint8)
-        cv2.ellipse(mask, ((x2 - x1) // 2, (y2 - y1) // 2),
-                    (max(1, (x2 - x1) // 2), max(1, (y2 - y1) // 2)),
+        cv2.ellipse(mask, (rw // 2, rh // 2),
+                    (max(1, rw // 2), max(1, rh // 2)),
                     0, 0, 360, 255, -1)
+        # A face cut off by the frame border continues PAST that border, but
+        # the inscribed ellipse above pulls AWAY from it — leaving the
+        # region's border-side corners unblurred (the boat-video top-of-frame
+        # face leak). For every border the region touches, union in a second
+        # ellipse whose virtual box mirrors past that border: its visible
+        # part is a half-ellipse that stays full-size AT the border. The
+        # union only ever adds coverage — fail closed.
+        vx1, vy1, vx2, vy2 = 0, 0, rw, rh
+        if x1 <= 1: vx1 = -rw
+        if y1 <= 1: vy1 = -rh
+        if x2 >= w - 1: vx2 = 2 * rw
+        if y2 >= h - 1: vy2 = 2 * rh
+        if (vx1, vy1, vx2, vy2) != (0, 0, rw, rh):
+            cv2.ellipse(mask, ((vx1 + vx2) // 2, (vy1 + vy2) // 2),
+                        (max(1, (vx2 - vx1) // 2), max(1, (vy2 - vy1) // 2)),
+                        0, 0, 360, 255, -1)
         roi[mask > 0] = filled[mask > 0]
     else:
         frame[y1:y2, x1:x2] = filled
@@ -1487,6 +1504,11 @@ def _blur_yuv10(y, u, v, x1, y1, x2, y2, mode, shape="rect"):
     x2 = min(w, int(x2)); y2 = min(h, int(y2))
     if x2 <= x1 or y2 <= y1:
         return
+    # which frame borders the region touches, decided ONCE on the full-res
+    # luma coords (the chroma planes are half-res, so per-plane checks would
+    # misfire). Used by the ellipse mask below — see blur_region for why.
+    edge_l, edge_t = x1 <= 1, y1 <= 1
+    edge_r, edge_b = x2 >= w - 1, y2 >= h - 1
 
     def _fill(plane, px1, py1, px2, py2, black, kmin):
         if px2 <= px1 or py2 <= py1:
@@ -1505,10 +1527,24 @@ def _blur_yuv10(y, u, v, x1, y1, x2, y2, mode, shape="rect"):
             k = max(kmin, (((px2 - px1) // 3) | 1))
             filled = cv2.GaussianBlur(roi, (k, k), 0)
         if shape == "ellipse":
+            rw, rh = px2 - px1, py2 - py1
             mask = np.zeros(roi.shape, np.uint8)
-            cv2.ellipse(mask, ((px2 - px1) // 2, (py2 - py1) // 2),
-                        (max(1, (px2 - px1) // 2), max(1, (py2 - py1) // 2)),
+            cv2.ellipse(mask, (rw // 2, rh // 2),
+                        (max(1, rw // 2), max(1, rh // 2)),
                         0, 0, 360, 255, -1)
+            # border-touching face: union in the mirrored ellipse so the
+            # visible half stays full-size at the frame border instead of
+            # pinching away from it (same fix as blur_region — fail closed)
+            vx1, vy1, vx2, vy2 = 0, 0, rw, rh
+            if edge_l: vx1 = -rw
+            if edge_t: vy1 = -rh
+            if edge_r: vx2 = 2 * rw
+            if edge_b: vy2 = 2 * rh
+            if (vx1, vy1, vx2, vy2) != (0, 0, rw, rh):
+                cv2.ellipse(mask, ((vx1 + vx2) // 2, (vy1 + vy2) // 2),
+                            (max(1, (vx2 - vx1) // 2),
+                             max(1, (vy2 - vy1) // 2)),
+                            0, 0, 360, 255, -1)
             roi[mask > 0] = filled[mask > 0]
         else:
             plane[py1:py2, px1:px2] = filled
