@@ -1922,17 +1922,22 @@ def user_data_dir():
     """Per-user writable data root (mirrors openscrub_web's choice):
     %LOCALAPPDATA%/OpenScrub on Windows, ~/.local/share/OpenScrub elsewhere.
 
-    The env-derived root is confined BEFORE any filesystem use
-    (canonicalize + prefix check — the path-injection barrier CodeQL
-    recognizes, and real defense): a hostile or mangled LOCALAPPDATA can't
-    point OpenScrub's writes at a system directory. If it resolves outside
-    the user's own profile (very rare: profile folder redirection), we fall
-    back to ~/.local/share rather than honour it."""
+    The env-derived root is confined BEFORE any filesystem use: a hostile
+    or mangled LOCALAPPDATA can't point OpenScrub's writes at a system
+    directory. If it resolves outside the user's own profile (very rare:
+    profile folder redirection), we fall back to ~/.local/share rather
+    than honour it. NOTE the guard's exact shape — canonicalize, then a
+    SINGLE startswith condition whose true branch adopts the value — is
+    deliberate: it's the one form CodeQL's path-injection barrier analysis
+    recognizes; compound conditions (`x != a and not x.startswith(b)`)
+    defeat its dominance check and the taint (and the alert) survives."""
     home = os.path.realpath(os.path.expanduser("~"))
-    fallback = os.path.join(home, ".local", "share")
-    base = os.path.realpath(os.environ.get("LOCALAPPDATA") or fallback)
-    if base != home and not base.startswith(home.rstrip(os.sep) + os.sep):
-        base = fallback
+    base = os.path.join(home, ".local", "share")
+    env = os.environ.get("LOCALAPPDATA")
+    if env:
+        cand = os.path.realpath(env)
+        if cand.startswith(home.rstrip(os.sep) + os.sep):
+            base = cand
     d = os.path.join(base, "OpenScrub")
     os.makedirs(d, exist_ok=True)
     return d
