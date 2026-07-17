@@ -1,0 +1,13 @@
+<CommunityApplications>
+  <Profile>
+OpenScrub — local, GPU-accelerated video redaction. Detects and blurs faces, license plates, names, SSNs, and other PII in videos and screen recordings, with a human review step before anything is trusted. Everything runs on your own hardware; no footage ever leaves your server. Apache-2.0, open source.
+
+Two containers are published from this repository: **OpenScrub** (CPU) and **OpenScrub-Nvidia** (CUDA build — GPU OCR, GPU face detection, GPU license-plate detection, and NVENC hardware encoding on NVIDIA cards).
+
+Support: open an issue on GitHub.
+  </Profile>
+  <Icon>https://raw.githubusercontent.com/austinmabry/OpenScrub/main/assets/icon-256.png</Icon>
+  <WebPage>https://github.com/austinmabry/OpenScrub</WebPage>
+  <DonateLink>https://github.com/sponsors/austinmabry</DonateLink>
+  <DonateText>Sponsor OpenScrub development</DonateText>
+</CommunityApplications>

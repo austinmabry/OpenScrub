@@ -1,0 +1,41 @@
+<Container version="2">
+  <Name>OpenScrub</Name>
+  <Repository>pharmhero/openscrub:latest</Repository>
+  <Registry>https://hub.docker.com/r/pharmhero/openscrub</Registry>
+  <Network>bridge</Network>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+
+  <Icon>https://raw.githubusercontent.com/austinmabry/OpenScrub/main/assets/icon-128.png</Icon>
+
+  <!-- OpenScrub serves its own TLS (self-signed by default) -->
+  <WebUI>https://[IP]:[PORT:8384]/</WebUI>
+
+  <Overview>Local video redaction with human review. OpenScrub detects and blurs PII in videos and screen recordings — faces, license plates, names, dates of birth, phone numbers, SSNs, medical record numbers, emails, addresses, card numbers, API keys, IP addresses, plus your own custom regex categories. Scan, review every detection (one card per person), then render with blur, black-box, or mosaic. Everything runs on this server; no footage leaves your network. This is the CPU image — for NVIDIA GPU acceleration install OpenScrub-Nvidia instead. Best-effort redaction: always review output before sharing.</Overview>
+
+  <Support>https://github.com/austinmabry/OpenScrub/issues</Support>
+  <Project>https://github.com/austinmabry/OpenScrub</Project>
+  <ReadMe>https://raw.githubusercontent.com/austinmabry/OpenScrub/main/README.md</ReadMe>
+  <TemplateURL>https://raw.githubusercontent.com/austinmabry/OpenScrub/main/templates/openscrub.xml</TemplateURL>
+
+  <Category>MediaApp:Video Security: Tools:Utilities</Category>
+  <ExtraSearchTerms>redaction blur privacy PII PHI face license plate anonymize deface</ExtraSearchTerms>
+  <License>Apache-2.0</License>
+  <MinVer>6.9</MinVer>
+  <Date>2026-07-16</Date>
+  <Changes>Initial Community Applications release.</Changes>
+
+  <Config Name="WebUI Port" Target="8384" Default="8384" Mode="tcp"
+          Description="HTTPS port for the OpenScrub web interface."
+          Type="Port" Display="always" Required="true" Mask="false"/>
+  <Config Name="Appdata" Target="/root/.local/share/OpenScrub"
+          Default="/mnt/user/appdata/openscrub" Mode="rw"
+          Description="Persistent data: jobs, review decisions, downloaded models, TLS certificates, settings."
+          Type="Path" Display="always" Required="true" Mask="false"/>
+  <Config Name="Media" Target="/media" Default="/mnt/user/media" Mode="ro"
+          Description="Optional read-only mount of your media share so the 'path on the server' picker can process files without uploading them through the browser."
+          Type="Path" Display="always" Required="false" Mask="false"/>
+  <Config Name="OPENSCRUB_MEDIA_ROOT" Target="OPENSCRUB_MEDIA_ROOT" Default="/media"
+          Description="Confines the server-path picker to this directory tree. Leave set to /media to match the Media mount; clear it to allow any container path."
+          Type="Variable" Display="advanced" Required="false" Mask="false"/>
+</Container>
