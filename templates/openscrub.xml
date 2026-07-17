@@ -26,12 +26,15 @@
   <Changes>Initial Community Applications release.</Changes>
 
   <Config Name="WebUI Port" Target="8384" Default="8384" Mode="tcp"
-          Description="HTTPS port for the OpenScrub web interface."
+          Description="HTTPS web interface (self-signed certificate — your browser warns once, or install your own cert in App settings)."
           Type="Port" Display="always" Required="true" Mask="false"/>
   <Config Name="Appdata" Target="/root/.local/share/OpenScrub"
           Default="/mnt/user/appdata/openscrub" Mode="rw"
-          Description="Persistent data: jobs, review decisions, downloaded models, TLS certificates, settings."
+          Description="Jobs (contains the sensitive uploads and reports!), review decisions, certificates, zones, downloaded models, encryption vault. Everything OpenScrub stores lives here — the container itself is disposable."
           Type="Path" Display="always" Required="true" Mask="false"/>
+  <Config Name="Access token (optional)" Target="OPENSCRUB_TOKEN" Default=""
+          Description="Leave empty for open access on your LAN, or set a secret to require it on every request (recommended if others use your network). The WebUI URL becomes https://ip:8384/?token=SECRET on first visit."
+          Type="Variable" Display="always" Required="false" Mask="true"/>
   <Config Name="Media" Target="/media" Default="/mnt/user/media" Mode="ro"
           Description="Optional read-only mount of your media share so the 'path on the server' picker can process files without uploading them through the browser."
           Type="Path" Display="always" Required="false" Mask="false"/>
