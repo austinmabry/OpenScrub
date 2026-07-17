@@ -1152,6 +1152,107 @@ def smooth_dense_tracks(dets, fps, video, cum=None, win_start=0.0, cb=None):
     return (n_gaps, n_lead, lead_s)
 
 
+def track_manual_region(video, box, t_ref, t0, t1, cb=None,
+                        step_frames=2, thr=0.55, scale=0.5):
+    """Track a user-drawn screen-space box through [t0, t1] by template
+    matching, starting from its appearance at t_ref and walking both
+    directions. This powers targeted redaction: circle anything the
+    detectors don't know (a tattoo, a badge, a specific person) on one
+    frame, pick the time window, and the blur follows it.
+
+    Same matching recipe smooth_dense_tracks validated on real footage:
+    half-scale grayscale + 3x3 smoothing (sub-pixel motion decorrelates
+    raw fine texture), TM_CCOEFF_NORMED with a local search window around
+    the last position. The template REFRESHES on confident matches
+    (>0.80) so gradual appearance change — turning heads, lighting —
+    doesn't break the lock; refresh is gated on confidence so drift can't
+    walk the box onto the background. Tracking STOPS (fail closed: the
+    span just ends, coverage never guesses) when the match drops below
+    `thr`, the region leaves the frame, or the window edge is reached.
+
+    Returns [(t, (x1, y1, x2, y2), score), ...] sorted by t — screen-space
+    boxes, one per step_frames. Empty if the video/box is unusable."""
+    log = (cb.log if cb else print)
+    cap = cv2.VideoCapture(video)
+    if not cap.isOpened():
+        return []
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    step = max(1, int(step_frames)) / fps
+    t_ref = min(max(t_ref, t0), t1)
+
+    def _gray(t):
+        cap.set(cv2.CAP_PROP_POS_MSEC, max(t, 0.0) * 1000)
+        ok, fr = cap.read()
+        if not ok:
+            return None
+        g = cv2.resize(cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY), None,
+                       fx=scale, fy=scale)
+        return cv2.GaussianBlur(g, (3, 3), 0)
+
+    g0 = _gray(t_ref)
+    if g0 is None:
+        cap.release()
+        return []
+    gh, gw = g0.shape[:2]
+    x1 = max(0, int(box[0] * scale)); y1 = max(0, int(box[1] * scale))
+    x2 = min(gw, int(box[2] * scale)); y2 = min(gh, int(box[3] * scale))
+    if x2 - x1 < 8 or y2 - y1 < 8:
+        cap.release()
+        log("      track: region too small to track reliably")
+        return []
+    tmpl0 = g0[y1:y2, x1:x2]
+    if float(tmpl0.std()) < 4:
+        log("      track: NOTE — region has very little texture; the match "
+            "may lose it quickly. Consider a slightly larger box.")
+
+    samples = [(t_ref, (float(box[0]), float(box[1]),
+                        float(box[2]), float(box[3])), 1.0)]
+    bw, bh = box[2] - box[0], box[3] - box[1]
+    _last_log = time.time()
+    for direction in (1, -1):
+        cur = list(box)
+        tmpl = tmpl0.copy()
+        t = t_ref
+        while True:
+            t2 = t + direction * step
+            if t2 < t0 - 1e-6 or t2 > t1 + 1e-6:
+                break
+            g = _gray(t2)
+            if g is None:
+                break
+            th_, tw_ = tmpl.shape
+            m = int(max(12, 0.8 * max(tw_, th_)))
+            rx1 = max(0, int(cur[0] * scale) - m)
+            ry1 = max(0, int(cur[1] * scale) - m)
+            rx2 = min(g.shape[1], int(cur[2] * scale) + m)
+            ry2 = min(g.shape[0], int(cur[3] * scale) + m)
+            if rx2 - rx1 < tw_ or ry2 - ry1 < th_:
+                break               # leaving the frame
+            res = cv2.matchTemplate(g[ry1:ry2, rx1:rx2], tmpl,
+                                    cv2.TM_CCOEFF_NORMED)
+            _, mx, _, loc = cv2.minMaxLoc(res)
+            if mx < thr:
+                break               # lost it: end the span, never guess
+            nx = (rx1 + loc[0]) / scale
+            ny = (ry1 + loc[1]) / scale
+            cur = [nx, ny, nx + bw, ny + bh]
+            samples.append((t2, (cur[0], cur[1], cur[2], cur[3]), float(mx)))
+            if mx > 0.80:           # confident: adopt current appearance
+                cx1, cy1 = int(nx * scale), int(ny * scale)
+                cand = g[cy1:cy1 + th_, cx1:cx1 + tw_]
+                if cand.shape == tmpl.shape:
+                    tmpl = cand.copy()
+            if time.time() - _last_log >= 3.0:
+                _last_log = time.time()
+                log("        …tracking %s to t=%.1fs (%d samples)"
+                    % ("forward" if direction > 0 else "backward",
+                       t2, len(samples)))
+            t = t2
+    cap.release()
+    samples.sort(key=lambda s: s[0])
+    return samples
+
+
 def group_persons(dets, video, cb=None):
     """Cluster dense FACE tracks by facial IDENTITY so review shows one
     card per PERSON — one blur/keep decision applied to every appearance.
@@ -1442,6 +1543,60 @@ def blur_region(frame, x1, y1, x2, y2, mode, shape="rect"):
         frame[y1:y2, x1:x2] = filled
 
 
+def probe_has_audio(src):
+    """True if the file has at least one audio stream (ffprobe)."""
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a",
+             "-show_entries", "stream=index", "-of", "csv=p=0", src],
+            capture_output=True, text=True, timeout=30).stdout
+        return bool(out.strip())
+    except Exception:
+        return False
+
+
+def audio_ffmpeg_args(src, spans, ain=1):
+    """ffmpeg (map_args, codec_args) for the render output's audio.
+
+    spans: [(t0, t1, mode)] with mode "mute" or "bleep" — spoken names,
+    numbers, and addresses leak PII no matter how good the visual blur is,
+    so the renderer can silence (or tone over) marked time ranges. No
+    spans (or no audio stream in the source) keeps today's stream copy.
+    Muting uses a volume filter gated by between(t,..) expressions; bleep
+    additionally mixes a 1 kHz tone into the silenced ranges so the edit
+    is audible rather than a suspicious gap. Audio is re-encoded (aac)
+    only when spans exist — untouched jobs still stream-copy."""
+    spans = [(float(a), float(b), (m or "mute"))
+             for a, b, m in (spans or []) if float(b) > float(a) >= 0]
+    if not spans or not probe_has_audio(src):
+        return (["-map", f"{ain}:a:0?"], ["-c:a", "copy"])
+    allx = "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b, _ in spans)
+    bx = "+".join(f"between(t,{a:.3f},{b:.3f})"
+                  for a, b, m in spans if m == "bleep")
+    if not bx:
+        return (["-map", f"{ain}:a:0?"],
+                ["-af", f"volume=enable='{allx}':volume=0",
+                 "-c:a", "aac", "-b:a", "192k"])
+    fc = (f"[{ain}:a]volume=enable='{allx}':volume=0[main];"
+          f"sine=frequency=1000[tone];"
+          f"[tone]volume=enable='not({bx})':volume=0,volume=0.3[bl];"
+          f"[main][bl]amix=inputs=2:duration=first:normalize=0[aout]")
+    return (["-filter_complex", fc, "-map", "[aout]"],
+            ["-c:a", "aac", "-b:a", "192k"])
+
+
+def parse_audio_spans(spec, mode="mute"):
+    """'12.5-19.0,84-90' -> [(12.5, 19.0, mode), ...]. Raises on garbage."""
+    spans = []
+    for part in (spec or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        a, _, b = part.partition("-")
+        spans.append((float(a), float(b), mode))
+    return spans
+
+
 class PipelineCancelled(Exception):
     """Raised internally when a Callbacks.cancelled() returns True."""
 
@@ -1618,7 +1773,7 @@ def _blur_yuv10(y, u, v, x1, y1, x2, y2, mode, shape="rect"):
 
 def render_hdr(src, dst, detections, cum, bands, fps, pad, mode,
                encoder, tags, band_margin=25, progress_every=60, cb=None,
-               mode_map=None, face_shape="ellipse"):
+               mode_map=None, face_shape="ellipse", audio_spans=None):
     """render(), but 10-bit end to end: decode the HDR source to raw
     yuv420p10le, blur the planes in place, encode 10-bit HEVC with the
     source's color tags (PQ/HLG + BT.2020) carried over. `hvc1` tagging
@@ -1649,12 +1804,13 @@ def render_hdr(src, dst, detections, cum, bands, fps, pad, mode,
     targs = [a for kv in (tags or {}).items() for a in kv]
     if os.path.splitext(dst)[1].lower() in (".mp4", ".mov"):
         targs += ["-tag:v", "hvc1"]          # QuickTime/Apple compatibility
+    amap, acodec = audio_ffmpeg_args(src, audio_spans)
     enc = subprocess.Popen(
         ["ffmpeg", "-y", "-loglevel", "error",
          "-f", "rawvideo", "-pix_fmt", "yuv420p10le",
          "-s", f"{w}x{h}", "-r", f"{fps:.6f}", "-i", "pipe:0",
-         "-i", src, "-map", "0:v:0", "-map", "1:a:0?",
-         *vargs, *targs, "-c:a", "copy", dst],
+         "-i", src, "-map", "0:v:0", *amap,
+         *vargs, *targs, *acodec, dst],
         stdin=subprocess.PIPE)
 
     buckets = {}
@@ -1743,7 +1899,7 @@ def render_hdr(src, dst, detections, cum, bands, fps, pad, mode,
 def render(src, dst, detections, cum, bands, fps, pad, mode, preview,
            encoder="auto", band_margin=25, progress_every=60, cb=None,
            mode_map=None, draw_scores=False, vcodec="h264",
-           face_shape="ellipse"):
+           face_shape="ellipse", audio_spans=None):
     # mode_map: {category: "blur"|"box"} overrides the global `mode` per
     # category. Lets you black-box the reversible-blur-vulnerable categories
     # (SSN, MRN, account numbers) while blurring faces, in one render.
@@ -1782,13 +1938,21 @@ def render(src, dst, detections, cum, bands, fps, pad, mode, preview,
         if codec in ("hevc_nvenc", "libx265") \
                 and os.path.splitext(dst)[1].lower() in (".mp4", ".mov"):
             vargs += ["-tag:v", "hvc1"]      # QuickTime/Apple compatibility
+        amap, acodec = audio_ffmpeg_args(src, audio_spans)
+        if acodec != ["-c:a", "copy"]:
+            cb.log("      audio: %d span(s) redacted (%s)" % (
+                len(audio_spans),
+                ", ".join(sorted({m for _, _, m in audio_spans}))))
         cmd = ["ffmpeg", "-y", "-loglevel", "error",
                "-f", "rawvideo", "-pix_fmt", "bgr24",
                "-s", f"{w}x{h}", "-r", f"{fps:.6f}", "-i", "pipe:0",
-               "-i", src, "-map", "0:v:0", "-map", "1:a:0?",
-               *vargs, "-pix_fmt", "yuv420p", "-c:a", "copy", dst]
+               "-i", src, "-map", "0:v:0", *amap,
+               *vargs, "-pix_fmt", "yuv420p", *acodec, dst]
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
     else:
+        if audio_spans:
+            cb.log("      WARNING: audio redaction requires ffmpeg — the "
+                   "OpenCV fallback writes NO audio at all.")
         cb.log("      encoder: OpenCV mp4v (ffmpeg not found — no audio!)")
         tmp_video = dst + ".noaudio.mp4"
         out = cv2.VideoWriter(tmp_video, cv2.VideoWriter_fourcc(*"mp4v"),
@@ -2718,6 +2882,12 @@ def write_report(path, args, state, output_path=None):
                        + [dict(asdict(d), enabled=False, zone_dropped=True)
                           for d in state.get("zdropped", [])]),
     }
+    # additive field: audio redaction spans survive report round-trips (the
+    # web review stores them here; the render-end rewrite must not drop them)
+    aspans = getattr(args, "audio_spans", None)
+    if aspans:
+        doc["audio_redactions"] = [
+            {"t0": a, "t1": b, "mode": m} for a, b, m in aspans]
     with open(path, "w", encoding="utf-8") as f:
         json.dump(doc, f, indent=1)
     try:
@@ -3088,6 +3258,14 @@ def build_parser():
                     help="draw boxes (red=PII, orange=unscanned band) instead of blurring")
     ap.add_argument("--report", help="write JSON audit report with provenance "
                     "(contains PII text — protect it)")
+    ap.add_argument("--audio-redact", default="",
+                    help="time spans to silence in the OUTPUT's audio track, "
+                         "e.g. '12.5-19.0,84-90'. Spoken names and numbers "
+                         "leak PII too. See --audio-redact-mode.")
+    ap.add_argument("--audio-redact-mode", choices=["mute", "bleep"],
+                    default="mute",
+                    help="mute = silence the spans; bleep = 1 kHz tone over "
+                         "them (audible edit instead of a suspicious gap)")
     ap.add_argument("--from-report", help="skip scanning; re-render from an "
                     "(edited) audit report produced by --report")
     ap.add_argument("--batch", help="process every video in this folder; "
@@ -3258,7 +3436,14 @@ def run_scan(args, cb=None):
         if not hasattr(args, attr):
             setattr(args, attr, default)
     normalize_vfr(args, cb)
-    cats = {c.strip() for c in args.categories.split(",")}
+    cats = {c.strip() for c in args.categories.split(",")
+            if c.strip() and c.strip() != "none"}
+    if not cats:
+        # manual-only job: no automatic detection at all. The scan still
+        # runs (it produces the render_state/report the review needs) but
+        # loads no engines; the user adds tracked objects / boxes in review.
+        cb.log("      no detection categories selected — manual-only job: "
+               "add tracked objects and boxes in review")
     # everything except the pixel detectors is text: it exists only to feed
     # OCR output into detect_phi. Load ONLY what the selected categories
     # actually need — a faces-only job must not pay for PaddleOCR (seconds
@@ -3997,13 +4182,15 @@ def run_render(args, state, cb=None):
     dst = args.output or os.path.splitext(args.video)[0] + (
         "_preview.mp4" if args.preview else "_redacted.mp4")
     cb.log(f"[4/4] Rendering -> {dst}")
+    aspans = getattr(args, "audio_spans", None)
     if getattr(args, "hdr_source", None) and not args.preview:
         render_hdr(args.hdr_source, dst, state["detections"], state["cum"],
                    state["bands"], state["fps"], pad=args.pad, mode=args.mode,
                    encoder=args.hdr_encoder,
                    tags=getattr(args, "hdr_tags", {}),
                    face_shape=getattr(args, "face_shape", "ellipse"),
-                   mode_map=getattr(args, "mode_map", None), cb=cb)
+                   mode_map=getattr(args, "mode_map", None),
+                   audio_spans=aspans, cb=cb)
     else:
         render(args.video, dst, state["detections"], state["cum"],
                state["bands"],
@@ -4012,7 +4199,7 @@ def run_render(args, state, cb=None):
                draw_scores=bool(getattr(args, "draw_scores", False)),
                vcodec=getattr(args, "codec", "h264"),
                face_shape=getattr(args, "face_shape", "ellipse"),
-               encoder=args.encoder, cb=cb)
+               encoder=args.encoder, audio_spans=aspans, cb=cb)
     if args.report:
         write_report(args.report, args, state, output_path=dst)
         cb.log(f"      audit report: {args.report} (contains PII text — protect it)")
@@ -4024,9 +4211,23 @@ def run_pipeline(args, cb=None):
     """Scan + render (or render-only with --from-report). Returns a summary
     dict; raises PipelineCancelled if cb cancels."""
     cb = cb or Callbacks()
+    if getattr(args, "audio_redact", ""):
+        args.audio_spans = parse_audio_spans(args.audio_redact,
+                                             args.audio_redact_mode)
     if getattr(args, "from_report", None):
         cb.log(f"[1/2] Loading detections from {args.from_report}")
         dets, rstate, prov = load_report(args.from_report)
+        # audio redactions ride in the report (the web review writes them
+        # there); CLI --audio-redact, when given, wins
+        if not getattr(args, "audio_spans", None):
+            try:
+                with open(args.from_report, encoding="utf-8") as f:
+                    _doc = json.load(f)
+                args.audio_spans = [
+                    (float(s["t0"]), float(s["t1"]), s.get("mode", "mute"))
+                    for s in _doc.get("audio_redactions", [])]
+            except Exception:
+                pass
         orig = prov.get("original_input")
         if orig and os.path.exists(orig) \
                 and os.path.abspath(orig) != os.path.abspath(args.video):

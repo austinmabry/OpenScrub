@@ -143,6 +143,25 @@ Key classes/functions (locate with grep, line numbers drift):
   to SDR (the web render phase does exactly this). Dolby Vision RPUs are
   dropped by design (proprietary; HLG/HDR10 base layer survives). Report
   provenance records `hdr_tonemapped` + `hdr_output`.
+- Targeted redaction: `track_manual_region` template-tracks a user-drawn
+  box through a chosen time window (both directions from t_ref, adaptive
+  template refresh gated on confidence >0.80, stops fail-closed below
+  thr). The web review's box editor has a TIMELINE (canvas `beTL`):
+  detection lanes, draggable orange window handles (BE.win), playhead,
+  and an audio lane. "Track object" POSTs /api/jobs/<id>/track_object
+  (background thread, poll /track_status) which appends dense samples on
+  a fresh track id, category "manual" — one review card with fan-out.
+  `--categories none` = manual-only job (no engines load; report still
+  gets render_state so review works).
+- Audio redaction: report-additive `audio_redactions` [{t0,t1,mode}]
+  (mode mute|bleep), written by review save and PRESERVED by
+  write_report (the render-end rewrite must not drop them). CLI:
+  `--audio-redact "a-b,c-d"` + `--audio-redact-mode`. `audio_ffmpeg_args`
+  builds the ffmpeg args: no spans or no audio stream → stream copy;
+  mute → gated volume filter + aac; bleep → filter_complex mixing a
+  1 kHz tone (amix normalize=0). Both render() and render_hdr take
+  `audio_spans`. Empty --mrn-regex style rule applies: spans only ever
+  SILENCE, never guess.
 - Install-location rules: `install_is_readonly()` (site-packages OR
   `sys.frozen`) switches every write path to `user_data_dir()`
   (%LOCALAPPDATA%/OpenScrub or ~/.local/share/OpenScrub): plate-model

@@ -747,6 +747,86 @@ def test_ellipse_blur_covers_frame_border():
         "HDR path must cover the border-side corner too"
 
 
+def _moving_square_video(path, frames=150, fps=30):
+    """Textured square marching right over static noise — trackable."""
+    w = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (640, 360))
+    rng = np.random.default_rng(11)
+    bg = rng.integers(0, 60, (360, 640, 3), np.uint8)
+    obj = ((np.indices((60, 60)).sum(0) % 16 < 8) * 200).astype(np.uint8)
+    for i in range(frames):
+        fr = bg.copy()
+        x = 40 + i * 3
+        fr[150:210, x:x + 60] = np.dstack([obj, obj // 2 + 60, obj])
+        w.write(fr)
+    w.release()
+    return path
+
+
+def test_track_manual_region(tmp_path):
+    """Targeted redaction: a user-circled region is template-tracked through
+    the chosen time window, both directions, and never escapes the window."""
+    v = _moving_square_video(str(tmp_path / "move.mp4"))
+    s = openscrub.track_manual_region(v, (218, 148, 282, 212), 2.0, 1.0, 4.0)
+    assert len(s) > 30
+    assert s[0][0] >= 0.99 and s[-1][0] <= 4.01, "window must bound the track"
+    mid = min(s, key=lambda q: abs(q[0] - 3.0))     # true x at t=3.0 is 310
+    assert abs(mid[1][0] - 310) < 15, "forward track must follow the object"
+    early = min(s, key=lambda q: abs(q[0] - 1.2))   # true x at t=1.2 is 148
+    assert abs(early[1][0] - 148) < 15, "backward track must follow too"
+    # unusable inputs fail cleanly, not loudly
+    assert openscrub.track_manual_region(v, (0, 0, 4, 4), 2.0, 1.0, 4.0) == []
+    assert openscrub.track_manual_region(
+        str(tmp_path / "nope.mp4"), (10, 10, 60, 60), 1.0, 0.0, 2.0) == []
+
+
+def test_audio_redaction_mute_and_report_roundtrip(tmp_path):
+    """Audio spans silence the output inside the span, keep it outside, and
+    survive the write_report/from-report round trip."""
+    src = str(tmp_path / "a.mp4")
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error",
+                    "-f", "lavfi", "-i", "color=c=gray:s=320x240:d=5:r=30",
+                    "-f", "lavfi", "-i", "sine=frequency=440:duration=5",
+                    "-c:v", "libx264", "-c:a", "aac", src], check=True)
+    assert openscrub.probe_has_audio(src)
+    det = openscrub.Detection(0.5, 1.0, (10, 10, 60, 60), "manual", "x",
+                              1.0, (0, 0), last_seen=0.5)
+    n = 150
+    dst = str(tmp_path / "out.mp4")
+
+    class Q(openscrub.Callbacks):
+        def log(self, m):
+            pass
+    openscrub.render(src, dst, [det], [(0.0, 0.0)] * n, [(0.0, 0.0)] * n,
+                     30.0, pad=4, mode="blur", preview=False,
+                     audio_spans=[(2.0, 4.0, "mute")], cb=Q())
+    raw = subprocess.run(["ffmpeg", "-loglevel", "error", "-i", dst,
+                          "-f", "f32le", "-ac", "1", "-ar", "8000", "-"],
+                         capture_output=True).stdout
+    a = np.frombuffer(raw, np.float32)
+    sr = 8000
+
+    def rms(x):
+        return float(np.sqrt(np.mean(x ** 2))) if len(x) else 0.0
+    assert rms(a[int(2.4 * sr):int(3.6 * sr)]) < 0.01, "span must be silent"
+    assert rms(a[int(0.5 * sr):int(1.5 * sr)]) > 0.02, "rest must survive"
+    # spans parse + no-audio sources degrade to stream copy
+    assert openscrub.parse_audio_spans("1-2,3.5-4", "bleep") == [
+        (1.0, 2.0, "bleep"), (3.5, 4.0, "bleep")]
+    silent = _moving_square_video(str(tmp_path / "sil.mp4"), frames=30)
+    amap, acodec = openscrub.audio_ffmpeg_args(silent, [(0, 1, "mute")])
+    assert acodec == ["-c:a", "copy"], "no audio stream -> plain copy"
+
+
+def test_categories_none_manual_only(tmp_path):
+    """--categories none = manual-only job: no detectors, no OCR, but a
+    valid report with render_state so review can add tracked objects."""
+    v = make_video(str(tmp_path / "n.mp4"), [(150, "Patient: John Smith")])
+    res, dets = run(v, "--categories", "none")
+    assert dets == []
+    doc = json.load(open(v.replace(".mp4", "_aud.json")))
+    assert doc["render_state"]["fps"] > 0
+
+
 def test_plate_decode_output_formats():
     """PlateDetector._decode must parse all three ONNX plate-model output
     conventions. The 7-column end2end layout (current open-image-models YOLOv9)

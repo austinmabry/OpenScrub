@@ -850,6 +850,15 @@ def job_save_edits(jid):
                      int(b[2] - ox), int(b[3] - oy)],
             "category": "manual", "text": "user-drawn", "confidence": 1.0,
             "aoff": [ox, oy], "last_seen": t0, "enabled": True})
+    if "audio" in edits:
+        # audio redaction spans (mute/bleep): stored in the report so the
+        # --from-report render applies them and re-renders keep them
+        doc["audio_redactions"] = [
+            {"t0": float(s["t0"]), "t1": float(s["t1"]),
+             "mode": (s.get("mode") if s.get("mode") in ("mute", "bleep")
+                      else "mute")}
+            for s in (edits.get("audio") or [])
+            if float(s.get("t1", 0)) > float(s.get("t0", 0)) >= 0]
     with open(path, "w", encoding="utf-8") as f:
         json.dump(doc, f, indent=1)
     # suggest allowlisting any string whose EVERY instance was disabled —
@@ -862,6 +871,82 @@ def job_save_edits(jid):
                      if len(states) >= 2 and not any(states))
     return jsonify({"ok": True, "total": len(doc["detections"]),
                     "suggest_allowlist": suggest})
+
+
+@app.route("/api/jobs/<jid>/track_object", methods=["POST"])
+def job_track_object(jid):
+    """Targeted redaction: the user circled an object on one frame and
+    picked a time window on the review timeline — template-track it through
+    that window and add the result as a dense track in the report, so the
+    review shows one card (with fan-out) and the render blurs it wherever
+    it went. Runs in a background thread; poll /track_status."""
+    job = JOBS.get(jid) or abort(404)
+    if job.get("trackbg", {}).get("state") == "running":
+        return jsonify({"error": "tracking already in progress"}), 409
+    p = request.get_json(force=True)
+    try:
+        box = [float(v) for v in p["box"]]
+        t_ref, t0, t1 = (float(p["t_ref"]), float(p["t0"]), float(p["t1"]))
+    except (KeyError, TypeError, ValueError):
+        abort(400)
+    if len(box) != 4 or not (t1 > t0 >= 0) or not (t0 <= t_ref <= t1):
+        abort(400)
+    st = {"state": "running", "added": 0, "error": None}
+    job["trackbg"] = st
+
+    def _run():
+        try:
+            class L(openscrub.Callbacks):
+                def log(self, m):
+                    job["log"].append(m)
+            samples = openscrub.track_manual_region(
+                job["video"], box, t_ref, t0, t1, cb=L())
+            if not samples:
+                st.update(state="done", added=0,
+                          error="could not track that region — try a "
+                                "larger box or a frame where it's clearer")
+                return
+            doc = _load_job_report(job)
+            rs = doc["render_state"]
+            fps = float(rs["fps"]) or 30.0
+            step = 2.0 / fps
+            tid = max([d.get("track", -1) for d in doc["detections"]]
+                      + [-1]) + 1
+            new = []
+            for t, b, score in samples:
+                fidx = min(int(t * fps), len(rs["cum"]) - 1)
+                ox, oy = rs["cum"][fidx]
+                new.append({
+                    "t_start": t, "t_end": t + step * 1.2,
+                    "cbox": [int(b[0] - ox), int(b[1] - oy),
+                             int(b[2] - ox), int(b[3] - oy)],
+                    "category": "manual", "text": "tracked object",
+                    "confidence": round(float(score), 3),
+                    "aoff": [ox, oy], "last_seen": t,
+                    "dense": True, "track": tid, "enabled": True})
+            # grace pads: cover the sub-sample sliver at both ends
+            new[0]["t_start"] = max(0.0, new[0]["t_start"] - 0.25)
+            new[-1]["t_end"] += 0.25
+            doc["detections"].extend(new)
+            path = os.path.join(job["dir"], "report.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(doc, f, indent=1)
+            job["log"].append(
+                "      tracked object: %d position(s), %.1f-%.1fs "
+                "(review card added)" % (len(new),
+                                         new[0]["t_start"], new[-1]["t_end"]))
+            st.update(state="done", added=len(new))
+        except Exception as e:
+            st.update(state="done", added=0, error=str(e))
+
+    threading.Thread(target=_run, daemon=True).start()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/jobs/<jid>/track_status")
+def job_track_status(jid):
+    job = JOBS.get(jid) or abort(404)
+    return jsonify(job.get("trackbg") or {"state": "idle"})
 
 
 def _models_state(kind):
@@ -1375,7 +1460,9 @@ function startJob(){
  if(!file.files.length&&!spath.value.trim()){
   alert("Choose a video file or enter a server path first.");return}
  if(![...document.querySelectorAll(".cat:checked")].length){
-  alert("Select at least one category to detect (faces, SSNs, names, …) — nothing is checked.");return}
+  if(!confirm("No detection categories are checked, so nothing will be "+
+   "found automatically. Run a MANUAL-ONLY job? You can draw and track "+
+   "objects yourself in review (Preview video & edit boxes)."))return}
  const fd=new FormData();
  let bytes=0;
  for(const f of file.files){fd.append("video",f);bytes+=f.size}
@@ -1524,30 +1611,186 @@ async function loadBoxEdit(fromReview){
   (document.getElementById("review")||document.getElementById("jobcard")||detail)
    .appendChild(c);}
  BE={t:0,ox:0,oy:0,boxes:[],sel:-1,ov:{},dis:{},times:{},adds:[],
-     add:false,addAnchor:null,drag:null,scale:1,dur:mi.duration};
+     add:false,addAnchor:null,drag:null,scale:1,dur:mi.duration,
+     win:[0,mi.duration],trk:false,muteArm:false,tlDrag:null,
+     tlspans:[],audio:[],audioSel:-1};
  c.innerHTML=`<div class="row" style="margin-top:8px">t=
   <input type="range" id="beT" min="0" max="${Math.max(0.2,mi.duration-0.1).toFixed(1)}"
    step="0.1" value="0" style="flex:1" oninput="beScrub()"><span id="beL">0s</span></div>
   <div style="position:relative;display:inline-block;max-width:100%">
    <img id="beImg" style="max-width:100%;border-radius:8px">
    <canvas id="beCv" style="position:absolute;left:0;top:0;touch-action:none"></canvas></div>
+  <canvas id="beTL" style="width:100%;height:72px;display:block;margin-top:6px;
+   border-radius:6px;touch-action:none;cursor:crosshair"
+   title="Timeline: colored spans = detections. Drag the orange handles to set the active window; click to seek."></canvas>
+  <div class="row" style="font-size:12.5px;align-items:center;margin-top:2px">
+   <span id="beWinL" style="color:#6b7280">window: whole video</span>
+   <button class="sec" style="padding:3px 8px;font-size:12px" onclick="beWinReset()">reset window</button>
+   <span style="flex:1"></span>
+   <select id="beAMode" style="font-size:12px"><option value="mute">mute</option>
+    <option value="bleep">bleep</option></select>
+   <button class="tog" id="beMute" onclick="beMuteMode()">&#128263; Audio span</button>
+   <button class="danger" id="beARm" style="display:none" onclick="beAudioRm()">Delete span</button></div>
   <div class="row" style="margin-top:6px">
-   <button class="tog" id="beAdd" onclick="beAddMode()">＋ Add box</button>
+   <button class="tog" id="beAdd" onclick="beAddMode()">&#65291; Add box</button>
+   <button class="tog" id="beTrk" onclick="beTrackMode()">&#8857; Track object</button>
    <button class="danger" id="beRm" style="display:none" onclick="beRemove()">Remove blur</button>
    <span id="beTimes" style="display:none;align-items:center;gap:4px;font-size:13px">
     from <input type="number" id="beT0" step="0.1" min="0" style="width:74px">
     to <input type="number" id="beT1" step="0.1" style="width:74px"> s
     <button class="sec" onclick="beApplyTimes()">Apply times</button></span>
+   <span id="beTrkSt" style="display:none;font-size:13px;color:#b45309">tracking&#8230;</span>
    <button onclick="beSave()">Save changes &amp; re-render</button></div>
   <p style="font-size:12px;color:#6b7280;margin:4px 0 0">Click a red box to
    select — drag inside to move, a corner to resize, edit its from/to times,
-   or remove its blur. ＋ Add box: drag a new region, then set how long it
-   lasts. New boxes show orange.</p>`;
+   or remove its blur. &#65291; Add box: drag a static region. &#8857; Track object:
+   drag the timeline handles to the part of the video you care about, scrub
+   to a frame where the object is clear, draw a box around it — it will be
+   followed and blurred through the window. &#128263; Audio span: drag on the
+   timeline's bottom lane to silence (or bleep) that stretch of sound.</p>`;
  const img=document.getElementById("beImg");
  img.onload=()=>{const cv=document.getElementById("beCv");
   cv.width=img.clientWidth;cv.height=img.clientHeight;
   BE.scale=img.clientWidth/(img.naturalWidth||1);beDraw();};
- beHook();beScrub();
+ beHook();tlHook();await tlInit();beScrub();
+}
+
+const TLC={name:"#3b82f6",dob:"#22c55e",phone:"#f59e0b",ssn:"#ef4444",
+ mrn:"#8b5cf6",email:"#14b8a6",address:"#f97316",card:"#db2777",
+ apikey:"#0891b2",ipaddr:"#65a30d",plate:"#7c3aed",face:"#ec4899",
+ manual:"#eab308"};
+async function tlInit(){
+ // one fetch of the full report: detection spans for the lanes (dense
+ // tracks collapse to one span per track) + stored audio redactions
+ try{
+  const doc=await (await fetch(`api/jobs/${CUR}/report`)).json();
+  const per={};
+  for(const d of (doc.detections||[])){
+   if(d.enabled===false)continue;
+   const key=d.category+((d.track??-1)>=0?(":t"+d.track):(":i"+Math.random()));
+   const s=per[key]||(per[key]={cat:d.category,t0:d.t_start,t1:d.t_end});
+   s.t0=Math.min(s.t0,d.t_start);s.t1=Math.max(s.t1,d.t_end);
+  }
+  BE.tlspans=Object.values(per);
+  BE.audio=(doc.audio_redactions||[]).map(s=>({t0:s.t0,t1:s.t1,mode:s.mode||"mute"}));
+ }catch(e){BE.tlspans=[];}
+ tlDraw();
+}
+function tlX(t,w){return Math.max(0,Math.min(w,t/Math.max(0.1,BE.dur)*w));}
+function tlDraw(){
+ const cv=document.getElementById("beTL");if(!cv)return;
+ const w=cv.clientWidth||600;cv.width=w;cv.height=72;
+ const g=cv.getContext("2d");
+ g.fillStyle="#0f172a";g.fillRect(0,0,w,72);
+ // category lanes
+ const cats=[...new Set(BE.tlspans.map(s=>s.cat))];
+ const laneH=cats.length?Math.min(10,44/Math.max(1,cats.length)):0;
+ BE.tlspans.forEach(s=>{
+  const row=cats.indexOf(s.cat);
+  g.fillStyle=TLC[s.cat]||"#94a3b8";
+  g.globalAlpha=0.9;
+  g.fillRect(tlX(s.t0,w),4+row*laneH,
+             Math.max(2,tlX(s.t1,w)-tlX(s.t0,w)),Math.max(3,laneH-2));
+ });
+ g.globalAlpha=1;
+ // audio lane (bottom 14px)
+ g.fillStyle="#1e293b";g.fillRect(0,54,w,14);
+ BE.audio.forEach((s,i)=>{
+  g.fillStyle=i===BE.audioSel?"#f87171":(s.mode==="bleep"?"#fb923c":"#dc2626");
+  g.fillRect(tlX(s.t0,w),55,Math.max(2,tlX(s.t1,w)-tlX(s.t0,w)),12);
+ });
+ g.fillStyle="#64748b";g.font="9px sans-serif";g.fillText("audio",3,64);
+ // dim outside the active window + orange handles
+ g.fillStyle="rgba(2,6,23,0.72)";
+ g.fillRect(0,0,tlX(BE.win[0],w),72);
+ g.fillRect(tlX(BE.win[1],w),0,w-tlX(BE.win[1],w),72);
+ g.fillStyle="#f59e0b";
+ g.fillRect(tlX(BE.win[0],w)-2,0,4,72);g.fillRect(tlX(BE.win[1],w)-2,0,4,72);
+ // playhead
+ g.strokeStyle="#f8fafc";g.beginPath();
+ g.moveTo(tlX(BE.t,w),0);g.lineTo(tlX(BE.t,w),72);g.stroke();
+ const full=BE.win[0]<0.05&&BE.win[1]>BE.dur-0.05;
+ document.getElementById("beWinL").textContent=full?"window: whole video"
+  :`window: ${BE.win[0].toFixed(1)}–${BE.win[1].toFixed(1)}s`;
+}
+function tlHook(){
+ const cv=document.getElementById("beTL");if(!cv)return;
+ const tAt=e=>{const r=cv.getBoundingClientRect();
+  return Math.max(0,Math.min(BE.dur,(e.clientX-r.left)/r.width*BE.dur));};
+ const yAt=e=>{const r=cv.getBoundingClientRect();return e.clientY-r.top;};
+ cv.addEventListener("pointerdown",e=>{
+  cv.setPointerCapture(e.pointerId);
+  const t=tAt(e),w=cv.clientWidth,px=e.clientX-cv.getBoundingClientRect().left;
+  if(Math.abs(px-tlX(BE.win[0],w))<7){BE.tlDrag={k:"w0"};return;}
+  if(Math.abs(px-tlX(BE.win[1],w))<7){BE.tlDrag={k:"w1"};return;}
+  if(yAt(e)>=54){                                  // audio lane
+   if(BE.muteArm){BE.tlDrag={k:"anew",t0:t};
+    BE.audio.push({t0:t,t1:t,mode:document.getElementById("beAMode").value});
+    BE.audioSel=BE.audio.length-1;tlDraw();return;}
+   const hit=BE.audio.findIndex(s=>t>=s.t0&&t<=s.t1);
+   BE.audioSel=hit;
+   document.getElementById("beARm").style.display=hit>=0?"inline-block":"none";
+   tlDraw();return;
+  }
+  BE.tlDrag={k:"seek"};
+  document.getElementById("beT").value=t.toFixed(1);beScrub();
+ });
+ cv.addEventListener("pointermove",e=>{
+  if(!BE.tlDrag)return;
+  const t=tAt(e);
+  if(BE.tlDrag.k==="w0")BE.win[0]=Math.min(t,BE.win[1]-0.2);
+  else if(BE.tlDrag.k==="w1")BE.win[1]=Math.max(t,BE.win[0]+0.2);
+  else if(BE.tlDrag.k==="anew"){
+   const s=BE.audio[BE.audioSel];
+   s.t0=Math.min(BE.tlDrag.t0,t);s.t1=Math.max(BE.tlDrag.t0,t);
+  }else if(BE.tlDrag.k==="seek"){
+   document.getElementById("beT").value=t.toFixed(1);beScrub();}
+  tlDraw();
+ });
+ cv.addEventListener("pointerup",()=>{
+  if(BE.tlDrag&&BE.tlDrag.k==="anew"){
+   const s=BE.audio[BE.audioSel];
+   if(s.t1-s.t0<0.15){BE.audio.pop();BE.audioSel=-1;}   // stray click
+   BE.muteArm=false;document.getElementById("beMute").classList.remove("on");
+   document.getElementById("beARm").style.display=BE.audioSel>=0?"inline-block":"none";
+  }
+  BE.tlDrag=null;tlDraw();
+ });
+}
+function beWinReset(){BE.win=[0,BE.dur];tlDraw();}
+function beMuteMode(){
+ BE.muteArm=!BE.muteArm;BE.trk=false;BE.add=false;BE.addAnchor=null;
+ document.getElementById("beMute").classList.toggle("on",BE.muteArm);
+ document.getElementById("beTrk").classList.remove("on");
+ document.getElementById("beAdd").classList.remove("on");
+}
+function beAudioRm(){
+ if(BE.audioSel>=0){BE.audio.splice(BE.audioSel,1);BE.audioSel=-1;
+  document.getElementById("beARm").style.display="none";tlDraw();}
+}
+function beTrackMode(){
+ BE.trk=!BE.trk;BE.add=false;BE.addAnchor=null;BE.muteArm=false;
+ document.getElementById("beTrk").classList.toggle("on",BE.trk);
+ document.getElementById("beAdd").classList.remove("on");
+ document.getElementById("beMute").classList.remove("on");
+}
+async function beTrackGo(box){
+ const st=document.getElementById("beTrkSt");st.style.display="inline";
+ st.textContent=`tracking ${BE.win[0].toFixed(1)}–${BE.win[1].toFixed(1)}s…`;
+ const r=await fetch(`api/jobs/${CUR}/track_object`,{method:"POST",
+  headers:{"Content-Type":"application/json"},
+  body:JSON.stringify({box,t_ref:BE.t,t0:BE.win[0],t1:BE.win[1]})});
+ if(!r.ok){st.textContent="tracking failed to start";return;}
+ const poll=setInterval(async()=>{
+  const d=await (await fetch(`api/jobs/${CUR}/track_status`)).json();
+  if(d.state!=="running"){
+   clearInterval(poll);
+   st.textContent=d.error?("⚠ "+d.error)
+    :`tracked ✓ ${d.added} position(s) — review card added`;
+   if(!d.error){await tlInit();beScrub();
+    if(document.getElementById("review"))loadReview();}
+  }
+ },1500);
 }
 async function beScrub(){
  BE.sel=-1;document.getElementById("beRm").style.display="none";
@@ -1557,7 +1800,7 @@ async function beScrub(){
  document.getElementById("beImg").src=`api/jobs/${CUR}/frame_at?t=${BE.t}`;
  const d=await (await fetch(`api/jobs/${CUR}/boxes_at?t=${BE.t}&all=1`)).json();
  BE.ox=d.ox;BE.oy=d.oy;BE.raw=d.boxes;
- beFilter();beDraw();
+ beFilter();beDraw();tlDraw();
 }
 function beFilter(){
  BE.boxes=(BE.raw||[]).filter(b=>{
@@ -1599,7 +1842,10 @@ function beDraw(){
 }
 function beAddMode(){
  BE.add=!BE.add;BE.addAnchor=null;BE.sel=-1;
+ BE.trk=false;BE.muteArm=false;
  document.getElementById("beAdd").classList.toggle("on",BE.add);
+ const tb=document.getElementById("beTrk");if(tb)tb.classList.remove("on");
+ const mb=document.getElementById("beMute");if(mb)mb.classList.remove("on");
  document.getElementById("beRm").style.display="none";
  document.getElementById("beTimes").style.display="none";
  beDraw();
@@ -1626,6 +1872,20 @@ function beHook(){
   return[(e.clientX-r.left)/BE.scale,(e.clientY-r.top)/BE.scale];};
  cv.addEventListener("pointerdown",e=>{
   const p=pt(e);cv.setPointerCapture(e.pointerId);
+  if(BE.trk){
+   // Track object: same two-click box draw as Add box, but on completion
+   // the region is template-tracked through the active timeline window
+   if(!BE.addAnchor){BE.addAnchor=p;BE.addFloat=p;}
+   else{
+    const a=BE.addAnchor,q=p;BE.addAnchor=null;BE.addFloat=null;
+    const box=[Math.min(a[0],q[0]),Math.min(a[1],q[1]),
+               Math.max(a[0],q[0]),Math.max(a[1],q[1])];
+    BE.trk=false;document.getElementById("beTrk").classList.remove("on");
+    if(box[2]-box[0]>10&&box[3]-box[1]>10)beTrackGo(box);
+    beDraw();
+   }
+   return;
+  }
   if(BE.add){
    if(!BE.addAnchor){BE.addAnchor=p;BE.addFloat=p;}
    else{
@@ -1923,10 +2183,14 @@ document.addEventListener("keydown",e=>{
 async function saveAndRender(){
  const manual=[...MAN,...BE.adds.map(a=>({t_start:a.t0,t_end:a.t1,
   t_ref:a.tref,screen_box:a.box}))];
+ const payload={enabled:EN,manual,box_overrides:BE.ov,
+   time_overrides:BE.times};
+ // only send audio spans when the box editor actually loaded them —
+ // otherwise a save from plain review would wipe stored spans with []
+ if(Array.isArray(BE.audio)&&BE.tlspans!==undefined)payload.audio=BE.audio;
  const r=await (await fetch(`api/jobs/${CUR}/detections`,{method:"POST",
   headers:{"Content-Type":"application/json"},
-  body:JSON.stringify({enabled:EN,manual,box_overrides:BE.ov,
-   time_overrides:BE.times})})).json();
+  body:JSON.stringify(payload)})).json();
  BE.adds=[];BE.ov={};BE.times={};
  if(r.suggest_allowlist&&r.suggest_allowlist.length){
   if(confirm("You disabled every instance of: "+r.suggest_allowlist.join(", ")+". Add these to the permanent allow-list so future scans skip them?"))
