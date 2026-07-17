@@ -874,6 +874,48 @@ def test_scan_window_fast_skip_and_output_trim(tmp_path):
     assert rms(a[int(0.2 * sr):int(1.2 * sr)]) > 0.02
 
 
+def test_multi_window_scan_and_track_mute(tmp_path):
+    """Multiple detection windows scan only their ranges (seeking across the
+    gaps), and per-track audio mute removes exactly the chosen track."""
+    src = str(tmp_path / "mt.mp4")
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error",
+                    "-f", "lavfi", "-i", "testsrc2=s=320x240:d=10:r=30",
+                    "-f", "lavfi", "-i", "sine=frequency=440:duration=10",
+                    "-f", "lavfi", "-i", "sine=frequency=880:duration=10",
+                    "-map", "0:v", "-map", "1:a", "-map", "2:a",
+                    "-c:v", "libx264", "-c:a", "aac", src], check=True)
+    assert openscrub.probe_audio_streams(src) == 2
+    parser = openscrub.build_parser()
+    args = parser.parse_args(
+        [src, "--categories", "face", "--detect-windows", "1-2,7-8",
+         "--mute-audio-tracks", "1",
+         "-o", str(tmp_path / "out.mp4"),
+         "--report", str(tmp_path / "r.json")])
+    args = openscrub._prep_args(args, parser)
+    logs = []
+
+    class Q(openscrub.Callbacks):
+        def log(self, m):
+            logs.append(m)
+    openscrub.run_pipeline(args, Q())
+    joined = "\n".join(logs)
+    assert "detection windows: 1.0-2.0s, 7.0-8.0s" in joined
+    assert "fast-skip: jumped 2.0" in joined, "gap between windows must seek"
+    assert "fast-stop" in joined
+    out = str(tmp_path / "out.mp4")
+    assert openscrub.probe_audio_streams(out) == 1, \
+        "muted track removed, other kept"
+    raw = subprocess.run(["ffmpeg", "-loglevel", "error", "-i", out,
+                          "-f", "f32le", "-ac", "1", "-ar", "8000", "-"],
+                         capture_output=True).stdout
+    a = np.frombuffer(raw, np.float32)
+    sr = 8000
+    seg = a[int(2 * sr):int(6 * sr)]
+    freqs = np.fft.rfftfreq(len(seg), 1 / sr)
+    peak = freqs[int(np.argmax(np.abs(np.fft.rfft(seg))))]
+    assert abs(peak - 880) < 30, "the KEPT track must be the 880Hz one"
+
+
 def test_plate_decode_output_formats():
     """PlateDetector._decode must parse all three ONNX plate-model output
     conventions. The 7-column end2end layout (current open-image-models YOLOv9)

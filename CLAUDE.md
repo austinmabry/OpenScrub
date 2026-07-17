@@ -145,13 +145,19 @@ Key classes/functions (locate with grep, line numbers drift):
   provenance records `hdr_tonemapped` + `hdr_output`.
 - Pre-scan scoping: the main page shows a "Scan scope & output trim" card
   when a local file is picked (client-side objectURL preview — nothing
-  uploads until Start): orange handles = detection window (writes the
-  skip_start/skip_end fields), blue = keep window (`--clip-start/
-  --clip-end`, render()'s `clip` param: video frames seek/skip/stop,
-  audio input gets -ss/-to, audio_spans shift by -clip_start). run_scan
-  FAST-SKIPS decode outside the detection window (seek past head, break
-  at end) but ONLY when scroll tracking is off — sequential offsets
-  otherwise. Trim is SDR-only for now (HDR logs a NOTE and renders full
+  uploads until Start). Editor-style timeline (DaVinci-inspired): header
+  column + canvas rows — ruler with WHITE clip bookends (`--clip-start/
+  --clip-end`; dims outside, full height), an orange DETECT track holding
+  MULTIPLE windows (`--detect-windows "a-b,c-d"` — overrides skip fields;
+  windows clamp inside the bookends, and bookends pushed inward DRAG
+  window edges with them), and one lane per audio track with an M button
+  (`--mute-audio-tracks "1,2"|"all"` — muted tracks are REMOVED from the
+  output; audio_ffmpeg_args now carries ALL source tracks, not just the
+  first, and span redaction applies per kept track). Dragging any handle
+  scrubs the preview live (throttled 80ms). run_scan FAST-SKIPS decode
+  outside the windows (seek past head, seek across gaps >1.5s, break
+  after the last) but ONLY when scroll tracking is off — sequential
+  offsets otherwise. Trim is SDR-only for now (HDR logs a NOTE and renders full
   length). Category ids are a compat surface but "mrn" DISPLAYS as
   "regex" everywhere (CATDN map in PAGE, DN maps in zones page).
 - Targeted redaction: `track_manual_region` template-tracks a user-drawn

@@ -310,6 +310,8 @@ def build_args(job, for_render=False):
             "--skip-end", str(o.get("skip_end", 0)),
             "--clip-start", str(o.get("clip_start", 0) or 0),
             "--clip-end", str(o.get("clip_end", 0) or 0),
+            "--detect-windows", o.get("detect_windows", "") or "",
+            "--mute-audio-tracks", o.get("mute_tracks", "") or "",
             "--hdr-output", (o.get("hdr_output")
                              if o.get("hdr_output") in ("match", "sdr")
                              else "match"),
@@ -1286,11 +1288,16 @@ placeholder="e.g. provider or app names to always keep visible&#10;one per line"
 </div>
 
 <div class="card" id="scopecard" style="display:none">
-<h2>Scan scope &amp; output trim <span class="qm" data-tip="Scope the job BEFORE scanning. Orange = detection window: only this part of the video is scanned and redacted (the rest is skipped entirely — a 30s window in an hour-long video scans in seconds). Blue = keep window: the output file is trimmed to this range. Drag the handles; the video player scrubs for reference.">?</span></h2>
+<h2>Scan scope &amp; output trim <span class="qm" data-tip="Scope the job BEFORE scanning. The ruler's white bookends set what the OUTPUT keeps (everything outside is trimmed away and shown dimmed). The orange Detect track holds one or more detection windows — only those ranges are scanned and redacted, and the video between them is skipped entirely. Dragging any handle scrubs the preview live so you can see exactly where you are. Audio tracks each have an M button: muted tracks are removed from the output.">?</span></h2>
 <video id="scopeV" controls muted playsinline style="max-width:100%;max-height:38vh;border-radius:8px;display:block"></video>
-<canvas id="scopeTL" style="width:100%;height:58px;display:block;margin-top:6px;border-radius:6px;touch-action:none;cursor:ew-resize"></canvas>
-<div class="row" style="font-size:12.5px;align-items:center;margin-top:2px">
- <span id="scopeL" style="color:#6b7280">detect: whole video &middot; keep: whole video</span>
+<div style="display:flex;margin-top:8px;background:#0f172a;border-radius:6px;overflow:hidden">
+ <div id="scopeHdr" style="width:122px;flex:none;color:#cbd5e1;font-size:11.5px;background:#1e293b"></div>
+ <canvas id="scopeTL" style="flex:1;min-width:0;display:block;touch-action:none;cursor:ew-resize"></canvas>
+</div>
+<div class="row" style="font-size:12.5px;align-items:center;margin-top:4px">
+ <span id="scopeL" style="color:#6b7280"></span>
+ <button class="sec" style="padding:3px 8px;font-size:12px" onclick="scopeAddWin()">+ detection window</button>
+ <button class="sec" style="padding:3px 8px;font-size:12px" id="scopeDel" onclick="scopeDelWin()" style="display:none">delete window</button>
  <button class="sec" style="padding:3px 8px;font-size:12px" onclick="scopeReset()">reset</button>
 </div></div>
 <div class="card"><h2>Custom regex categories</h2>
@@ -1456,8 +1463,13 @@ function opts(){return{
  sample_interval:+si.value,scan_trigger:+st.value,pad:+pad.value,bridge_gap:+bg.value,
  mrn_regex:mrnrx.value,face_expand:+fex.value,skip_review:skiprev.checked,use_zones:usezones.checked,
  skip_start:+skipstart.value,skip_end:+skipend.value,out_format:outfmt.value,
- clip_start:SCOPE.dur?+(SCOPE.keep[0]).toFixed(2):0,
- clip_end:(SCOPE.dur&&SCOPE.keep[1]<SCOPE.dur-0.05)?+(SCOPE.keep[1]).toFixed(2):0,
+ clip_start:(SCOPE.dur&&SCOPE.cin>0.05)?+(SCOPE.cin).toFixed(2):0,
+ clip_end:(SCOPE.dur&&SCOPE.cout<SCOPE.dur-0.05)?+(SCOPE.cout).toFixed(2):0,
+ detect_windows:(SCOPE.dur&&!(SCOPE.dets.length===1
+   &&SCOPE.dets[0][0]<=SCOPE.cin+0.05&&SCOPE.dets[0][1]>=SCOPE.cout-0.05))
+   ?SCOPE.dets.map(x=>x[0].toFixed(2)+"-"+x[1].toFixed(2)).join(","):"",
+ mute_tracks:SCOPE.audio.length===1&&SCOPE.audio[0].muted?"all"
+   :SCOPE.audio.map((a,i)=>a.muted?String(i+1):"").filter(Boolean).join(","),
  categories:[...document.querySelectorAll(".cat:checked")].map(e=>e.value).join(","),
  mode_map:Object.entries(CATMODE).filter(([c,m])=>m==="blur"||m==="box")
    .map(([c,m])=>`${c}=${m}`).join(","),
@@ -1468,8 +1480,12 @@ function opts(){return{
  detect_scale:+dscale.value,draw_scores:drawscores.checked}}
 
 let UPLOADING=false;
-// ---- pre-scan scope: detection window (orange) + output keep/trim (blue)
-let SCOPE={dur:0,det:[0,0],keep:[0,0],drag:null};
+// ---- pre-scan scope: editor-style timeline ---------------------------
+// rows: ruler (clip in/out bookends + playhead) / Detect track (multiple
+// orange windows, clamped inside the bookends) / one lane per audio track
+// with an M(ute) button. Dragging ANY handle scrubs the preview live.
+let SCOPE={dur:0,cin:0,cout:0,dets:[],audio:[],sel:-1,drag:null,lastSeek:0};
+const SC_RULER=24,SC_ROW=22;
 document.getElementById("file").addEventListener("change",e=>{
  const f=e.target.files&&e.target.files[0];
  if(!f){document.getElementById("scopecard").style.display="none";SCOPE.dur=0;return;}
@@ -1477,49 +1493,113 @@ document.getElementById("file").addEventListener("change",e=>{
  v.src=URL.createObjectURL(f);
  document.getElementById("scopecard").style.display="block";
  v.onloadedmetadata=()=>{
-  SCOPE.dur=v.duration||0;SCOPE.det=[0,SCOPE.dur];SCOPE.keep=[0,SCOPE.dur];
-  scopeSync();scopeDraw();};
+  SCOPE.dur=v.duration||0;SCOPE.cin=0;SCOPE.cout=SCOPE.dur;
+  SCOPE.dets=[[0,SCOPE.dur]];SCOPE.sel=-1;
+  // audio lanes: the browser only exposes track counts on some engines
+  // (Safari); otherwise show one lane covering all tracks
+  const n=(v.audioTracks&&v.audioTracks.length)||1;
+  SCOPE.audio=Array.from({length:n},(_,i)=>({muted:false,
+   label:n>1?("A"+(i+1)):"Audio"}));
+  scopeHdr();scopeDraw();};
  v.addEventListener("timeupdate",scopeDraw);
  scopeHook();
 });
+function scopeHdr(){
+ const h=document.getElementById("scopeHdr");
+ let html=`<div style="height:${SC_RULER}px;line-height:${SC_RULER}px;padding-left:8px;color:#64748b">timeline</div>`;
+ html+=`<div style="height:${SC_ROW}px;line-height:${SC_ROW}px;padding-left:8px;border-top:1px solid #0f172a">Detect</div>`;
+ SCOPE.audio.forEach((a,i)=>{
+  html+=`<div style="height:${SC_ROW}px;line-height:${SC_ROW}px;padding-left:8px;border-top:1px solid #0f172a;display:flex;align-items:center;gap:6px">
+   <span style="flex:1">${a.label}</span>
+   <button onclick="scopeMute(${i})" title="mute: remove this audio track from the output"
+    style="width:20px;height:16px;line-height:14px;padding:0;font-size:10.5px;border-radius:3px;border:none;cursor:pointer;
+    background:${a.muted?"#dc2626":"#334155"};color:${a.muted?"#fff":"#94a3b8"}">M</button>
+   <span style="width:6px"></span></div>`;});
+ h.innerHTML=html;
+}
+function scopeMute(i){SCOPE.audio[i].muted=!SCOPE.audio[i].muted;scopeHdr();scopeDraw();}
+function scH(){return SC_RULER+SC_ROW*(1+SCOPE.audio.length);}
 function scX(t,w){return Math.max(0,Math.min(w,t/Math.max(0.1,SCOPE.dur)*w));}
+function scFmt(t){const d=new Date(Math.max(0,t)*1000).toISOString();
+ return t>=3600?d.substr(11,8):d.substr(14,5);}
 function scopeDraw(){
  const cv=document.getElementById("scopeTL");if(!cv||!SCOPE.dur)return;
- const w=cv.clientWidth||600;cv.width=w;cv.height=58;
+ const w=cv.clientWidth||600,H=scH();cv.width=w;cv.height=H;
+ cv.style.height=H+"px";
  const g=cv.getContext("2d");
- g.fillStyle="#0f172a";g.fillRect(0,0,w,58);
- g.fillStyle="#94a3b8";g.font="9.5px sans-serif";
- g.fillText("detect",3,10);g.fillText("keep (output)",3,38);
- // detect lane (orange), rows 12-26
- g.fillStyle="#78350f";g.fillRect(0,12,w,14);
- g.fillStyle="#f59e0b";
- g.fillRect(scX(SCOPE.det[0],w),12,Math.max(2,scX(SCOPE.det[1],w)-scX(SCOPE.det[0],w)),14);
- // keep lane (blue), rows 40-54
- g.fillStyle="#1e3a8a";g.fillRect(0,40,w,14);
- g.fillStyle="#3b82f6";
- g.fillRect(scX(SCOPE.keep[0],w),40,Math.max(2,scX(SCOPE.keep[1],w)-scX(SCOPE.keep[0],w)),14);
- // handles
- g.fillStyle="#fbbf24";
- g.fillRect(scX(SCOPE.det[0],w)-2,10,4,18);g.fillRect(scX(SCOPE.det[1],w)-2,10,4,18);
- g.fillStyle="#93c5fd";
- g.fillRect(scX(SCOPE.keep[0],w)-2,38,4,18);g.fillRect(scX(SCOPE.keep[1],w)-2,38,4,18);
- // playhead from the preview player
+ g.fillStyle="#0b1120";g.fillRect(0,0,w,H);
+ // ruler ticks
+ g.fillStyle="#1e293b";g.fillRect(0,0,w,SC_RULER);
+ g.fillStyle="#64748b";g.font="9px ui-monospace,monospace";
+ const stepT=SCOPE.dur>1200?300:SCOPE.dur>240?60:SCOPE.dur>60?15:5;
+ for(let t=0;t<=SCOPE.dur;t+=stepT){
+  g.fillRect(scX(t,w),SC_RULER-6,1,6);g.fillText(scFmt(t),scX(t,w)+2,10);}
+ // detect track
+ const dy=SC_RULER;
+ g.fillStyle="#181207";g.fillRect(0,dy,w,SC_ROW);
+ SCOPE.dets.forEach((seg,i)=>{
+  g.fillStyle=i===SCOPE.sel?"#fbbf24":"#b45309";
+  g.fillRect(scX(seg[0],w),dy+2,Math.max(2,scX(seg[1],w)-scX(seg[0],w)),SC_ROW-4);
+  g.fillStyle="#fde68a";
+  g.fillRect(scX(seg[0],w),dy+2,3,SC_ROW-4);g.fillRect(scX(seg[1],w)-3,dy+2,3,SC_ROW-4);});
+ // audio lanes
+ SCOPE.audio.forEach((a,i)=>{
+  const y=SC_RULER+SC_ROW*(1+i);
+  g.fillStyle=a.muted?"#111827":"#14532d";g.fillRect(0,y,w,SC_ROW);
+  g.fillStyle=a.muted?"#374151":"#22c55e";
+  g.fillRect(scX(SCOPE.cin,w),y+7,Math.max(2,scX(SCOPE.cout,w)-scX(SCOPE.cin,w)),SC_ROW-14);
+  if(a.muted){g.fillStyle="#6b7280";g.font="9px sans-serif";
+   g.fillText("muted — removed from output",scX(SCOPE.cin,w)+6,y+14);}});
+ // dim everything outside the clip in/out, full height (editor-style)
+ g.fillStyle="rgba(2,6,23,0.72)";
+ g.fillRect(0,0,scX(SCOPE.cin,w),H);g.fillRect(scX(SCOPE.cout,w),0,w-scX(SCOPE.cout,w),H);
+ // clip bookends: white brackets on the ruler, lines full height
+ g.fillStyle="#f8fafc";
+ for(const t of [SCOPE.cin,SCOPE.cout]){
+  g.fillRect(scX(t,w)-1,0,2,H);
+  g.beginPath();
+  const x=scX(t,w),d=t===SCOPE.cin?1:-1;
+  g.moveTo(x,2);g.lineTo(x+8*d,2);g.lineTo(x,12);g.closePath();g.fill();}
+ // playhead follows the preview player
  const v=document.getElementById("scopeV");
- g.strokeStyle="#f8fafc";g.beginPath();
- g.moveTo(scX(v.currentTime||0,w),0);g.lineTo(scX(v.currentTime||0,w),58);g.stroke();
- const fmt=t=>t>=3600?new Date(t*1000).toISOString().substr(11,8):new Date(t*1000).toISOString().substr(14,5);
- const full=(a)=>a[0]<0.05&&a[1]>SCOPE.dur-0.05;
+ g.strokeStyle="#e2e8f0";g.beginPath();
+ g.moveTo(scX(v.currentTime||0,w),0);g.lineTo(scX(v.currentTime||0,w),H);g.stroke();
+ const full=SCOPE.cin<0.05&&SCOPE.cout>SCOPE.dur-0.05;
+ const dfull=SCOPE.dets.length===1&&SCOPE.dets[0][0]<=SCOPE.cin+0.05&&SCOPE.dets[0][1]>=SCOPE.cout-0.05;
  document.getElementById("scopeL").textContent=
-  `detect: ${full(SCOPE.det)?"whole video":fmt(SCOPE.det[0])+"–"+fmt(SCOPE.det[1])}`+
-  ` · keep: ${full(SCOPE.keep)?"whole video":fmt(SCOPE.keep[0])+"–"+fmt(SCOPE.keep[1])}`;
+  `keep: ${full?"whole video":scFmt(SCOPE.cin)+"\u2013"+scFmt(SCOPE.cout)}`+
+  ` \u00b7 detect: ${dfull?"everything kept":SCOPE.dets.map(s=>scFmt(s[0])+"\u2013"+scFmt(s[1])).join(", ")}`+
+  (SCOPE.audio.some(a=>a.muted)?" \u00b7 muted: "+SCOPE.audio.filter(a=>a.muted).map(a=>a.label).join(","):"");
+ document.getElementById("scopeDel").style.display=SCOPE.sel>=0?"inline-block":"none";
 }
-function scopeSync(){
- // the timeline is the graphical face of the existing skip fields
- skipstart.value=SCOPE.det[0]>0.05?SCOPE.det[0].toFixed(1):0;
- skipend.value=(SCOPE.dur-SCOPE.det[1])>0.05?(SCOPE.dur-SCOPE.det[1]).toFixed(1):0;
+function scopeSeek(t){
+ // live scrub while dragging (throttled — seeking every event stutters)
+ const now=performance.now();
+ if(now-SCOPE.lastSeek<80)return;SCOPE.lastSeek=now;
+ document.getElementById("scopeV").currentTime=t;
+}
+function scopeClamp(){
+ // clip bookends push detection windows inward, exactly as far as they
+ // moved; windows squeezed to nothing are dropped
+ SCOPE.dets=SCOPE.dets.map(s=>[Math.max(s[0],SCOPE.cin),Math.min(s[1],SCOPE.cout)])
+   .filter(s=>s[1]-s[0]>0.2);
+ if(SCOPE.sel>=SCOPE.dets.length)SCOPE.sel=-1;
+}
+function scopeAddWin(){
+ if(!SCOPE.dur)return;
+ const v=document.getElementById("scopeV");
+ const c=Math.min(Math.max(v.currentTime||0,SCOPE.cin),SCOPE.cout);
+ const half=Math.max(1,SCOPE.dur*0.03);
+ let s=[Math.max(SCOPE.cin,c-half),Math.min(SCOPE.cout,c+half)];
+ SCOPE.dets.push(s);SCOPE.sel=SCOPE.dets.length-1;scopeDraw();
+}
+function scopeDelWin(){
+ if(SCOPE.sel>=0){SCOPE.dets.splice(SCOPE.sel,1);SCOPE.sel=-1;scopeDraw();}
 }
 function scopeReset(){
- SCOPE.det=[0,SCOPE.dur];SCOPE.keep=[0,SCOPE.dur];scopeSync();scopeDraw();}
+ SCOPE.cin=0;SCOPE.cout=SCOPE.dur;SCOPE.dets=[[0,SCOPE.dur]];SCOPE.sel=-1;
+ SCOPE.audio.forEach(a=>a.muted=false);scopeHdr();scopeDraw();
+}
 function scopeHook(){
  const cv=document.getElementById("scopeTL");
  if(cv.dataset.hooked)return;cv.dataset.hooked=1;
@@ -1528,20 +1608,40 @@ function scopeHook(){
  cv.addEventListener("pointerdown",e=>{
   cv.setPointerCapture(e.pointerId);
   const r=cv.getBoundingClientRect(),px=e.clientX-r.left,py=e.clientY-r.top,
-        w=cv.clientWidth;
-  const lane=py<33?"det":"keep",a=SCOPE[lane];
-  if(Math.abs(px-scX(a[0],w))<8){SCOPE.drag={lane,i:0};return;}
-  if(Math.abs(px-scX(a[1],w))<8){SCOPE.drag={lane,i:1};return;}
-  // click on a lane: seek the preview there
-  const v=document.getElementById("scopeV");v.currentTime=tAt(e);scopeDraw();
+        w=cv.clientWidth,t=tAt(e);
+  // clip bookends grab from any row (they span full height)
+  if(Math.abs(px-scX(SCOPE.cin,w))<7){SCOPE.drag={k:"cin"};return;}
+  if(Math.abs(px-scX(SCOPE.cout,w))<7){SCOPE.drag={k:"cout"};return;}
+  if(py>=SC_RULER&&py<SC_RULER+SC_ROW){        // detect track
+   for(let i=0;i<SCOPE.dets.length;i++){
+    const s=SCOPE.dets[i];
+    if(Math.abs(px-scX(s[0],w))<7){SCOPE.drag={k:"d0",i};SCOPE.sel=i;scopeDraw();return;}
+    if(Math.abs(px-scX(s[1],w))<7){SCOPE.drag={k:"d1",i};SCOPE.sel=i;scopeDraw();return;}
+   }
+   const hit=SCOPE.dets.findIndex(s=>t>=s[0]&&t<=s[1]);
+   SCOPE.sel=hit;
+   if(hit>=0){SCOPE.drag={k:"dmove",i:hit,off:t-SCOPE.dets[hit][0]};}
+   scopeDraw();return;
+  }
+  // ruler / audio rows: seek the preview
+  document.getElementById("scopeV").currentTime=t;SCOPE.drag={k:"seek"};scopeDraw();
  });
  cv.addEventListener("pointermove",e=>{
   if(!SCOPE.drag)return;
-  const t=tAt(e),a=SCOPE[SCOPE.drag.lane];
-  if(SCOPE.drag.i===0)a[0]=Math.min(t,a[1]-0.3);else a[1]=Math.max(t,a[0]+0.3);
-  scopeSync();scopeDraw();
+  const t=tAt(e),d=SCOPE.drag;
+  if(d.k==="cin"){SCOPE.cin=Math.min(t,SCOPE.cout-0.3);scopeClamp();scopeSeek(SCOPE.cin);}
+  else if(d.k==="cout"){SCOPE.cout=Math.max(t,SCOPE.cin+0.3);scopeClamp();scopeSeek(SCOPE.cout);}
+  else if(d.k==="d0"){const s=SCOPE.dets[d.i];
+   s[0]=Math.max(SCOPE.cin,Math.min(t,s[1]-0.3));scopeSeek(s[0]);}
+  else if(d.k==="d1"){const s=SCOPE.dets[d.i];
+   s[1]=Math.min(SCOPE.cout,Math.max(t,s[0]+0.3));scopeSeek(s[1]);}
+  else if(d.k==="dmove"){const s=SCOPE.dets[d.i],len=s[1]-s[0];
+   let a=Math.max(SCOPE.cin,Math.min(t-d.off,SCOPE.cout-len));
+   SCOPE.dets[d.i]=[a,a+len];scopeSeek(a);}
+  else if(d.k==="seek"){document.getElementById("scopeV").currentTime=t;}
+  scopeDraw();
  });
- cv.addEventListener("pointerup",()=>{SCOPE.drag=null;});
+ cv.addEventListener("pointerup",()=>{SCOPE.drag=null;scopeDraw();});
 }
 
 function startJob(){

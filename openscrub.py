@@ -1543,45 +1543,74 @@ def blur_region(frame, x1, y1, x2, y2, mode, shape="rect"):
         frame[y1:y2, x1:x2] = filled
 
 
-def probe_has_audio(src):
-    """True if the file has at least one audio stream (ffprobe)."""
+def probe_audio_streams(src):
+    """Number of audio streams in the file (0 if none / no ffprobe)."""
     try:
         out = subprocess.run(
             ["ffprobe", "-v", "error", "-select_streams", "a",
              "-show_entries", "stream=index", "-of", "csv=p=0", src],
             capture_output=True, text=True, timeout=30).stdout
-        return bool(out.strip())
+        return len([ln for ln in out.splitlines() if ln.strip()])
     except Exception:
-        return False
+        return 0
 
 
-def audio_ffmpeg_args(src, spans, ain=1):
+def probe_has_audio(src):
+    """True if the file has at least one audio stream (ffprobe)."""
+    return probe_audio_streams(src) > 0
+
+
+def audio_ffmpeg_args(src, spans, ain=1, mute_tracks=()):
     """ffmpeg (map_args, codec_args) for the render output's audio.
 
     spans: [(t0, t1, mode)] with mode "mute" or "bleep" — spoken names,
     numbers, and addresses leak PII no matter how good the visual blur is,
-    so the renderer can silence (or tone over) marked time ranges. No
-    spans (or no audio stream in the source) keeps today's stream copy.
-    Muting uses a volume filter gated by between(t,..) expressions; bleep
-    additionally mixes a 1 kHz tone into the silenced ranges so the edit
-    is audible rather than a suspicious gap. Audio is re-encoded (aac)
-    only when spans exist — untouched jobs still stream-copy."""
+    so the renderer can silence (or tone over) marked time ranges.
+    mute_tracks: 1-based audio-track numbers to REMOVE from the output
+    entirely (or "all") — multi-track sources (game + mic commentary,
+    camera + lav) keep their other tracks. ALL of the source's audio
+    tracks are carried through (not just the first, as before); span
+    redaction applies to every kept track. Audio re-encodes (aac) only
+    when spans exist — otherwise kept tracks stream-copy."""
     spans = [(float(a), float(b), (m or "mute"))
              for a, b, m in (spans or []) if float(b) > float(a) >= 0]
-    if not spans or not probe_has_audio(src):
-        return (["-map", f"{ain}:a:0?"], ["-c:a", "copy"])
+    n = probe_audio_streams(src)
+    if n == 0:
+        return (["-map", f"{ain}:a?"], ["-c:a", "copy"])
+    if mute_tracks == "all" or (mute_tracks and "all" in mute_tracks):
+        return ([], [])                       # no audio in the output
+    muted = {int(x) for x in mute_tracks or ()}
+    kept = [i for i in range(n) if (i + 1) not in muted]
+    if not kept:
+        return ([], [])
+    if not spans:
+        if len(kept) == n:
+            return (["-map", f"{ain}:a?"], ["-c:a", "copy"])
+        maps = []
+        for i in kept:
+            maps += ["-map", f"{ain}:a:{i}"]
+        return (maps, ["-c:a", "copy"])
     allx = "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b, _ in spans)
     bx = "+".join(f"between(t,{a:.3f},{b:.3f})"
                   for a, b, m in spans if m == "bleep")
-    if not bx:
-        return (["-map", f"{ain}:a:0?"],
-                ["-af", f"volume=enable='{allx}':volume=0",
-                 "-c:a", "aac", "-b:a", "192k"])
-    fc = (f"[{ain}:a]volume=enable='{allx}':volume=0[main];"
-          f"sine=frequency=1000[tone];"
-          f"[tone]volume=enable='not({bx})':volume=0,volume=0.3[bl];"
-          f"[main][bl]amix=inputs=2:duration=first:normalize=0[aout]")
-    return (["-filter_complex", fc, "-map", "[aout]"],
+    fc, maps = [], []
+    if bx and len(kept) > 1:
+        fc.append("sine=frequency=1000[tn];[tn]asplit=%d%s"
+                  % (len(kept), "".join(f"[t{k}]" for k in range(len(kept)))))
+    elif bx:
+        fc.append("sine=frequency=1000[t0]")
+    for k, i in enumerate(kept):
+        if bx:
+            fc.append(f"[{ain}:a:{i}]volume=enable='{allx}':volume=0[m{k}]")
+            fc.append(f"[t{k}]volume=enable='not({bx})':volume=0,"
+                      f"volume=0.3[b{k}]")
+            fc.append(f"[m{k}][b{k}]amix=inputs=2:duration=first:"
+                      f"normalize=0[o{k}]")
+            maps += ["-map", f"[o{k}]"]
+        else:
+            fc.append(f"[{ain}:a:{i}]volume=enable='{allx}':volume=0[o{k}]")
+            maps += ["-map", f"[o{k}]"]
+    return (["-filter_complex", ";".join(fc)] + maps,
             ["-c:a", "aac", "-b:a", "192k"])
 
 
@@ -1773,7 +1802,8 @@ def _blur_yuv10(y, u, v, x1, y1, x2, y2, mode, shape="rect"):
 
 def render_hdr(src, dst, detections, cum, bands, fps, pad, mode,
                encoder, tags, band_margin=25, progress_every=60, cb=None,
-               mode_map=None, face_shape="ellipse", audio_spans=None):
+               mode_map=None, face_shape="ellipse", audio_spans=None,
+               mute_tracks=()):
     """render(), but 10-bit end to end: decode the HDR source to raw
     yuv420p10le, blur the planes in place, encode 10-bit HEVC with the
     source's color tags (PQ/HLG + BT.2020) carried over. `hvc1` tagging
@@ -1804,7 +1834,8 @@ def render_hdr(src, dst, detections, cum, bands, fps, pad, mode,
     targs = [a for kv in (tags or {}).items() for a in kv]
     if os.path.splitext(dst)[1].lower() in (".mp4", ".mov"):
         targs += ["-tag:v", "hvc1"]          # QuickTime/Apple compatibility
-    amap, acodec = audio_ffmpeg_args(src, audio_spans)
+    amap, acodec = audio_ffmpeg_args(src, audio_spans,
+                                     mute_tracks=mute_tracks)
     enc = subprocess.Popen(
         ["ffmpeg", "-y", "-loglevel", "error",
          "-f", "rawvideo", "-pix_fmt", "yuv420p10le",
@@ -1899,7 +1930,8 @@ def render_hdr(src, dst, detections, cum, bands, fps, pad, mode,
 def render(src, dst, detections, cum, bands, fps, pad, mode, preview,
            encoder="auto", band_margin=25, progress_every=60, cb=None,
            mode_map=None, draw_scores=False, vcodec="h264",
-           face_shape="ellipse", audio_spans=None, clip=None):
+           face_shape="ellipse", audio_spans=None, clip=None,
+           mute_tracks=()):
     # mode_map: {category: "blur"|"box"} overrides the global `mode` per
     # category. Lets you black-box the reversible-blur-vulnerable categories
     # (SSN, MRN, account numbers) while blurring faces, in one render.
@@ -1953,7 +1985,8 @@ def render(src, dst, detections, cum, bands, fps, pad, mode, preview,
             cb.log(f"      output trim: keeping {cs:.1f}s"
                    f"–{(ce if ce is not None else 'end')}"
                    + ("s" if ce is not None else ""))
-        amap, acodec = audio_ffmpeg_args(src, aspans_eff)
+        amap, acodec = audio_ffmpeg_args(src, aspans_eff,
+                                         mute_tracks=mute_tracks)
         if acodec != ["-c:a", "copy"]:
             cb.log("      audio: %d span(s) redacted (%s)" % (
                 len(aspans_eff),
@@ -3282,6 +3315,16 @@ def build_parser():
                     help="draw boxes (red=PII, orange=unscanned band) instead of blurring")
     ap.add_argument("--report", help="write JSON audit report with provenance "
                     "(contains PII text — protect it)")
+    ap.add_argument("--detect-windows", default="",
+                    help="scan ONLY these time ranges, e.g. '60-90,300-330' "
+                         "— multiple detection windows; the video between "
+                         "them is skipped entirely when possible. Empty = "
+                         "whole video (minus --skip-start/--skip-end).")
+    ap.add_argument("--mute-audio-tracks", default="",
+                    help="audio tracks to remove from the output: comma "
+                         "list of 1-based track numbers, or 'all'. "
+                         "Multi-track sources (game + mic, camera + lav) "
+                         "keep their other tracks.")
     ap.add_argument("--clip-start", type=float, default=0.0,
                     help="output trim: drop everything before this second — "
                          "the redacted output starts here")
@@ -3569,9 +3612,37 @@ def run_scan(args, cb=None):
     duration = total / fps if fps else 0
     win_start = max(0.0, float(getattr(args, "skip_start", 0) or 0))
     win_end = duration - max(0.0, float(getattr(args, "skip_end", 0) or 0))
-    if win_start > 0 or win_end < duration:
-        cb.log(f"      detection window: {win_start:.1f}s to {win_end:.1f}s "
-               f"(of {duration:.1f}s) — nothing outside it is detected or blurred")
+    # Multiple detection windows ("a-b,c-d"): scan ONLY those ranges. The
+    # web timeline's detection track sends these; --skip-start/--skip-end
+    # remain the single-window form. Overlapping/touching ranges merge.
+    dwin = []
+    for part in (getattr(args, "detect_windows", "") or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        a, _, b = part.partition("-")
+        w0, w1 = max(0.0, float(a)), min(duration, float(b))
+        if w1 > w0:
+            dwin.append((w0, w1))
+    dwin.sort()
+    merged = []
+    for w in dwin:
+        if merged and w[0] <= merged[-1][1] + 0.05:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], w[1]))
+        else:
+            merged.append(w)
+    dwin = merged
+    if dwin:
+        win_start, win_end = dwin[0][0], dwin[-1][1]
+        cb.log("      detection windows: "
+               + ", ".join(f"{a:.1f}-{b:.1f}s" for a, b in dwin)
+               + f" (of {duration:.1f}s) — nothing outside them is "
+                 "detected or blurred")
+    else:
+        dwin = [(win_start, win_end)]
+        if win_start > 0 or win_end < duration:
+            cb.log(f"      detection window: {win_start:.1f}s to {win_end:.1f}s "
+                   f"(of {duration:.1f}s) — nothing outside it is detected or blurred")
     zone_dropped = {}
     zdrop_raw = []
     if zones_px:
@@ -3672,15 +3743,28 @@ def run_scan(args, cb=None):
         cum.append((cx, cy))
 
         t_now = idx / fps
-        if t_now < win_start or t_now > win_end:
-            # outside the detection window: no scans, and no safety bands
-            # (the user has declared this span PII-free)
-            if t_now > win_end and not track_on:
-                # nothing left to look at and no offsets to accumulate —
-                # stop decoding the tail entirely
-                cb.log(f"      fast-stop: window ended at {win_end:.1f}s — "
-                       "the rest of the video is not decoded")
-                break
+        if not any(w0 <= t_now <= w1 for w0, w1 in dwin):
+            # outside every detection window: no scans, no safety bands
+            # (the user has declared these spans PII-free)
+            if not track_on:
+                nxt = next((w0 for w0, w1 in dwin if w0 > t_now), None)
+                if nxt is None:
+                    # past the last window: stop decoding the tail entirely
+                    cb.log(f"      fast-stop: last window ended at "
+                           f"{win_end:.1f}s — the rest of the video is "
+                           "not decoded")
+                    break
+                if nxt - t_now > 1.5:
+                    # gap between windows: seek instead of decoding it
+                    bands.append((0.0, 0.0))
+                    tgt = max(idx + 1, int(nxt * fps) - 1)
+                    cum.extend([(0.0, 0.0)] * (tgt - len(cum)))
+                    bands.extend([(0.0, 0.0)] * (tgt - len(bands)))
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, tgt)
+                    idx = tgt
+                    cb.log(f"      fast-skip: jumped {t_now:.1f}s → "
+                           f"{nxt:.1f}s (gap between windows not decoded)")
+                    continue
             scan_cx, scan_cy = cx, cy
             bands.append((0.0, 0.0))
             idx += 1
@@ -4233,6 +4317,9 @@ def run_render(args, state, cb=None):
         "_preview.mp4" if args.preview else "_redacted.mp4")
     cb.log(f"[4/4] Rendering -> {dst}")
     aspans = getattr(args, "audio_spans", None)
+    mt = (getattr(args, "mute_audio_tracks", "") or "").strip()
+    mute_tracks = ("all" if mt == "all"
+                   else tuple(int(x) for x in mt.split(",") if x.strip()))
     cs = float(getattr(args, "clip_start", 0) or 0)
     ce = float(getattr(args, "clip_end", 0) or 0)
     clip = ((cs, ce if ce > 0 else None)
@@ -4248,7 +4335,7 @@ def run_render(args, state, cb=None):
                    tags=getattr(args, "hdr_tags", {}),
                    face_shape=getattr(args, "face_shape", "ellipse"),
                    mode_map=getattr(args, "mode_map", None),
-                   audio_spans=aspans, cb=cb)
+                   audio_spans=aspans, mute_tracks=mute_tracks, cb=cb)
     else:
         render(args.video, dst, state["detections"], state["cum"],
                state["bands"],
@@ -4257,7 +4344,8 @@ def run_render(args, state, cb=None):
                draw_scores=bool(getattr(args, "draw_scores", False)),
                vcodec=getattr(args, "codec", "h264"),
                face_shape=getattr(args, "face_shape", "ellipse"),
-               encoder=args.encoder, audio_spans=aspans, clip=clip, cb=cb)
+               encoder=args.encoder, audio_spans=aspans, clip=clip,
+               mute_tracks=mute_tracks, cb=cb)
     if args.report:
         write_report(args.report, args, state, output_path=dst)
         cb.log(f"      audit report: {args.report} (contains PII text — protect it)")
