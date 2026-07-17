@@ -1484,26 +1484,42 @@ let UPLOADING=false;
 // rows: ruler (clip in/out bookends + playhead) / Detect track (multiple
 // orange windows, clamped inside the bookends) / one lane per audio track
 // with an M(ute) button. Dragging ANY handle scrubs the preview live.
-let SCOPE={dur:0,cin:0,cout:0,dets:[],audio:[],sel:-1,drag:null,lastSeek:0};
+let SCOPE={dur:0,cin:0,cout:0,dets:[],audio:[],sel:-1,drag:null,
+          primed:false,seekTo:null,seeking:false};
 const SC_RULER=24,SC_ROW=22;
 document.getElementById("file").addEventListener("change",e=>{
  const f=e.target.files&&e.target.files[0];
  if(!f){document.getElementById("scopecard").style.display="none";SCOPE.dur=0;return;}
  const v=document.getElementById("scopeV");
+ SCOPE.primed=false;SCOPE.seekTo=null;SCOPE.seeking=false;
+ v.muted=true;v.playsInline=true;v.preload="auto";
  v.src=URL.createObjectURL(f);
  document.getElementById("scopecard").style.display="block";
  v.onloadedmetadata=()=>{
   SCOPE.dur=v.duration||0;SCOPE.cin=0;SCOPE.cout=SCOPE.dur;
   SCOPE.dets=[[0,SCOPE.dur]];SCOPE.sel=-1;
-  // audio lanes: the browser only exposes track counts on some engines
-  // (Safari); otherwise show one lane covering all tracks
   const n=(v.audioTracks&&v.audioTracks.length)||1;
   SCOPE.audio=Array.from({length:n},(_,i)=>({muted:false,
    label:n>1?("A"+(i+1)):"Audio"}));
   scopeHdr();scopeDraw();};
+ // redraw the playhead as each seek lands, and pump the next queued seek
+ v.addEventListener("seeked",()=>{SCOPE.seeking=false;scopePump();scopeDraw();});
  v.addEventListener("timeupdate",scopeDraw);
+ // best-effort prime once data is ready (may be blocked outside a gesture;
+ // the first drag primes it for sure — see scopePrime)
+ v.addEventListener("loadeddata",scopePrime,{once:true});
  scopeHook();
 });
+function scopePrime(){
+ // iOS Safari will NOT render a frame set via currentTime until the video
+ // has played at least once. Do a silent play/pause to unlock scrubbing so
+ // the user never has to hit the play button first.
+ if(SCOPE.primed)return;SCOPE.primed=true;
+ const v=document.getElementById("scopeV");
+ try{const p=v.play();
+  if(p&&p.then)p.then(()=>v.pause()).catch(()=>{});else v.pause();
+ }catch(err){}
+}
 function scopeHdr(){
  const h=document.getElementById("scopeHdr");
  let html=`<div style="height:${SC_RULER}px;line-height:${SC_RULER}px;padding-left:8px;color:#64748b">timeline</div>`;
@@ -1573,10 +1589,18 @@ function scopeDraw(){
  document.getElementById("scopeDel").style.display=SCOPE.sel>=0?"inline-block":"none";
 }
 function scopeSeek(t){
- // live scrub while dragging (throttled — seeking every event stutters)
- const now=performance.now();
- if(now-SCOPE.lastSeek<80)return;SCOPE.lastSeek=now;
- document.getElementById("scopeV").currentTime=t;
+ // Seek-QUEUE (not a time throttle): remember the latest target, and only
+ // issue the next seek once the previous one has landed ('seeked'). This
+ // keeps the preview locked to the drag without flooding the decoder, and
+ // never drops the final position the way a fixed throttle can.
+ SCOPE.seekTo=Math.max(0,Math.min(SCOPE.dur||t,t));
+ scopePump();
+}
+function scopePump(){
+ if(SCOPE.seeking||SCOPE.seekTo==null)return;
+ const v=document.getElementById("scopeV");
+ const t=SCOPE.seekTo;SCOPE.seekTo=null;SCOPE.seeking=true;
+ try{v.currentTime=t;}catch(e){SCOPE.seeking=false;}
 }
 function scopeClamp(){
  // clip bookends push detection windows inward, exactly as far as they
@@ -1607,24 +1631,25 @@ function scopeHook(){
   return Math.max(0,Math.min(SCOPE.dur,(e.clientX-r.left)/r.width*SCOPE.dur));};
  cv.addEventListener("pointerdown",e=>{
   cv.setPointerCapture(e.pointerId);
+  scopePrime();                    // unlock iOS scrubbing on first touch
   const r=cv.getBoundingClientRect(),px=e.clientX-r.left,py=e.clientY-r.top,
         w=cv.clientWidth,t=tAt(e);
   // clip bookends grab from any row (they span full height)
-  if(Math.abs(px-scX(SCOPE.cin,w))<7){SCOPE.drag={k:"cin"};return;}
-  if(Math.abs(px-scX(SCOPE.cout,w))<7){SCOPE.drag={k:"cout"};return;}
+  if(Math.abs(px-scX(SCOPE.cin,w))<7){SCOPE.drag={k:"cin"};scopeSeek(SCOPE.cin);return;}
+  if(Math.abs(px-scX(SCOPE.cout,w))<7){SCOPE.drag={k:"cout"};scopeSeek(SCOPE.cout);return;}
   if(py>=SC_RULER&&py<SC_RULER+SC_ROW){        // detect track
    for(let i=0;i<SCOPE.dets.length;i++){
     const s=SCOPE.dets[i];
-    if(Math.abs(px-scX(s[0],w))<7){SCOPE.drag={k:"d0",i};SCOPE.sel=i;scopeDraw();return;}
-    if(Math.abs(px-scX(s[1],w))<7){SCOPE.drag={k:"d1",i};SCOPE.sel=i;scopeDraw();return;}
+    if(Math.abs(px-scX(s[0],w))<7){SCOPE.drag={k:"d0",i};SCOPE.sel=i;scopeSeek(s[0]);scopeDraw();return;}
+    if(Math.abs(px-scX(s[1],w))<7){SCOPE.drag={k:"d1",i};SCOPE.sel=i;scopeSeek(s[1]);scopeDraw();return;}
    }
    const hit=SCOPE.dets.findIndex(s=>t>=s[0]&&t<=s[1]);
    SCOPE.sel=hit;
    if(hit>=0){SCOPE.drag={k:"dmove",i:hit,off:t-SCOPE.dets[hit][0]};}
-   scopeDraw();return;
+   scopeSeek(t);scopeDraw();return;
   }
-  // ruler / audio rows: seek the preview
-  document.getElementById("scopeV").currentTime=t;SCOPE.drag={k:"seek"};scopeDraw();
+  // ruler / audio rows: seek the preview to the clicked time
+  SCOPE.drag={k:"seek"};scopeSeek(t);scopeDraw();
  });
  cv.addEventListener("pointermove",e=>{
   if(!SCOPE.drag)return;
@@ -1638,7 +1663,7 @@ function scopeHook(){
   else if(d.k==="dmove"){const s=SCOPE.dets[d.i],len=s[1]-s[0];
    let a=Math.max(SCOPE.cin,Math.min(t-d.off,SCOPE.cout-len));
    SCOPE.dets[d.i]=[a,a+len];scopeSeek(a);}
-  else if(d.k==="seek"){document.getElementById("scopeV").currentTime=t;}
+  else if(d.k==="seek"){scopeSeek(t);}
   scopeDraw();
  });
  cv.addEventListener("pointerup",()=>{SCOPE.drag=null;scopeDraw();});
