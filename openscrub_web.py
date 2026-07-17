@@ -308,6 +308,8 @@ def build_args(job, for_render=False):
             "--detect-scale", str(o.get("detect_scale", 1.0)),
             "--skip-start", str(o.get("skip_start", 0)),
             "--skip-end", str(o.get("skip_end", 0)),
+            "--clip-start", str(o.get("clip_start", 0) or 0),
+            "--clip-end", str(o.get("clip_end", 0) or 0),
             "--hdr-output", (o.get("hdr_output")
                              if o.get("hdr_output") in ("match", "sdr")
                              else "match"),
@@ -1283,6 +1285,14 @@ placeholder="e.g. provider or app names to always keep visible&#10;one per line"
 </div>
 </div>
 
+<div class="card" id="scopecard" style="display:none">
+<h2>Scan scope &amp; output trim <span class="qm" data-tip="Scope the job BEFORE scanning. Orange = detection window: only this part of the video is scanned and redacted (the rest is skipped entirely — a 30s window in an hour-long video scans in seconds). Blue = keep window: the output file is trimmed to this range. Drag the handles; the video player scrubs for reference.">?</span></h2>
+<video id="scopeV" controls muted playsinline style="max-width:100%;max-height:38vh;border-radius:8px;display:block"></video>
+<canvas id="scopeTL" style="width:100%;height:58px;display:block;margin-top:6px;border-radius:6px;touch-action:none;cursor:ew-resize"></canvas>
+<div class="row" style="font-size:12.5px;align-items:center;margin-top:2px">
+ <span id="scopeL" style="color:#6b7280">detect: whole video &middot; keep: whole video</span>
+ <button class="sec" style="padding:3px 8px;font-size:12px" onclick="scopeReset()">reset</button>
+</div></div>
 <div class="card"><h2>Custom regex categories</h2>
 <div style="font-size:12px;color:#6b7280;margin-bottom:6px">Add your own
 detection categories — claim numbers, case IDs, account formats, anything
@@ -1359,6 +1369,7 @@ OpenScrub v%%VERSION%% <span id="upd"></span>· <a href="license" style="color:#
 · best-effort redaction — always review output before sharing PII</footer>
 <script>
 const CATS=["name","dob","phone","ssn","mrn","email","address","card","apikey","ipaddr","plate","face"];
+const CATDN={mrn:"regex"};   // display names — ids are a compat surface
 const CATMODE={};   // category -> "" (default) | "blur" | "box"
 let CC=[];          // custom regex categories, loaded by ccLoad()
 function renderCats(){
@@ -1368,7 +1379,7 @@ function renderCats(){
   const m=(CATMODE[c]&&CATMODE[c]!=="__off")?CATMODE[c]:"";
   return `<span class="catrow">
    <label><input type="checkbox" class="cat" value="${c}" ${on?"checked":""}
-    onchange="onCatToggle('${c}',this.checked)">${c}</label>
+    onchange="onCatToggle('${c}',this.checked)">${CATDN[c]||c}</label>
    <select class="catmode" data-c="${c}" onchange="CATMODE['${c}']=this.value||''"
     ${on?"":"disabled"} title="redaction style for ${c}">
     <option value="">${gm} (default)</option>
@@ -1445,6 +1456,8 @@ function opts(){return{
  sample_interval:+si.value,scan_trigger:+st.value,pad:+pad.value,bridge_gap:+bg.value,
  mrn_regex:mrnrx.value,face_expand:+fex.value,skip_review:skiprev.checked,use_zones:usezones.checked,
  skip_start:+skipstart.value,skip_end:+skipend.value,out_format:outfmt.value,
+ clip_start:SCOPE.dur?+(SCOPE.keep[0]).toFixed(2):0,
+ clip_end:(SCOPE.dur&&SCOPE.keep[1]<SCOPE.dur-0.05)?+(SCOPE.keep[1]).toFixed(2):0,
  categories:[...document.querySelectorAll(".cat:checked")].map(e=>e.value).join(","),
  mode_map:Object.entries(CATMODE).filter(([c,m])=>m==="blur"||m==="box")
    .map(([c,m])=>`${c}=${m}`).join(","),
@@ -1455,6 +1468,82 @@ function opts(){return{
  detect_scale:+dscale.value,draw_scores:drawscores.checked}}
 
 let UPLOADING=false;
+// ---- pre-scan scope: detection window (orange) + output keep/trim (blue)
+let SCOPE={dur:0,det:[0,0],keep:[0,0],drag:null};
+document.getElementById("file").addEventListener("change",e=>{
+ const f=e.target.files&&e.target.files[0];
+ if(!f){document.getElementById("scopecard").style.display="none";SCOPE.dur=0;return;}
+ const v=document.getElementById("scopeV");
+ v.src=URL.createObjectURL(f);
+ document.getElementById("scopecard").style.display="block";
+ v.onloadedmetadata=()=>{
+  SCOPE.dur=v.duration||0;SCOPE.det=[0,SCOPE.dur];SCOPE.keep=[0,SCOPE.dur];
+  scopeSync();scopeDraw();};
+ v.addEventListener("timeupdate",scopeDraw);
+ scopeHook();
+});
+function scX(t,w){return Math.max(0,Math.min(w,t/Math.max(0.1,SCOPE.dur)*w));}
+function scopeDraw(){
+ const cv=document.getElementById("scopeTL");if(!cv||!SCOPE.dur)return;
+ const w=cv.clientWidth||600;cv.width=w;cv.height=58;
+ const g=cv.getContext("2d");
+ g.fillStyle="#0f172a";g.fillRect(0,0,w,58);
+ g.fillStyle="#94a3b8";g.font="9.5px sans-serif";
+ g.fillText("detect",3,10);g.fillText("keep (output)",3,38);
+ // detect lane (orange), rows 12-26
+ g.fillStyle="#78350f";g.fillRect(0,12,w,14);
+ g.fillStyle="#f59e0b";
+ g.fillRect(scX(SCOPE.det[0],w),12,Math.max(2,scX(SCOPE.det[1],w)-scX(SCOPE.det[0],w)),14);
+ // keep lane (blue), rows 40-54
+ g.fillStyle="#1e3a8a";g.fillRect(0,40,w,14);
+ g.fillStyle="#3b82f6";
+ g.fillRect(scX(SCOPE.keep[0],w),40,Math.max(2,scX(SCOPE.keep[1],w)-scX(SCOPE.keep[0],w)),14);
+ // handles
+ g.fillStyle="#fbbf24";
+ g.fillRect(scX(SCOPE.det[0],w)-2,10,4,18);g.fillRect(scX(SCOPE.det[1],w)-2,10,4,18);
+ g.fillStyle="#93c5fd";
+ g.fillRect(scX(SCOPE.keep[0],w)-2,38,4,18);g.fillRect(scX(SCOPE.keep[1],w)-2,38,4,18);
+ // playhead from the preview player
+ const v=document.getElementById("scopeV");
+ g.strokeStyle="#f8fafc";g.beginPath();
+ g.moveTo(scX(v.currentTime||0,w),0);g.lineTo(scX(v.currentTime||0,w),58);g.stroke();
+ const fmt=t=>t>=3600?new Date(t*1000).toISOString().substr(11,8):new Date(t*1000).toISOString().substr(14,5);
+ const full=(a)=>a[0]<0.05&&a[1]>SCOPE.dur-0.05;
+ document.getElementById("scopeL").textContent=
+  `detect: ${full(SCOPE.det)?"whole video":fmt(SCOPE.det[0])+"–"+fmt(SCOPE.det[1])}`+
+  ` · keep: ${full(SCOPE.keep)?"whole video":fmt(SCOPE.keep[0])+"–"+fmt(SCOPE.keep[1])}`;
+}
+function scopeSync(){
+ // the timeline is the graphical face of the existing skip fields
+ skipstart.value=SCOPE.det[0]>0.05?SCOPE.det[0].toFixed(1):0;
+ skipend.value=(SCOPE.dur-SCOPE.det[1])>0.05?(SCOPE.dur-SCOPE.det[1]).toFixed(1):0;
+}
+function scopeReset(){
+ SCOPE.det=[0,SCOPE.dur];SCOPE.keep=[0,SCOPE.dur];scopeSync();scopeDraw();}
+function scopeHook(){
+ const cv=document.getElementById("scopeTL");
+ if(cv.dataset.hooked)return;cv.dataset.hooked=1;
+ const tAt=e=>{const r=cv.getBoundingClientRect();
+  return Math.max(0,Math.min(SCOPE.dur,(e.clientX-r.left)/r.width*SCOPE.dur));};
+ cv.addEventListener("pointerdown",e=>{
+  cv.setPointerCapture(e.pointerId);
+  const r=cv.getBoundingClientRect(),px=e.clientX-r.left,py=e.clientY-r.top,
+        w=cv.clientWidth;
+  const lane=py<33?"det":"keep",a=SCOPE[lane];
+  if(Math.abs(px-scX(a[0],w))<8){SCOPE.drag={lane,i:0};return;}
+  if(Math.abs(px-scX(a[1],w))<8){SCOPE.drag={lane,i:1};return;}
+  // click on a lane: seek the preview there
+  const v=document.getElementById("scopeV");v.currentTime=tAt(e);scopeDraw();
+ });
+ cv.addEventListener("pointermove",e=>{
+  if(!SCOPE.drag)return;
+  const t=tAt(e),a=SCOPE[SCOPE.drag.lane];
+  if(SCOPE.drag.i===0)a[0]=Math.min(t,a[1]-0.3);else a[1]=Math.max(t,a[0]+0.3);
+  scopeSync();scopeDraw();
+ });
+ cv.addEventListener("pointerup",()=>{SCOPE.drag=null;});
+}
+
 function startJob(){
  if(UPLOADING)return;                       // double-click guard
  if(!file.files.length&&!spath.value.trim()){
@@ -2071,7 +2160,7 @@ async function loadReview(){
   }
   // person cards first, then everything else chronologically
   items.sort((a,b)=>((b.personcard?1:0)-(a.personcard?1:0))||a.t_start-b.t_start);
-  html+=`<h3 style="margin:10px 0 6px">${cat} <span class="badge">${items.length}</span>
+  html+=`<h3 style="margin:10px 0 6px">${CATDN[cat]||cat} <span class="badge">${items.length}</span>
   <button class="sec" style="padding:3px 8px;font-size:12px"
    onclick="setAll('${cat}',true)">all on</button>
   <button class="sec" style="padding:3px 8px;font-size:12px"

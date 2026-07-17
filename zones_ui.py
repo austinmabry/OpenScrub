@@ -15,7 +15,7 @@ header b{font-weight:600}
 header img{height:34px;display:block}
 header a{color:#93c5fd;text-decoration:none;font-size:14px}
 main{max-width:1400px;margin:0 auto;padding:12px;display:grid;
- grid-template-columns:290px 1fr;gap:12px}
+ grid-template-columns:290px minmax(0,1fr);gap:12px}
 @media(max-width:900px){main{grid-template-columns:1fr}}
 .card{background:var(--card);border-radius:12px;padding:14px;
  box-shadow:0 1px 3px rgba(0,0,0,.08)}
@@ -55,7 +55,8 @@ label{display:block;margin:8px 0 3px;font-size:12.5px;color:var(--mut)}
  background:#064e3b;color:#6ee7b7;transition:opacity .3s}
 #cwrap{position:relative;align-self:center;max-width:100%;
  box-shadow:0 8px 30px rgba(0,0,0,.45);border-radius:6px;overflow:hidden}
-#bg,#cv{display:block;max-width:100%}
+#bg,#bgv{display:block;max-width:100%;max-height:72vh;width:auto;height:auto}
+#cv{display:block;max-width:100%}
 #cv{position:absolute;left:0;top:0;touch-action:none}
 #coords{font:12px ui-monospace,Consolas,monospace;color:#93c5fd;min-width:210px}
 #tl{display:flex;align-items:center;gap:10px;padding:2px 4px;user-select:none}
@@ -151,14 +152,16 @@ function setBgMode(m){BGMODE=m;
 
 function chips(){
  const el=document.getElementById("chips");
+ const DN={mrn:"regex",ignore:"ignore (never blur)"};
  el.innerHTML=Object.entries(CATS).map(([c,col])=>
   `<div class="chip ${active===c?"active":""}" style="--c:${col}"
-    onclick="setActive('${c}')"><span class="dot"></span>${c==="ignore"?"ignore (never blur)":c}
+    onclick="setActive('${c}')"><span class="dot"></span>${DN[c]||c}
     <span class="n">${(zones[c]||[]).length}</span></div>`).join("")
   +`<div class="chip viewall ${active===null?"active":""}"
     onclick="setActive(null)">👁 view all classes</div>`;
+ const DN2={mrn:"regex"};
  document.getElementById("modeinfo").textContent=
-   active?("Editing: "+active):"Viewing all classes (pick one to edit)";
+   active?("Editing: "+(DN2[active]||active)):"Viewing all classes (pick one to edit)";
 }
 function setActive(c){active=c;selIdx=-1;anchor=null;chips();draw();}
 function setMode(m){mode=m;selIdx=-1;anchor=null;

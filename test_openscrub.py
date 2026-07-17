@@ -827,6 +827,53 @@ def test_categories_none_manual_only(tmp_path):
     assert doc["render_state"]["fps"] > 0
 
 
+def test_scan_window_fast_skip_and_output_trim(tmp_path):
+    """Pre-scan scoping: the detection window SKIPS decode work outside it
+    (seek past the head, stop at the end) when scroll tracking is off, and
+    --clip-start/--clip-end trim the output — with audio redaction spans
+    shifted into the trimmed timeline."""
+    src = str(tmp_path / "s.mp4")
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error",
+                    "-f", "lavfi", "-i", "testsrc2=s=320x240:d=10:r=30",
+                    "-f", "lavfi", "-i", "sine=frequency=440:duration=10",
+                    "-c:v", "libx264", "-c:a", "aac", src], check=True)
+    parser = openscrub.build_parser()
+    args = parser.parse_args(
+        [src, "--categories", "face", "--skip-start", "3", "--skip-end", "4",
+         "--clip-start", "2.5", "--clip-end", "6.5", "--audio-redact", "4-5",
+         "-o", str(tmp_path / "out.mp4"),
+         "--report", str(tmp_path / "r.json")])
+    args = openscrub._prep_args(args, parser)
+    logs = []
+
+    class Q(openscrub.Callbacks):
+        def log(self, m):
+            logs.append(m)
+    openscrub.run_pipeline(args, Q())
+    joined = "\n".join(logs)
+    assert "fast-skip" in joined, "head frames must not be decoded"
+    assert "fast-stop" in joined, "tail frames must not be decoded"
+    assert "output trim" in joined
+    dur = float(subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "csv=p=0", str(tmp_path / "out.mp4")],
+        capture_output=True, text=True).stdout.strip())
+    assert 3.5 < dur < 4.6, "output must be trimmed to the keep window"
+    # the 4-5s mute (original time) lands at 1.5-2.5s of the trimmed output
+    raw = subprocess.run(
+        ["ffmpeg", "-loglevel", "error", "-i", str(tmp_path / "out.mp4"),
+         "-f", "f32le", "-ac", "1", "-ar", "8000", "-"],
+        capture_output=True).stdout
+    a = np.frombuffer(raw, np.float32)
+    sr = 8000
+
+    def rms(x):
+        return float(np.sqrt(np.mean(x ** 2))) if len(x) else 0.0
+    assert rms(a[int(1.7 * sr):int(2.3 * sr)]) < 0.01, \
+        "audio span must shift with the trim"
+    assert rms(a[int(0.2 * sr):int(1.2 * sr)]) > 0.02
+
+
 def test_plate_decode_output_formats():
     """PlateDetector._decode must parse all three ONNX plate-model output
     conventions. The 7-column end2end layout (current open-image-models YOLOv9)

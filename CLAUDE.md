@@ -143,6 +143,17 @@ Key classes/functions (locate with grep, line numbers drift):
   to SDR (the web render phase does exactly this). Dolby Vision RPUs are
   dropped by design (proprietary; HLG/HDR10 base layer survives). Report
   provenance records `hdr_tonemapped` + `hdr_output`.
+- Pre-scan scoping: the main page shows a "Scan scope & output trim" card
+  when a local file is picked (client-side objectURL preview — nothing
+  uploads until Start): orange handles = detection window (writes the
+  skip_start/skip_end fields), blue = keep window (`--clip-start/
+  --clip-end`, render()'s `clip` param: video frames seek/skip/stop,
+  audio input gets -ss/-to, audio_spans shift by -clip_start). run_scan
+  FAST-SKIPS decode outside the detection window (seek past head, break
+  at end) but ONLY when scroll tracking is off — sequential offsets
+  otherwise. Trim is SDR-only for now (HDR logs a NOTE and renders full
+  length). Category ids are a compat surface but "mrn" DISPLAYS as
+  "regex" everywhere (CATDN map in PAGE, DN maps in zones page).
 - Targeted redaction: `track_manual_region` template-tracks a user-drawn
   box through a chosen time window (both directions from t_ref, adaptive
   template refresh gated on confidence >0.80, stops fail-closed below

@@ -1899,7 +1899,7 @@ def render_hdr(src, dst, detections, cum, bands, fps, pad, mode,
 def render(src, dst, detections, cum, bands, fps, pad, mode, preview,
            encoder="auto", band_margin=25, progress_every=60, cb=None,
            mode_map=None, draw_scores=False, vcodec="h264",
-           face_shape="ellipse", audio_spans=None):
+           face_shape="ellipse", audio_spans=None, clip=None):
     # mode_map: {category: "blur"|"box"} overrides the global `mode` per
     # category. Lets you black-box the reversible-blur-vulnerable categories
     # (SSN, MRN, account numbers) while blurring faces, in one render.
@@ -1938,15 +1938,30 @@ def render(src, dst, detections, cum, bands, fps, pad, mode, preview,
         if codec in ("hevc_nvenc", "libx265") \
                 and os.path.splitext(dst)[1].lower() in (".mp4", ".mov"):
             vargs += ["-tag:v", "hvc1"]      # QuickTime/Apple compatibility
-        amap, acodec = audio_ffmpeg_args(src, audio_spans)
+        # output trim ("keep bookends"): only [cs, ce] of the video reaches
+        # the output. The piped video restarts at 0, so the audio input is
+        # seeked the same way and any redaction spans shift accordingly.
+        cs, ce = (clip if clip else (0.0, None))
+        aspans_eff = audio_spans
+        ain_opts = []
+        if clip:
+            ain_opts = ["-ss", f"{cs:.3f}"] + (
+                ["-to", f"{ce:.3f}"] if ce is not None else [])
+            aspans_eff = [(max(0.0, a - cs), b - cs, m)
+                          for a, b, m in (audio_spans or [])
+                          if b > cs and (ce is None or a < ce)]
+            cb.log(f"      output trim: keeping {cs:.1f}s"
+                   f"–{(ce if ce is not None else 'end')}"
+                   + ("s" if ce is not None else ""))
+        amap, acodec = audio_ffmpeg_args(src, aspans_eff)
         if acodec != ["-c:a", "copy"]:
             cb.log("      audio: %d span(s) redacted (%s)" % (
-                len(audio_spans),
-                ", ".join(sorted({m for _, _, m in audio_spans}))))
+                len(aspans_eff),
+                ", ".join(sorted({m for _, _, m in aspans_eff}))))
         cmd = ["ffmpeg", "-y", "-loglevel", "error",
                "-f", "rawvideo", "-pix_fmt", "bgr24",
                "-s", f"{w}x{h}", "-r", f"{fps:.6f}", "-i", "pipe:0",
-               "-i", src, "-map", "0:v:0", *amap,
+               *ain_opts, "-i", src, "-map", "0:v:0", *amap,
                *vargs, "-pix_fmt", "yuv420p", *acodec, dst]
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
     else:
@@ -1982,6 +1997,9 @@ def render(src, dst, detections, cum, bands, fps, pad, mode, preview,
                     pass
 
     idx = 0
+    if clip and clip[0] > 0.5:
+        idx = int(clip[0] * fps)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
     while True:
         if idx % 30 == 0 and cb.cancelled():
             cleanup_partial()
@@ -1990,6 +2008,12 @@ def render(src, dst, detections, cum, bands, fps, pad, mode, preview,
         if not ok:
             break
         t = idx / fps
+        if clip:
+            if t < clip[0] - 1e-6:          # seek undershoot guard
+                idx += 1
+                continue
+            if clip[1] is not None and t > clip[1] + 1e-6:
+                break                       # keep-window over: stop encoding
         ox, oy = cum[min(idx, len(cum) - 1)]
 
         # 1. tracked PII boxes, translated by scroll offset
@@ -3258,6 +3282,12 @@ def build_parser():
                     help="draw boxes (red=PII, orange=unscanned band) instead of blurring")
     ap.add_argument("--report", help="write JSON audit report with provenance "
                     "(contains PII text — protect it)")
+    ap.add_argument("--clip-start", type=float, default=0.0,
+                    help="output trim: drop everything before this second — "
+                         "the redacted output starts here")
+    ap.add_argument("--clip-end", type=float, default=0.0,
+                    help="output trim: drop everything after this second "
+                         "(0 = keep to the end)")
     ap.add_argument("--audio-redact", default="",
                     help="time spans to silence in the OUTPUT's audio track, "
                          "e.g. '12.5-19.0,84-90'. Spoken names and numbers "
@@ -3617,6 +3647,20 @@ def run_scan(args, cb=None):
                   else " (whole frame — set a face zone to speed this up)"))
     idx = 0
     dense_now = []
+    # Fast-skip: when scroll tracking is off (camera footage, face/plate/
+    # manual jobs — exactly the "one person 16 minutes in" case), frames
+    # before the detection window carry no information we need, so SEEK past
+    # them instead of decoding them. cum/bands get zero rows for the skipped
+    # indices (render min-guards its lookups). With tracking ON the frames
+    # must be decoded sequentially — offsets accumulate — so no skip there.
+    if win_start > 1.0 and not track_on:
+        skip_n = max(0, int(win_start * fps) - 1)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, skip_n)
+        cum.extend([(0.0, 0.0)] * skip_n)
+        bands.extend([(0.0, 0.0)] * skip_n)
+        idx = skip_n
+        cb.log(f"      fast-skip: jumped straight to {win_start:.1f}s — "
+               f"{skip_n} frame(s) before the window are not decoded")
     while True:
         if idx % 30 == 0 and cb.cancelled():
             cap.release()
@@ -3631,6 +3675,12 @@ def run_scan(args, cb=None):
         if t_now < win_start or t_now > win_end:
             # outside the detection window: no scans, and no safety bands
             # (the user has declared this span PII-free)
+            if t_now > win_end and not track_on:
+                # nothing left to look at and no offsets to accumulate —
+                # stop decoding the tail entirely
+                cb.log(f"      fast-stop: window ended at {win_end:.1f}s — "
+                       "the rest of the video is not decoded")
+                break
             scan_cx, scan_cy = cx, cy
             bands.append((0.0, 0.0))
             idx += 1
@@ -4183,6 +4233,14 @@ def run_render(args, state, cb=None):
         "_preview.mp4" if args.preview else "_redacted.mp4")
     cb.log(f"[4/4] Rendering -> {dst}")
     aspans = getattr(args, "audio_spans", None)
+    cs = float(getattr(args, "clip_start", 0) or 0)
+    ce = float(getattr(args, "clip_end", 0) or 0)
+    clip = ((cs, ce if ce > 0 else None)
+            if (cs > 0 or ce > 0) else None)
+    if clip and getattr(args, "hdr_source", None) and not args.preview:
+        cb.log("      NOTE: output trim is not yet supported on HDR output — "
+               "rendering full length. Use --hdr-output sdr to trim.")
+        clip = None
     if getattr(args, "hdr_source", None) and not args.preview:
         render_hdr(args.hdr_source, dst, state["detections"], state["cum"],
                    state["bands"], state["fps"], pad=args.pad, mode=args.mode,
@@ -4199,7 +4257,7 @@ def run_render(args, state, cb=None):
                draw_scores=bool(getattr(args, "draw_scores", False)),
                vcodec=getattr(args, "codec", "h264"),
                face_shape=getattr(args, "face_shape", "ellipse"),
-               encoder=args.encoder, audio_spans=aspans, cb=cb)
+               encoder=args.encoder, audio_spans=aspans, clip=clip, cb=cb)
     if args.report:
         write_report(args.report, args, state, output_path=dst)
         cb.log(f"      audit report: {args.report} (contains PII text — protect it)")
