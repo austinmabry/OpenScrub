@@ -17,7 +17,7 @@ token on every request (carried in a cookie after the first visit);
 without it the server runs open and trusts everyone on the network.
 Either way this is *LAN-grade* protection for a trusted home/office
 network — do not expose this port to the internet. Uploaded videos and
-audit reports contain PHI; the jobs folder inherits that sensitivity.
+audit reports contain PII; the jobs folder inherits that sensitivity.
 
 Jobs are processed one at a time (FIFO) so concurrent requests don't fight
 over the GPU.
@@ -48,13 +48,13 @@ def _data_root():
     """Writable data root. From a normal checkout/deploy: the script's own
     folder (unchanged behavior). When pip-installed (module lives inside
     site-packages) or frozen into an exe (PyInstaller under Program Files),
-    use a per-user data dir instead — PHI jobs and TLS keys must never be
+    use a per-user data dir instead — PII jobs and TLS keys must never be
     written into the install tree."""
     here = os.path.dirname(os.path.abspath(__file__))
     if ("site-packages" in here or "dist-packages" in here
             or getattr(sys, "frozen", False)):
         # Confine the env-derived root to the user's own profile before any
-        # filesystem use: a hostile LOCALAPPDATA can't point PHI job/key
+        # filesystem use: a hostile LOCALAPPDATA can't point PII job/key
         # writes at a system directory. The guard's exact shape (single
         # startswith, value adopted in its true branch) matches the engine's
         # user_data_dir — the one form CodeQL's barrier analysis recognizes.
@@ -299,7 +299,9 @@ def build_args(job, for_render=False):
             "--scan-trigger", str(o.get("scan_trigger", 60)),
             "--pad", str(o.get("pad", 8)),
             "--bridge-gap", str(o.get("bridge_gap", 4.0)),
-            "--mrn-regex", o.get("mrn_regex", openscrub.RE_MRN_DEFAULT),
+            # empty = user brought no pattern -> the mrn ID category is
+            # inactive (the engine default is empty too; no prefill anymore)
+            "--mrn-regex", o.get("mrn_regex", ""),
             "--face-expand", str(o.get("face_expand", 0.15)),
             "--face-threshold", str(o.get("face_threshold", 0.6)),
             "--plate-threshold", str(o.get("plate_threshold", 0.35)),
@@ -1153,7 +1155,7 @@ padding:8px 12px;font-size:13px}
 <option value="x264">x264 (CPU)</option></select></div>
 <div><label>Redaction (default)<span class="qm" data-tip="Default style for every category. blur = Gaussian blur; readable structure is destroyed but a blur is, in principle, partially reversible — short high-contrast strings (an SSN or MRN in a fixed font) are the most vulnerable. box = solid black; pixels are set to zero, so nothing is recoverable. Override per category below.">?</span></label><select id="mode" onchange="renderCats()">
 <option>blur</option><option>box</option><option>mosaic</option></select></div>
-<div><label>Sample interval (s)<span class="qm" data-tip="How often a full OCR scan runs. Lower catches short-lived PHI sooner but scans take longer. Backtracking automatically closes most of the gap between scans, so 0.5 is a good default.">?</span></label><input type="number" id="si" value="0.5" step="0.1"></div>
+<div><label>Sample interval (s)<span class="qm" data-tip="How often a full OCR scan runs. Lower catches short-lived PII sooner but scans take longer. Backtracking automatically closes most of the gap between scans, so 0.5 is a good default.">?</span></label><input type="number" id="si" value="0.5" step="0.1"></div>
 <div><label>Scan trigger (px)<span class="qm" data-tip="An extra scan fires every time the page scrolls this many pixels, so scrolled-in content is read promptly. Lower = more scans while scrolling.">?</span></label><input type="number" id="st" value="60"></div>
 <div><label>Blur buffer (px)<span class="qm" data-tip="Pixels of blur beyond the tightly-cropped word or face. 8 is a safe default; 3 is a tight cosmetic look. During scrolling a small drift allowance is added automatically.">?</span></label><input type="number" id="pad" value="8"></div>
 <div><label>Face mask shape<span class="qm" data-tip="Ellipse hugs the face — no blurred background corners, the cleanest look (what deface-style tools use). Rectangle is the classic box. Text regions are always rectangular.">?</span></label><select id="fshape">
@@ -1162,21 +1164,21 @@ padding:8px 12px;font-size:13px}
 <div><label>Face expand (0-1)<span class="qm" data-tip="Enlarges detected face boxes by this fraction before the blur buffer, covering hairline and ears. 0 = raw detector box (may leave identifiable edges).">?</span></label><input type="number" id="fex" value="0.15" step="0.05"></div>
 <div><label>Face threshold<span class="qm" data-tip="Face detector confidence cutoff (0-1). Lower catches more faces but risks false positives on face-like patterns; higher is stricter. Default 0.6. Tune with preview + show scores.">?</span></label><input type="number" id="fthr" value="0.6" step="0.05" min="0" max="1"></div>
 <div><label>Detection scale<span class="qm" data-tip="Runs FACE detection on a downscaled copy of each frame for speed (0.2-1.0; e.g. 0.5 = half resolution). Output quality is unaffected — only the detection pass is faster. 1.0 = full resolution (off). Helpful with dense faces on high-res video.">?</span></label><input type="number" id="dscale" value="1.0" step="0.1" min="0.2" max="1"></div>
-<div><label>Bridge gap (s)<span class="qm" data-tip="If the same PHI is seen, missed for a bit, then seen again, gaps up to this long stay blurred — unless scans prove it actually disappeared. Raise to 8-10 for mostly static screens.">?</span></label><input type="number" id="bg" value="4" step="0.5"></div>
-<div><label>Skip first (s) — delay detection<span class="qm" data-tip="Detection window start. NOTHING in the first N seconds is detected or blurred — use only when PHI cannot appear during the intro.">?</span></label>
+<div><label>Bridge gap (s)<span class="qm" data-tip="If the same PII is seen, missed for a bit, then seen again, gaps up to this long stay blurred — unless scans prove it actually disappeared. Raise to 8-10 for mostly static screens.">?</span></label><input type="number" id="bg" value="4" step="0.5"></div>
+<div><label>Skip first (s) — delay detection<span class="qm" data-tip="Detection window start. NOTHING in the first N seconds is detected or blurred — use only when PII cannot appear during the intro.">?</span></label>
 <input type="number" id="skipstart" value="0" min="0" step="1"></div>
 <div><label>Skip last (s) — stop before end<span class="qm" data-tip="Detection window end. Nothing in the last N seconds is detected or blurred.">?</span></label>
 <input type="number" id="skipend" value="0" min="0" step="1"></div>
-<div><label>MRN regex<span class="qm" data-tip="Pattern for medical record numbers. The default matches standalone 6-10 digit numbers (optional short letter prefix); a match only counts as an MRN when it sits near an MRN/chart/acct label or has 7+ digits. Tighten this to your EMR's exact format for fewer false positives.">?</span></label><input type="text" id="mrnrx"
-value="^[A-Za-z]{0,3}\\d{6,10}$"></div>
+<div><label>Regex<span class="qm" data-tip="Your own pattern for the 'mrn' ID-number category — record numbers, claim numbers, account numbers, any identifier format you need caught. Empty = the category detects nothing. Example: \\b\\d{7}\\b for exactly 7 digits, or ^[A-Za-z]{0,3}\\d{6,10}$ for digits with an optional short letter prefix.">?</span></label><input type="text" id="mrnrx"
+value="" placeholder="e.g. \\b\\d{7}\\b — empty = mrn category off"></div>
 </div>
-<label>Categories<span class="qm" data-tip="Which PHI types the detectors look for. Unchecking a category means it is never blurred.">?</span></label>
+<label>Categories<span class="qm" data-tip="Which PII types the detectors look for. Unchecking a category means it is never blurred.">?</span></label>
 <div class="chk" id="cats"></div>
 <div class="row" style="margin:10px 0 4px">
 <a href="zones"><button type="button" class="sec">⬚ Detection zones…</button></a>
 <span id="zstat" class="badge">none configured</span></div>
 <div class="grid2">
-<div><label>Allow names (keep visible)<span class="qm" data-tip="Words never treated as PHI — provider names, app names. One per line. Green chips below are learned automatically from your reviews and always apply too.">?</span></label><textarea id="allow"
+<div><label>Allow names (keep visible)<span class="qm" data-tip="Words never treated as PII — company names, app names. One per line. Green chips below are learned automatically from your reviews and always apply too.">?</span></label><textarea id="allow"
 placeholder="e.g. provider or app names to always keep visible&#10;one per line"></textarea>
 <div id="persistlist" class="plist"></div>
 <div id="persistnote" class="pnote" style="display:none"></div>
@@ -1185,7 +1187,7 @@ placeholder="e.g. provider or app names to always keep visible&#10;one per line"
 <div><label>Always blur (extra names)<span class="qm" data-tip="Words always blurred even if the detectors would miss them (unusual spellings, nicknames). One per line.">?</span></label><textarea id="extra"></textarea></div>
 </div>
 <div class="row" style="margin-top:8px">
-<label style="margin:0"><input type="checkbox" id="nomem"> disable memory<span class="qm" data-tip="Memory recalls confirmed PHI on later frames even when OCR misreads it. Disabling cuts false positives but weakens recall — usually leave off.">?</span></label>
+<label style="margin:0"><input type="checkbox" id="nomem"> disable memory<span class="qm" data-tip="Memory recalls confirmed PII on later frames even when OCR misreads it. Disabling cuts false positives but weakens recall — usually leave off.">?</span></label>
 <label style="margin:0"><input type="checkbox" id="pmode"> preview mode (boxes only)<span class="qm" data-tip="Draws red outline boxes instead of blurring — a fast way to check coverage before committing to a render.">?</span></label>
 <label style="margin:0"><input type="checkbox" id="skiprev"> skip review (blur everything found, render immediately)<span class="qm" data-tip="No human check: every detection is blurred and the render starts right away. Use only with settings you already trust.">?</span></label>
 <label style="margin:0"><input type="checkbox" id="usezones" checked> apply detection zones<span class="qm" data-tip="Restricts each category to the zones drawn in the zone editor. Outside a category's zones NOTHING is blurred, even if detected.">?</span></label>
@@ -1216,10 +1218,10 @@ one at a time, and every category needs a name.</div>
 <div class="card"><h2>App settings <a href="#" style="float:right;font-size:14px;font-weight:400" onclick="location.hash=&quot;&quot;;return false">&#8592; back to jobs</a></h2>
 <div style="font-size:12px;color:#6b7280">Server-level configuration — these apply to every job.</div>
 </div>
-<div class="card" id="modelpanel" style="display:none">
+<div class="card" id="modelpanel">
 <h2>Detection models <span class="qm" data-tip="Face detection works out of the box (built-in YuNet); optional higher-accuracy models can be downloaded and selected here. Plate detection needs a model file (not bundled). Every download is SHA-256 verified against a pinned hash before use, and each entry shows its license — some are non-commercial.">?</span></h2>
- <div id="msec_face" style="display:none"></div>
- <div id="msec_plate" style="display:none"></div>
+ <div id="msec_face"></div>
+ <div id="msec_plate"></div>
 </div>
 <div class="card"><h2>Optional detection engines</h2>
 <div id="extras" style="font-size:13px">loading…</div>
@@ -1269,7 +1271,7 @@ certificate takes effect after a server restart.</div>
 </main>
 <footer style="text-align:center;color:#9ca3af;font-size:12px;padding:18px 12px 26px">
 OpenScrub v%%VERSION%% <span id="upd"></span>· <a href="license" style="color:#6b7280">Apache-2.0 license</a>
-· best-effort redaction — always review output before sharing PHI</footer>
+· best-effort redaction — always review output before sharing PII</footer>
 <script>
 const CATS=["name","dob","phone","ssn","mrn","email","address","card","apikey","ipaddr","plate","face"];
 const CATMODE={};   // category -> "" (default) | "blur" | "box"
@@ -1299,13 +1301,12 @@ function onCatToggle(c,on){
 renderCats();
 
 async function refreshModelPanel(){
- const fon=[...document.querySelectorAll(".cat:checked")].some(e=>e.value==="face");
- const pon=[...document.querySelectorAll(".cat:checked")].some(e=>e.value==="plate");
- document.getElementById("modelpanel").style.display=(fon||pon)?"block":"none";
- for(const [kind,on] of [["face",fon],["plate",pon]]){
+ // always visible: model choice lives on the settings page now, so users
+ // can set up face/plate models before ticking the categories on a job
+ document.getElementById("modelpanel").style.display="block";
+ for(const kind of ["face","plate"]){
   const sec=document.getElementById("msec_"+kind);
-  sec.style.display=on?"block":"none";
-  if(!on)continue;
+  sec.style.display="block";
   try{
    const d=await(await fetch("/api/models/"+kind)).json();
    const dflt=kind==="face"?"Built-in YuNet (no download needed)"
@@ -2027,7 +2028,7 @@ async function vaultStatus(){
   document.getElementById("vsetup").style.display=d.enabled?"none":"block";
   document.getElementById("vunlock").style.display=(d.enabled&&d.locked)?"flex":"none";
   document.getElementById("vlock").style.display=(d.enabled&&!d.locked)?"flex":"none";
-  if(!d.enabled){st.textContent="Disabled — job files (PHI) are stored in plaintext. Set a password to enable at-rest encryption.";st.style.color="#b45309";}
+  if(!d.enabled){st.textContent="Disabled — job files (PII) are stored in plaintext. Set a password to enable at-rest encryption.";st.style.color="#b45309";}
   else if(d.locked){st.textContent="LOCKED — "+d.encrypted_files+" file(s) encrypted on disk. Unlock to work with jobs.";st.style.color="#b91c1c";}
   else{st.textContent="Unlocked — files decrypt while you work; they re-encrypt when you lock or shut down. Losing the password makes encrypted files unrecoverable.";st.style.color="#15803d";}
   if(d.enabled&&!d.locked){
@@ -2199,7 +2200,7 @@ def update_status():
 
 
 # ----------------------------------------------------------------------------
-# Vault: password-based at-rest encryption of the job store (PHI!).
+# Vault: password-based at-rest encryption of the job store (PII!).
 # LOCKED = job files encrypted on disk, job APIs refuse to run.
 # UNLOCKED = decrypted in place so the pipeline works unchanged.
 # NO PASSWORD RESET EXISTS — a lost password means the data is gone.
@@ -2715,10 +2716,10 @@ def main():
                     "the server)")
     ap.add_argument("--http", action="store_true",
                     help="serve plain HTTP (not recommended: video uploads "
-                         "and previews contain PHI and would cross the "
+                         "and previews contain PII and would cross the "
                          "network unencrypted)")
     ap.add_argument("--retain-days", type=int, default=7,
-                    help="auto-delete job folders (which contain PHI) after "
+                    help="auto-delete job folders (which contain PII) after "
                          "this many days (default 7; 0 = keep forever)")
     args = ap.parse_args()
     TOKEN = args.token or None
@@ -2746,7 +2747,7 @@ def main():
             print("    python install.py --yes       (installs everything)")
             print()
             print("or start with --http to serve unencrypted")
-            print("(not recommended: PHI would cross the network in plain text).")
+            print("(not recommended: PII would cross the network in plain text).")
             print("=" * 60)
             if os.name == "nt":
                 input("Press Enter to close.")
@@ -2765,7 +2766,7 @@ def main():
         print("Encryption: vault is LOCKED — unlock in the web UI "
               "(Encryption panel) to access jobs."
               if vault_locked() else "Encryption: vault unlocked.")
-    print("Jobs folder (contains PHI):", JOBS_DIR,
+    print("Jobs folder (contains PII):", JOBS_DIR,
           f"— auto-deleted after {args.retain_days} day(s)" if args.retain_days else "— kept forever")
     print("Do NOT expose this port to the internet.")
     print("=" * 60)
@@ -2777,7 +2778,7 @@ def main():
         else:
             print("    HTTPS with your installed custom certificate.")
     else:
-        print("    WARNING: plain HTTP — PHI crosses the network unencrypted.")
+        print("    WARNING: plain HTTP — PII crosses the network unencrypted.")
     _serve(args.host, args.port, ssl_ctx)
 
 

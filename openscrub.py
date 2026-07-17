@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-openscrub.py — the OpenScrub engine: automatic PII/PHI redaction for
+openscrub.py — the OpenScrub engine: automatic PII redaction for
 videos and screen recordings. Windows + Linux. No name list required.
 
 Detects and blurs 12 categories — names, dates of birth, phone numbers,
@@ -84,7 +84,7 @@ class TesseractBackend(OcrBackend):
             if not txt:
                 continue
             # low-confidence words are normally dropped, but words that are
-            # structurally PHI-shaped (emails, phones, SSNs, dates, long
+            # structurally PII-shaped (emails, phones, SSNs, dates, long
             # digit runs) are rescued: a misread MRN is still an MRN
             if conf < 40 and not (conf >= 5 and phi_shaped(txt)):
                 continue
@@ -256,7 +256,7 @@ def make_ocr(engine, device="auto"):
 
 
 # ----------------------------------------------------------------------------
-# Regex PHI detectors
+# Regex PII detectors
 # ----------------------------------------------------------------------------
 
 RE_DATE = re.compile(
@@ -352,10 +352,12 @@ RE_CITYSTATE_NOZIP = re.compile(
 
 # Generic MRN token shape: a standalone 6-10 digit run, optionally with a
 # short letter prefix (chart/system codes). detect_phi additionally requires
-# a nearby MRN/chart/acct label OR 7+ digits before calling it an MRN, so
-# this stays conservative. Sites with a known MRN format should tighten it
-# via --mrn-regex (CLI) or the MRN regex field (web) for fewer false
-# positives — e.g. \b\d{7}\b for an exact-width MRN.
+# a nearby id-ish label (mrn/record/acct/chart) OR 7+ digits, so it stays
+# conservative. The 'mrn' ID-number category is BRING-YOUR-OWN-PATTERN:
+# --mrn-regex defaults to empty and the category is inactive until the
+# user supplies a regex for their identifier format (record numbers,
+# claim numbers, account numbers…). RE_MRN_DEFAULT survives only as the
+# documented example pattern.
 RE_MRN_DEFAULT = r"^[A-Za-z]{0,3}\d{6,10}$"
 RE_MRN_LABEL = re.compile(r"(?i)\b(mrn|med(?:ical)?\s*rec(?:ord)?|acct|account|chart)\b")
 RE_NAME_LABEL = re.compile(
@@ -364,7 +366,7 @@ RE_NAME_LABEL = re.compile(
 
 # Words that should never be treated as names (UI chrome, medical/scheduling
 # vocab). Lowercase. Extend freely — over-including here only reduces
-# false-positive blur, never PHI leakage, because real names still hit the
+# false-positive blur, never PII leakage, because real names still hit the
 # label heuristic and NER.
 STOPWORDS = {
     "patient", "patients", "name", "date", "birth", "phone", "chart", "home",
@@ -430,7 +432,7 @@ def group_lines(words):
 
 
 # ----------------------------------------------------------------------------
-# Name detection (no patient list required)
+# Name detection (no name list required)
 # ----------------------------------------------------------------------------
 
 class NameDetector:
@@ -563,7 +565,7 @@ class NameDetector:
 
 
 # ----------------------------------------------------------------------------
-# PHI detection on one OCR'd frame
+# PII detection on one OCR'd frame
 # ----------------------------------------------------------------------------
 
 @dataclass
@@ -587,7 +589,7 @@ class Detection:
 
 
 class PhiMemory:
-    """Remembers every string ever confirmed as PHI in this video. At each
+    """Remembers every string ever confirmed as PII in this video. At each
     scan, all OCR'd words are checked against memory, so a name identified
     once gets blurred on every later appearance — anywhere on screen — even
     when NER/heuristics fail on that occurrence. Alpha strings match fuzzily
@@ -680,7 +682,8 @@ def detect_phi(words, lines, t, offset, namer, mrn_re, custom_res=()):
             add(box, "dob", txt, conf)
         elif RE_PHONE.search(txt):
             add(box, "phone", txt, conf)
-        elif mrn_re.search(txt) or mrn_re.search(txt.strip(".,:;()[]")):
+        elif mrn_re is not None and (mrn_re.search(txt)
+                                     or mrn_re.search(txt.strip(".,:;()[]"))):
             digits = re.sub(r"\D", "", txt)
             near_label = any(
                 RE_MRN_LABEL.search(w2)
@@ -1295,7 +1298,7 @@ def merge_detections(dets, hold, scans=None, bridge_gap=4.0, fuzz=None,
     unless an intermediate scan positively saw different, readable text in
     that region (i.e. the content genuinely changed). An empty or unreadable
     region during the gap is treated as an OCR miss and stays covered:
-    fail closed, never flash PHI."""
+    fail closed, never flash PII."""
     dets = sorted(dets, key=lambda d: d.t_start)
     merged = []
 
@@ -1825,7 +1828,7 @@ def render(src, dst, detections, cum, bands, fps, pad, mode, preview,
         t = idx / fps
         ox, oy = cum[min(idx, len(cum) - 1)]
 
-        # 1. tracked PHI boxes, translated by scroll offset
+        # 1. tracked PII boxes, translated by scroll offset
         for d in buckets.get(int(t), []):
             if not (d.t_start - 0.01 <= t <= d.t_end + 0.01):
                 continue
@@ -1892,7 +1895,7 @@ def render(src, dst, detections, cum, bands, fps, pad, mode, preview,
 
 
 # ----------------------------------------------------------------------------
-# Face detection (clinical photos, webcam bubbles — OCR is blind to these)
+# Face detection (photos, people on camera, webcam bubbles — OCR is blind to these)
 # ----------------------------------------------------------------------------
 
 YUNET_URL = ("https://media.githubusercontent.com/media/opencv/opencv_zoo/"
@@ -2965,7 +2968,7 @@ def normalize_vfr(args, cb):
 # ----------------------------------------------------------------------------
 
 def build_parser():
-    ap = argparse.ArgumentParser(description="Blur PHI in screen-recording videos (scroll-aware, no patient list needed).")
+    ap = argparse.ArgumentParser(description="Blur PII in videos and screen recordings (scroll-aware, no name list needed).")
     ap.add_argument("video", nargs="?", help="input video (omit only with --batch)")
     ap.add_argument("-o", "--output")
     ap.add_argument("--config", help="YAML config profile (CLI flags override it)")
@@ -3049,7 +3052,12 @@ def build_parser():
                          "override style per category, e.g. 'ssn=box,face=mosaic'; a "
                          "risky while blurring the rest. Categories not listed "
                          "use --mode.")
-    ap.add_argument("--mrn-regex", default=RE_MRN_DEFAULT)
+    ap.add_argument("--mrn-regex", default="",
+                    help="your own pattern for the 'mrn' ID-number category "
+                         "(record/claim/account numbers — any identifier "
+                         "format). EMPTY (the default) leaves the category "
+                         "inactive: bring your own pattern, e.g. "
+                         r"'\b\d{7}\b' or '%s'." % RE_MRN_DEFAULT)
     ap.add_argument("--scroll-track", choices=["auto", "on", "off"],
                     default="auto",
                     help="screen-scroll tracking + safety bands. 'auto' "
@@ -3072,14 +3080,14 @@ def build_parser():
                          "to enable it.")
     ap.add_argument("--bridge-gap", type=float, default=4.0,
                     help="max seconds to bridge blur across OCR misses when the "
-                         "same PHI reappears in the same region (default 4.0)")
+                         "same PII reappears in the same region (default 4.0)")
     ap.add_argument("--no-memory", action="store_true",
-                    help="disable PHI text memory (recall of previously "
+                    help="disable PII text memory (recall of previously "
                          "confirmed strings)")
     ap.add_argument("--preview", action="store_true",
-                    help="draw boxes (red=PHI, orange=unscanned band) instead of blurring")
+                    help="draw boxes (red=PII, orange=unscanned band) instead of blurring")
     ap.add_argument("--report", help="write JSON audit report with provenance "
-                    "(contains PHI text — protect it)")
+                    "(contains PII text — protect it)")
     ap.add_argument("--from-report", help="skip scanning; re-render from an "
                     "(edited) audit report produced by --report")
     ap.add_argument("--batch", help="process every video in this folder; "
@@ -3092,7 +3100,7 @@ def build_parser():
                          "default 2.5)")
     ap.add_argument("--no-backtrack", action="store_true",
                     help="disable onset backtracking (finding the exact frame "
-                         "where newly detected PHI first appeared)")
+                         "where newly detected PII first appeared)")
     ap.add_argument("--skip-start", type=float, default=0.0,
                     help="don't detect anything during the first N seconds")
     ap.add_argument("--skip-end", type=float, default=0.0,
@@ -3151,7 +3159,7 @@ def _prep_args(args, parser):
 def backtrack_onset(det, buf, cx, cy, cur_small, scale=0.5,
                     ncc_min=0.6):
     """A detection first seen at scan time t may have APPEARED any time since
-    the previous scan — up to a full sample interval of exposed PHI. Walk
+    the previous scan — up to a full sample interval of exposed PII. Walk
     backwards through the recent-frame buffer comparing the detection's
     region visually (no OCR needed: we know where it is and what it looks
     like) until it vanishes; return the earliest frame index where it is
@@ -3203,7 +3211,7 @@ def backtrack_onset(det, buf, cx, cy, cur_small, scale=0.5,
 
 
 def reverse_pass(scans, memory, cats, namer, lenient=76):
-    """After the scan, re-search every OCR'd word against remembered PHI at
+    """After the scan, re-search every OCR'd word against remembered PII at
     a more lenient threshold. Catches near-misses (OCR misreads) of strings
     already confirmed elsewhere in the video; gating rules still apply so a
     one-off false positive can't spread."""
@@ -3298,7 +3306,14 @@ def run_scan(args, cb=None):
     if args.ignore_regions:
         cb.log(f"      ignore regions: {len(args.ignore_regions)}")
 
-    mrn_re = re.compile(args.mrn_regex)
+    # Empty --mrn-regex means the user brought no ID pattern: the category
+    # is INACTIVE, and must be — re.compile("") matches every word, which
+    # would blur everything. Log it loudly so nobody thinks IDs are covered.
+    mrn_pat = getattr(args, "mrn_regex", "") or ""
+    mrn_re = re.compile(mrn_pat) if mrn_pat.strip() else None
+    if mrn_re is None and "mrn" in cats:
+        cb.log("      mrn (ID numbers): no regex configured — category "
+               "inactive. Set one in the Regex field (web) or --mrn-regex.")
     # user-defined categories: only those enabled in --categories run, and a
     # bad pattern fails the run loudly rather than silently detecting nothing
     custom_res = []
@@ -3430,7 +3445,7 @@ def run_scan(args, cb=None):
         t_now = idx / fps
         if t_now < win_start or t_now > win_end:
             # outside the detection window: no scans, and no safety bands
-            # (the user has declared this span PHI-free)
+            # (the user has declared this span PII-free)
             scan_cx, scan_cy = cx, cy
             bands.append((0.0, 0.0))
             idx += 1
@@ -3569,7 +3584,7 @@ def run_scan(args, cb=None):
                 found = kept
 
             if bt_on:
-                # "New" must be POSITIONAL: the same patient name can already
+                # "New" must be POSITIONAL: the same person's name can already
                 # be on screen in a list row when it also appears in a chart
                 # banner after a click — that banner is a new appearance and
                 # needs backtracking even though the text isn't new.
@@ -3679,7 +3694,7 @@ def run_scan(args, cb=None):
             scan_cx, scan_cy = cx, cy
             tracker.anchor()
             if found:
-                cb.log(f"  t={t:7.2f}s  {len(found)} PHI region(s): "
+                cb.log(f"  t={t:7.2f}s  {len(found)} PII region(s): "
                        + ", ".join(sorted({d.category for d in found})))
             if cb.wants_frames:
                 shown = frame.copy()
@@ -3777,7 +3792,7 @@ def run_scan(args, cb=None):
             extra = kept
         if extra:
             cb.log(f"      reverse pass: {len(extra)} additional near-miss "
-                   "region(s) from remembered PHI")
+                   "region(s) from remembered PII")
             raw.extend(extra)
     hold = args.sample_interval + 0.3
     from rapidfuzz import fuzz as _fuzz
@@ -3962,7 +3977,7 @@ def run_scan(args, cb=None):
         cb.log("      *** ZONE WARNING: "
                + ", ".join(f"{c} x{n}" for c, n in sorted(zone_dropped.items()))
                + " detection(s) fell OUTSIDE their category's zones and were "
-                 "NOT blurred. Verify your zones actually cover all PHI. ***")
+                 "NOT blurred. Verify your zones actually cover all PII. ***")
     if recall_counts:
         top = sorted(recall_counts.items(), key=lambda kv: -kv[1])[:8]
         cb.log("      top recalled strings (check for false positives): "
@@ -4000,7 +4015,7 @@ def run_render(args, state, cb=None):
                encoder=args.encoder, cb=cb)
     if args.report:
         write_report(args.report, args, state, output_path=dst)
-        cb.log(f"      audit report: {args.report} (contains PHI text — protect it)")
+        cb.log(f"      audit report: {args.report} (contains PII text — protect it)")
     cb.log("done.")
     return dict(state["stats"], output=dst)
 

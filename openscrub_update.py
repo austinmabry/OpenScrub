@@ -13,7 +13,7 @@ Two install modes are handled automatically:
   sdist from PyPI, verifies its SHA-256 against the hash PyPI publishes
   (mismatch = abort and delete — fail closed), then replaces only the
   files the release ships. Everything local survives an update:
-  openscrub_jobs/ (PHI!), certs/, models/, zones.json, allowlist.txt,
+  openscrub_jobs/ (PII!), certs/, models/, zones.json, allowlist.txt,
   and locally pinned plate-model hashes in plate_models.json. Replaced
   files are first copied to backups/pre-update-<version>/.
 
@@ -40,7 +40,7 @@ PYPI_JSON = "https://pypi.org/pypi/OpenScrub/json"
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 # Local state that an update must never touch. openscrub_jobs contains
-# real PHI on working deployments; certs hold private keys.
+# real PII on working deployments; certs hold private keys.
 PRESERVE = {
     "openscrub_jobs", "phi_blur_jobs", "jobs", "certs", "models",
     "backups", "zones.json", "allowlist.txt", "CLAUDE.local.md",

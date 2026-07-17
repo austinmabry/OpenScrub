@@ -74,9 +74,16 @@ Key classes/functions (locate with grep, line numbers drift):
   → `models/plate_yolov8.onnx` → `models/<registry-id>.onnx` (recommended
   first, adopts registry `input_size`).
 - `detect_phi` — text-category detection over OCR line dicts. Word-loop
-  order matters: card (Luhn-gated) before apikey before SSN.
-- `PhiMemory`, `detect_phi`, PHI-worded log lines: **"PHI" here is the domain
-  term (protected health information), not the old brand. Do not rename.**
+  order matters: card (Luhn-gated) before apikey before SSN. The `mrn`
+  ID-number category is BRING-YOUR-OWN-REGEX: `--mrn-regex` defaults to
+  EMPTY and the category is inactive without a pattern (empty must map to
+  `mrn_re=None`, never `re.compile("")` — that matches every word).
+  `RE_MRN_DEFAULT` survives only as the documented example.
+- `PhiMemory`, `detect_phi` and other `phi`-named INTERNAL identifiers
+  keep their names (report/API compatibility — do not rename). But ALL
+  user-facing text — UI labels, tooltips, log lines, CLI help, README —
+  says **"PII"** or generic wording, never "PHI": the tool is no longer
+  healthcare-branded. Don't reintroduce healthcare terms in UI strings.
 - `load_plate_registry` / `download_plate_model` — TOFU hash pinning: empty
   `sha256` in the registry → first download computes and PINS the hash back
   into `plate_models.json`; later downloads must match or are rejected and
@@ -274,8 +281,8 @@ landed — partial silent misses have happened repeatedly.
 
 - This is a privacy tool: **fail closed.** Over-blur beats under-blur;
   unverified models are rejected loudly, never run silently.
-- No real patient/provider data, names, or clinic-identifying examples in
-  any committed file. Test data is synthetic.
+- No real personal data, names, or client/organization-identifying
+  examples in any committed file. Test data is synthetic.
 - Keep the human-review step prominent in any UX change; "best-effort
   redaction — always review output" is a product principle, not a disclaimer.
 - Report JSON format is a compatibility surface (review UI + rehydration

@@ -5,7 +5,7 @@ labels: bug
 ---
 
 **PRIVACY FIRST: do not attach videos, screenshots, or report.json files
-containing real personal/patient data. Reproduce with synthetic content,
+containing real personal data. Reproduce with synthetic content,
 or describe the failure instead. Audit reports contain detected text in
 plaintext.**
 

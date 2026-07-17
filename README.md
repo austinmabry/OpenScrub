@@ -23,8 +23,8 @@ so a face detected once stays covered even when the detector blinks;
 scroll- and motion-aware, so blur boxes follow content as it moves; and
 onset-aware, so redaction starts on the exact frame a detail first appears
 rather than a half-second late. Defaults are tuned for the hardest case —
-dense, scrolling medical-records screens — but the engine is
-general-purpose.
+dense, scrolling records screens (medical, financial, CRM, support
+consoles) — but the engine is general-purpose.
 
 > Keywords: video redaction · blur faces in video · redact screen recording ·
 > PII redaction · anonymize video · blur license plates · GDPR / CCPA /
@@ -43,8 +43,10 @@ general-purpose.
 - **Redact text by pattern** — bring your own regex for account numbers,
   case numbers, employee IDs, order numbers; built-in
   patterns for SSNs, phone numbers, emails, dates, addresses (including
-  multi-line street/city/state/ZIP blocks), credit/debit card numbers (Luhn-validated), API keys/tokens, IP addresses,
-  and medical record numbers.
+  multi-line street/city/state/ZIP blocks), credit/debit card numbers (Luhn-validated), API keys/tokens, and IP addresses,
+  plus an ID-number category you point at your own identifier format
+  (record numbers, claim numbers, account numbers — set its regex in the
+  web UI or with `--mrn-regex`).
 - **Redact names** — via named-entity recognition plus heuristics, with no
   list required (though you can supply an allowlist to *keep* specific names
   visible and a blocklist to *always* remove others).
@@ -69,9 +71,9 @@ general-purpose.
 
 ## Use cases
 
-PHI redaction for medical practices is the flagship use — it's the hardest
-version of the problem (dense, scrolling, fast-changing screens) and the
-tool is built to handle it. But the same engine fits many privacy workflows:
+The tool is built for the hardest version of the problem — dense,
+scrolling, fast-changing screens full of sensitive text — and the same
+engine fits many privacy workflows:
 
 - **Content creators & tutorials** — strip inboxes, browser tabs, API keys,
   file paths, and notification pop-ups out of screen-recorded walkthroughs
@@ -309,7 +311,7 @@ once; or install your own cert from the main page). Access is open to
 everyone on your network unless you start with `--token <secret>`, which
 then gates every request (recommended). Either way this is LAN-grade
 protection — never expose the port to the internet. The jobs folder on
-the server contains PHI (uploads + reports); protect it accordingly.
+the server contains PII (uploads + reports); protect it accordingly.
 `--retain-days` auto-deletes finished job folders (default 7 days).
 
 ## HDR support
@@ -344,11 +346,11 @@ Notes:
 - The audit report records `hdr_tonemapped` (detection copy was created)
   and `hdr_output` (output kept HDR) in its provenance block.
 
-## ⚠️ Disclaimer — read this before using openscrub on real PHI
+## ⚠️ Disclaimer — read this before using openscrub on real footage
 
-**openscrub is a best-effort assistive tool, not a HIPAA compliance
-guarantee, a de-identification certification, or a substitute for human
-review.** It uses OCR, named-entity recognition, pattern matching, and
+**openscrub is a best-effort assistive tool, not a compliance guarantee
+(GDPR, HIPAA, or otherwise), a de-identification certification, or a
+substitute for human review.** It uses OCR, named-entity recognition, pattern matching, and
 face detection — all of which can and do miss things: low-contrast text,
 unusual names, stylized fonts, partially occluded faces, content visible
 for only a fraction of a second, handwriting, text inside images, and
@@ -357,17 +359,17 @@ categories of identifiers it was never designed to detect.
 **You remain fully responsible for reviewing every output before it is
 shared, published, or distributed.** The built-in review workflow and the
 final QC scrub are not optional extras — they are the compensating
-control this tool is designed around. If a redacted video leaks protected
-health information, that is your exposure, not this software's.
+control this tool is designed around. If a redacted video leaks someone's
+personal information, that is your exposure, not this software's.
 
 Specifically:
 
 - The validation numbers in this README are measurements against a
   **synthetic corpus**. They demonstrate the pipeline works as designed;
   they are **not** a guarantee of performance on your recordings, your
-  EMR, your fonts, or your screen resolution.
+  software, your fonts, or your screen resolution.
 - Audit reports, job folders, and normalized/intermediate video files
-  **contain PHI in plaintext** unless you enable the web UI's
+  **contain PII in plaintext** unless you enable the web UI's
   **Encryption at rest** panel: set a password and job files are
   encrypted (scrypt-derived key, AES-256-GCM) whenever the vault is
   locked or the server shuts down, and decrypted while you work.
@@ -379,13 +381,13 @@ Specifically:
 - The web interface provides **LAN-grade access control at most**
   (HTTPS with an optional access token — set one with `--token`).
   Never expose it to the internet, and run it only on networks and
-  machines already authorized to handle PHI.
+  machines already authorized to handle the footage.
 - This tool addresses **on-screen visual content only**. Audio narration,
   metadata, file names, and embedded subtitles are untouched and can all
-  carry PHI.
+  carry PII.
 - Nothing in this project constitutes legal, compliance, or regulatory
   advice. Consult your privacy officer or counsel for questions about
-  HIPAA, state privacy law, or your organization's obligations.
+  GDPR, HIPAA, state privacy law, or your organization's obligations.
 
 This software is provided "AS IS" without warranty of any kind — see the
 [LICENSE](LICENSE) (Apache-2.0, §7–8) for the governing terms.
@@ -393,12 +395,12 @@ This software is provided "AS IS" without warranty of any kind — see the
 ## Validation
 
 During development the pipeline is scored against a **synthetic corpus**:
-a generator plants fake PHI at known locations across the hard cases —
+a generator plants fake PII at known locations across the hard cases —
 static charts, schedule grids, scrolling notes, OCR-disrupting
 highlights, embedded face photos — and a scorer checks the rendered
 output against the ground truth:
 
-    PHI recall:           100.0%   (102/102 planted samples blurred)
+    PII recall:           100.0%   (102/102 planted samples blurred)
     Benign preservation:  100.0%   (39/39 benign samples left readable)
 
 (measured with the Tesseract fallback engine; PaddleOCR + spaCy NER, the
@@ -412,17 +414,17 @@ so the suite must stay green on every change.
 - **VFR normalization** — OBS/Game Bar variable-frame-rate recordings are
   detected (ffprobe) and normalized to CFR before processing, preventing
   blur-timing drift and audio desync; recorded in provenance.
-- **OCR quality**: low-confidence words that are structurally PHI-shaped
+- **OCR quality**: low-confidence words that are structurally PII-shaped
   (emails, phones, digit runs) are rescued instead of dropped; small text
   triggers an automatic 2x re-OCR; a reverse pass re-searches the whole
-  timeline for near-misses of remembered PHI. `--paranoid` preset maxes
+  timeline for near-misses of remembered PII. `--paranoid` preset maxes
   recall at the cost of false positives (clean up in review).
 - **False-positive economics**: names must be caught by a primary detector
   on two separate scans before memory starts recalling them; a top-recalls
   summary prints after every scan; the web review suggests allowlisting
   strings you disabled everywhere, building a permanent allow-list.
 - **Web**: before/after compare scrubber on finished jobs, ETA on the
-  progress bar, `--retain-days` auto-deletes PHI-bearing job folders
+  progress bar, `--retain-days` auto-deletes PII-bearing job folders
   (default 7 days).
 - **Batch resume** — re-running `--batch` skips files already done
   (`--overwrite` to redo).
@@ -433,7 +435,7 @@ so the suite must stay green on every change.
   `openscrub.py video.mp4 --from-report audit.json` re-renders in seconds
   without re-scanning.
 - **Face detection** — the `face` category (on by default) blurs faces in
-  clinical photos and webcam bubbles, which OCR is blind to. Uses the
+  photos, people on camera, and webcam bubbles, which OCR is blind to. Uses the
   YuNet DNN detector (auto-downloaded, ~230 KB) with a Haar-cascade
   fallback. Faces re-detect on every scan; boxes are expanded 15%.
 - **Config profiles** — `--config profile.yaml` loads per-environment
@@ -475,7 +477,7 @@ python openscrub.py recording.mp4
 python openscrub.py recording.mp4 --allow-names providers.txt
 
 :: tuning pass — draws boxes instead of blurring
-:: (red = detected PHI, orange = unscanned scroll safety band)
+:: (red = detected PII, orange = unscanned scroll safety band)
 python openscrub.py recording.mp4 --preview
 
 :: everything
@@ -484,7 +486,7 @@ python openscrub.py recording.mp4 --allow-names providers.txt ^
     --pad 8 --mode blur --report audit.json -o recording_redacted.mp4
 ```
 
-## How names are detected (no patient list)
+## How names are detected (no name list)
 
 Three stacked signals, any of which triggers a blur:
 1. **spaCy NER** — PERSON entities in reconstructed text lines
@@ -515,20 +517,20 @@ Three mechanisms working together:
 
 Net effect: text detected once stays covered while it moves, and text
 scrolling into view is covered by the safety band before it's even been
-read. Verified in testing with 26/26 PHI regions covered across static,
+read. Verified in testing with 26/26 PII regions covered across static,
 mid-scroll, and post-scroll frames.
 
-## PHI memory and gap bridging
+## PII memory and gap bridging
 
-Two reasoning layers prevent "flash of PHI" from intermittent OCR misses:
+Two reasoning layers prevent "flash of PII" from intermittent OCR misses:
 
-1. **PHI text memory** — every string confirmed as PHI is remembered for
+1. **PII text memory** — every string confirmed as PII is remembered for
    the rest of the video. Each scan checks all OCR'd words against memory
    (fuzzy for names, near-exact for numbers), so "Henderson" identified
    once gets blurred on every later appearance anywhere on screen, even
    where NER/heuristics would fail (e.g. a bare surname mid-sentence).
    Disable with --no-memory. Memory is per-run only; nothing persists.
-2. **Evidence-based gap bridging** — if the same PHI is detected, missed
+2. **Evidence-based gap bridging** — if the same PII is detected, missed
    for a few scans, then re-detected in the same region, the blur is held
    straight through the gap (up to --bridge-gap seconds, default 4.0) —
    UNLESS an intermediate scan positively read different text there,
@@ -543,17 +545,19 @@ Two reasoning layers prevent "flash of PHI" from intermittent OCR misses:
   before anything goes public. Treat this as removing ~95% of the manual
   work.
 - **All dates are blurred**, since the tool can't distinguish DOBs from
-  visit dates. Usually right on a medical UI; drop `dob` from
+  visit dates. Usually right on record-style UIs; drop `dob` from
   --categories if too aggressive for a given recording.
 - **Partial-screen scrolling** (one panel scrolls while the rest is
   static) is tracked as whichever motion dominates. If a recording is
   mostly panel-scrolling, use --preview to check coverage and consider
   --sample-interval 0.25.
-- **MRN default** is standalone 7+ digit runs, or 6+ digits near an
-  MRN/chart/acct label. Tighten with --mrn-regex if benign numbers get
-  caught (e.g. `\b\d{7}\b` for an exact-width MRN).
-- **The --report JSON contains PHI in plaintext.** Handle it like any
-  PHI file.
+- **The `mrn` ID-number category is bring-your-own-pattern**: it stays
+  inactive until you give it a regex for your identifier format (web
+  Regex field or `--mrn-regex`, e.g. `\b\d{7}\b` for exactly 7 digits).
+  A match still needs 7+ digits or a nearby id-ish label (mrn/record/
+  acct/chart) before it's flagged, keeping false positives down.
+- **The --report JSON contains PII in plaintext.** Handle it like any
+  PII file.
 
 ## Recommended workflow
 
@@ -571,7 +575,7 @@ Two reasoning layers prevent "flash of PHI" from intermittent OCR misses:
 | A name slips through | add to --extra-names; install spaCy if not present |
 | Random capitalized words blurred | install spaCy so the pair heuristic turns off, or --heuristic-names off |
 | Text slips through during very fast scrolling | --scan-trigger 40 and/or --sample-interval 0.25 |
-| Benign numbers blurred as MRN | tighten --mrn-regex |
+| Benign numbers blurred by the ID category | tighten your --mrn-regex |
 | Blur box clips edges of text | --pad 12 |
 | Small text missed entirely | install paddleocr; record at native resolution |
 

@@ -56,10 +56,12 @@ def sharp(path, t, box):
 # ---------------------------------------------------------------- unit tests
 
 def test_mrn_regex_precision():
-    """The default MRN token shape is generic: standalone 6-10 digit runs
-    with an optional short letter prefix. (detect_phi separately requires a
-    nearby MRN/chart/acct label OR 7+ digits before flagging.) Site-specific
-    formats belong in --mrn-regex, never hardcoded as the default."""
+    """RE_MRN_DEFAULT is the DOCUMENTED EXAMPLE pattern for the mrn ID
+    category (the category itself is bring-your-own-regex: --mrn-regex
+    defaults to empty and the category stays inactive without one). The
+    example shape: standalone 6-10 digit runs with an optional short letter
+    prefix; detect_phi separately requires a nearby id-ish label OR 7+
+    digits before flagging."""
     rx = openscrub.RE_MRN_DEFAULT
     import re
     r = re.compile(rx)
@@ -71,6 +73,15 @@ def test_mrn_regex_precision():
     assert not r.search("12345678901")       # too long (11+): not MRN-shaped
     assert not r.search("ABCD123456")        # prefix too long
     assert not r.search("4111111111111111")  # card-length: left to card/Luhn
+
+    # empty --mrn-regex = category INACTIVE: detect_phi must not flag digit
+    # runs when no pattern is configured (an empty regex would match every
+    # word — the guard has to be None, not re.compile(""))
+    words = [("1234567", (10, 10, 90, 30), 0.95)]
+    lines = [{"text": "1234567", "box": (10, 10, 90, 30), "words": words}]
+    dets = openscrub.detect_phi(words, lines, 0.0, (0, 0), None, None)
+    assert not any(d.category == "mrn" for d in dets), \
+        "no regex configured -> mrn category must detect nothing"
 
 
 def test_memory_two_sighting_gate():
@@ -120,7 +131,9 @@ def chart(tmp_path_factory):
                    [(150, "Patient: Robert Henderson"),
                     (230, "MRN: 1234567   DOB: 03/15/1978"),
                     (310, "Assessment and Plan documented")])
-    res, dets = run(v)
+    # the mrn ID category is bring-your-own-pattern now (empty default =
+    # inactive), so the fixture supplies the documented example pattern
+    res, dets = run(v, "--mrn-regex", openscrub.RE_MRN_DEFAULT)
     return v, res, dets
 
 

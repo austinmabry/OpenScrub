@@ -11,7 +11,7 @@
   <!-- OpenScrub serves its own TLS (self-signed by default) -->
   <WebUI>https://[IP]:[PORT:8384]/</WebUI>
 
-  <Overview>Local video redaction with human review. OpenScrub detects and blurs PII in videos and screen recordings — faces, license plates, names, dates of birth, phone numbers, SSNs, medical record numbers, emails, addresses, card numbers, API keys, IP addresses, plus your own custom regex categories. Scan, review every detection (one card per person), then render with blur, black-box, or mosaic. Everything runs on this server; no footage leaves your network. This is the CPU image — for NVIDIA GPU acceleration install OpenScrub-Nvidia instead. Best-effort redaction: always review output before sharing.</Overview>
+  <Overview>Local video redaction with human review. OpenScrub detects and blurs PII in videos and screen recordings — faces, license plates, names, dates of birth, phone numbers, SSNs, record/ID numbers, emails, addresses, card numbers, API keys, IP addresses, plus your own custom regex categories. Scan, review every detection (one card per person), then render with blur, black-box, or mosaic. Everything runs on this server; no footage leaves your network. This is the CPU image — for NVIDIA GPU acceleration install OpenScrub-Nvidia instead. Best-effort redaction: always review output before sharing.</Overview>
 
   <Support>https://github.com/austinmabry/OpenScrub/issues</Support>
   <Project>https://github.com/austinmabry/OpenScrub</Project>
