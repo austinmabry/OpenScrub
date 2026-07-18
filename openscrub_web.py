@@ -1223,103 +1223,12 @@ padding:8px 12px;font-size:13px}
 <main>
 <div id="mainview">
 <div class="card" id="newjob">
-<h2>Job Settings <a href="#settings" title="App settings" style="float:right;font-size:20px;text-decoration:none" aria-label="App settings">&#9881;&#65039;</a></h2>
-<label>Upload video(s) <span style="font-weight:400;color:#6b7280">— accepts
- MP4, MOV, MKV, AVI, M4V, WebM, WMV (anything ffmpeg can read)</span></label>
-<input type="file" id="file" accept="video/*" multiple>
-<label>…or path on the server</label>
-<input type="text" id="spath" placeholder="C:\\recordings\\demo.mp4">
-<label>Output format<span class="qm" data-tip="Container for the redacted file. MP4 is right for DaVinci Resolve and most tools; the codec inside is chosen below.">?</span></label>
-<select id="outfmt" style="max-width:340px">
-<option value="mp4">MP4 (recommended)</option>
-<option value="mov">MOV — QuickTime container</option>
-<option value="mkv">MKV — Matroska container</option></select>
-<label>Video codec<span class="qm" data-tip="H.264 plays everywhere and is the safe default. HEVC (H.265) makes noticeably smaller files at the same quality but needs newer players. Note: when the source is HDR and HDR output is set to match source, the render always uses 10-bit HEVC regardless of this setting.">?</span></label>
-<select id="vcodec" style="max-width:340px">
-<option value="h264">H.264 (plays everywhere)</option>
-<option value="hevc">HEVC / H.265 (smaller files)</option></select>
-<label>HDR output<span class="qm" data-tip="Only applies when the SOURCE video is HDR (iPhone Dolby Vision, HLG, HDR10). Match source keeps the output HDR: 10-bit HEVC with the original color signal preserved. Tone-map to SDR converts to standard-range BT.709 for maximum player compatibility. SDR sources always render SDR. Note: without a GPU that encodes 10-bit HEVC, HDR output falls back to the CPU and is much slower.">?</span></label>
-<select id="hdrout" style="max-width:340px">
-<option value="match">match source (keep HDR)</option>
-<option value="sdr">tone-map to SDR</option></select>
-<div class="grid2">
-<div><label>OCR engine<span class="qm" data-tip="Reads on-screen text. Paddle is the most accurate (GPU-capable); Tesseract is the lighter fallback. Auto picks Paddle when installed.">?</span></label><select id="engine">
-<option>auto</option><option>paddle</option><option>tesseract</option></select></div>
-<div><label>OCR device<span class="qm" data-tip="Where PaddleOCR runs. GPU is far faster when CUDA is set up; CPU always works.">?</span></label><select id="device">
-<option>auto</option><option>gpu</option><option>cpu</option></select></div>
-<div><label>Encoder<span class="qm" data-tip="Encoder for the final render. NVENC uses the GPU's dedicated encode chip (fast, frees the CPU); x264 is CPU-only. Auto tests NVENC and falls back safely.">?</span></label><select id="encoder">
-<option>auto</option><option value="nvenc">NVENC (GPU)</option>
-<option value="x264">x264 (CPU)</option></select></div>
-<div><label>Redaction (default)<span class="qm" data-tip="Default style for every category. blur = Gaussian blur; readable structure is destroyed but a blur is, in principle, partially reversible — short high-contrast strings (an SSN or MRN in a fixed font) are the most vulnerable. box = solid black; pixels are set to zero, so nothing is recoverable. Override per category below.">?</span></label><select id="mode" onchange="renderCats()">
-<option>blur</option><option>box</option><option>mosaic</option></select></div>
-<div><label>Sample interval (s)<span class="qm" data-tip="How often a full OCR scan runs. Lower catches short-lived PII sooner but scans take longer. Backtracking automatically closes most of the gap between scans, so 0.5 is a good default.">?</span></label><input type="number" id="si" value="0.5" step="0.1"></div>
-<div><label>Scan trigger (px)<span class="qm" data-tip="An extra scan fires every time the page scrolls this many pixels, so scrolled-in content is read promptly. Lower = more scans while scrolling.">?</span></label><input type="number" id="st" value="60"></div>
-<div><label>Blur buffer (px)<span class="qm" data-tip="Pixels of blur beyond the tightly-cropped word or face. 8 is a safe default; 3 is a tight cosmetic look. During scrolling a small drift allowance is added automatically.">?</span></label><input type="number" id="pad" value="8"></div>
-<div><label>Face mask shape<span class="qm" data-tip="Ellipse hugs the face — no blurred background corners, the cleanest look (what deface-style tools use). Rectangle is the classic box. Text regions are always rectangular.">?</span></label><select id="fshape">
-<option value="ellipse">ellipse (recommended)</option>
-<option value="rect">rectangle</option></select></div>
-<div><label>Face expand (0-1)<span class="qm" data-tip="Enlarges detected face boxes by this fraction before the blur buffer, covering hairline and ears. 0 = raw detector box (may leave identifiable edges).">?</span></label><input type="number" id="fex" value="0.15" step="0.05"></div>
-<div><label>Face threshold<span class="qm" data-tip="Face detector confidence cutoff (0-1). Lower catches more faces but risks false positives on face-like patterns; higher is stricter. Default 0.6. Tune with preview + show scores.">?</span></label><input type="number" id="fthr" value="0.6" step="0.05" min="0" max="1"></div>
-<div><label>Detection scale<span class="qm" data-tip="Runs FACE detection on a downscaled copy of each frame for speed (0.2-1.0; e.g. 0.5 = half resolution). Output quality is unaffected — only the detection pass is faster. 1.0 = full resolution (off). Helpful with dense faces on high-res video.">?</span></label><input type="number" id="dscale" value="1.0" step="0.1" min="0.2" max="1"></div>
-<div><label>Bridge gap (s)<span class="qm" data-tip="If the same PII is seen, missed for a bit, then seen again, gaps up to this long stay blurred — unless scans prove it actually disappeared. Raise to 8-10 for mostly static screens.">?</span></label><input type="number" id="bg" value="4" step="0.5"></div>
-<div><label>Skip first (s) — delay detection<span class="qm" data-tip="Detection window start. NOTHING in the first N seconds is detected or blurred — use only when PII cannot appear during the intro.">?</span></label>
-<input type="number" id="skipstart" value="0" min="0" step="1"></div>
-<div><label>Skip last (s) — stop before end<span class="qm" data-tip="Detection window end. Nothing in the last N seconds is detected or blurred.">?</span></label>
-<input type="number" id="skipend" value="0" min="0" step="1"></div>
-<div><label>Regex<span class="qm" data-tip="Your own pattern for the 'mrn' ID-number category — record numbers, claim numbers, account numbers, any identifier format you need caught. Empty = the category detects nothing. Example: \\b\\d{7}\\b for exactly 7 digits, or ^[A-Za-z]{0,3}\\d{6,10}$ for digits with an optional short letter prefix.">?</span></label><input type="text" id="mrnrx"
-value="" placeholder="e.g. \\b\\d{7}\\b — empty = mrn category off"></div>
-</div>
-<label>Categories<span class="qm" data-tip="Which PII types the detectors look for. Unchecking a category means it is never blurred.">?</span></label>
-<div class="chk" id="cats"></div>
-<div class="row" style="margin:10px 0 4px">
-<a href="zones"><button type="button">＋ New scan</button></a>
-<span class="badge">full editor: windows, zones, audio, trim</span></div>
-<div class="grid2">
-<div><label>Allow names (keep visible)<span class="qm" data-tip="Words never treated as PII — company names, app names. One per line. Green chips below are learned automatically from your reviews and always apply too.">?</span></label><textarea id="allow"
-placeholder="e.g. provider or app names to always keep visible&#10;one per line"></textarea>
-<div id="persistlist" class="plist"></div>
-<div id="persistnote" class="pnote" style="display:none"></div>
-<button type="button" class="sec" id="clearpersist" style="display:none;margin-top:5px;
- padding:4px 10px;font-size:12px" onclick="clearPersist()">Clear all learned words</button></div>
-<div><label>Always blur (extra names)<span class="qm" data-tip="Words always blurred even if the detectors would miss them (unusual spellings, nicknames). One per line.">?</span></label><textarea id="extra"></textarea></div>
-</div>
-<div class="row" style="margin-top:8px">
-<label style="margin:0"><input type="checkbox" id="nomem"> disable memory<span class="qm" data-tip="Memory recalls confirmed PII on later frames even when OCR misreads it. Disabling cuts false positives but weakens recall — usually leave off.">?</span></label>
-<label style="margin:0"><input type="checkbox" id="pmode"> preview mode (boxes only)<span class="qm" data-tip="Draws red outline boxes instead of blurring — a fast way to check coverage before committing to a render.">?</span></label>
-<label style="margin:0"><input type="checkbox" id="skiprev"> skip review (blur everything found, render immediately)<span class="qm" data-tip="No human check: every detection is blurred and the render starts right away. Use only with settings you already trust.">?</span></label>
-<label style="margin:0"><input type="checkbox" id="usezones" checked> apply detection zones<span class="qm" data-tip="Restricts each category to the zones drawn in the zone editor. Outside a category's zones NOTHING is blurred, even if detected.">?</span></label>
-<label style="margin:0"><input type="checkbox" id="drawscores"> show face scores (preview)<span class="qm" data-tip="In preview mode, labels each face box with its detection confidence so you can pick a good Face threshold for your footage.">?</span></label>
-<label style="margin:0"><input type="checkbox" id="densefaces"> dense faces (every frame)<span class="qm" data-tip="Runs the face detector on EVERY frame instead of at scan intervals, so fast-moving faces stay covered (e.g. someone walking through a webcam feed). Slower to render — pair it with a face detection zone to keep it fast. Leave off for static screens where faces don't move.">?</span></label>
-<button id="startbtn" onclick="startJob()">Start scan</button>
-<span id="upstat" style="display:none;font-size:13px;color:#64748b"></span>
-</div>
-</div>
-
-<div class="card" id="scopecard" style="display:none">
-<h2>Scan scope &amp; output trim <span class="qm" data-tip="Scope the job BEFORE scanning. The ruler's white bookends set what the OUTPUT keeps (everything outside is trimmed away and shown dimmed). The orange Detect track holds one or more detection windows — only those ranges are scanned and redacted, and the video between them is skipped entirely. Dragging any handle scrubs the preview live so you can see exactly where you are. Audio tracks each have an M button: muted tracks are removed from the output.">?</span></h2>
-<video id="scopeV" controls muted playsinline style="max-width:100%;max-height:38vh;border-radius:8px;display:block"></video>
-<div style="display:flex;margin-top:8px;background:#0f172a;border-radius:6px;overflow:hidden">
- <div id="scopeHdr" style="width:122px;flex:none;color:#cbd5e1;font-size:11.5px;background:#1e293b"></div>
- <canvas id="scopeTL" style="flex:1;min-width:0;display:block;touch-action:none;cursor:ew-resize"></canvas>
-</div>
-<div class="row" style="font-size:12.5px;align-items:center;margin-top:4px">
- <span id="scopeL" style="color:#6b7280"></span>
- <button class="sec" style="padding:3px 8px;font-size:12px" onclick="scopeAddWin()">+ detection window</button>
- <button class="sec" style="padding:3px 8px;font-size:12px" id="scopeDel" onclick="scopeDelWin()" style="display:none">delete window</button>
- <button class="sec" style="padding:3px 8px;font-size:12px" onclick="scopeReset()">reset</button>
-</div></div>
-<div class="card"><h2>Custom regex categories</h2>
-<div style="font-size:12px;color:#6b7280;margin-bottom:6px">Add your own
-detection categories — claim numbers, case IDs, account formats, anything
-regex-matchable. Each appears as a category checkbox above, in review and
-reports, and on the <a href="zones">detection zones</a> page. No limit;
-one at a time, and every category needs a name.</div>
-<div id="cclist" style="font-size:13px"></div>
-<div class="row" style="gap:8px;flex-wrap:wrap;font-size:13px;margin-top:6px">
- <input id="ccname" placeholder="name (required, e.g. Claim numbers)">
- <input id="ccregex" placeholder="regex, e.g. CLM-\\d{6}" style="min-width:220px">
- <button onclick="ccAdd()">Add category</button>
-</div>
+<h2>New scan <a href="#settings" title="App settings" style="float:right;font-size:20px;text-decoration:none" aria-label="App settings">&#9881;&#65039;</a></h2>
+<div style="font-size:13px;color:#6b7280;margin-bottom:8px">Everything starts in
+the Scan Setup editor: upload a video or pick one already on the server, stack
+detection windows on the timeline, draw per-window zones, mute audio tracks,
+trim the output, and start the scan. Jobs come back here for review.</div>
+<a href="zones"><button type="button" style="font-size:15px">＋ New scan</button></a>
 </div>
 <div class="card"><h2>Jobs</h2><div class="joblist" id="jobs">loading…</div></div>
 <div id="detail"></div>
@@ -1327,6 +1236,14 @@ one at a time, and every category needs a name.</div>
 <div id="settingsview" style="display:none">
 <div class="card"><h2>App settings <a href="#" style="float:right;font-size:14px;font-weight:400" onclick="location.hash=&quot;&quot;;return false">&#8592; back to jobs</a></h2>
 <div style="font-size:12px;color:#6b7280">Server-level configuration — these apply to every job.</div>
+</div>
+<div class="card"><h2>Learned safe words</h2>
+<div style="font-size:12px;color:#6b7280;margin-bottom:6px">Words marked safe
+during reviews load automatically and are applied to every scan, in addition
+to any per-job allow names set in the Scan Setup editor.</div>
+<div id="persistlist" class="plist"></div>
+<div id="persistnote" class="pnote" style="display:none"></div>
+<button type="button" class="sec" id="clearpersist" style="display:none;margin-top:5px;padding:4px 10px;font-size:12px" onclick="clearPersist()">Clear all learned words</button>
 </div>
 <div class="card" id="modelpanel">
 <h2>Detection models <span class="qm" data-tip="Face detection works out of the box (built-in YuNet); optional higher-accuracy models can be downloaded and selected here. Plate detection needs a model file (not bundled). Every download is SHA-256 verified against a pinned hash before use, and each entry shows its license — some are non-commercial.">?</span></h2>
@@ -1385,32 +1302,6 @@ OpenScrub v%%VERSION%% <span id="upd"></span>· <a href="license" style="color:#
 <script>
 const CATS=["name","dob","phone","ssn","mrn","email","address","card","apikey","ipaddr","plate","face"];
 const CATDN={mrn:"regex"};   // display names — ids are a compat surface
-const CATMODE={};   // category -> "" (default) | "blur" | "box"
-let CC=[];          // custom regex categories, loaded by ccLoad()
-function renderCats(){
- const gm=document.getElementById("mode").value;
- document.getElementById("cats").innerHTML=CATS.concat(CC.map(x=>x.id)).map(c=>{
-  const on=CATMODE[c]===undefined?false:CATMODE[c]!=="__off";
-  const m=(CATMODE[c]&&CATMODE[c]!=="__off")?CATMODE[c]:"";
-  return `<span class="catrow">
-   <label><input type="checkbox" class="cat" value="${c}" ${on?"checked":""}
-    onchange="onCatToggle('${c}',this.checked)">${CATDN[c]||c}</label>
-   <select class="catmode" data-c="${c}" onchange="CATMODE['${c}']=this.value||''"
-    ${on?"":"disabled"} title="redaction style for ${c}">
-    <option value="">${gm} (default)</option>
-    <option value="blur" ${m==="blur"?"selected":""}>blur</option>
-    <option value="box" ${m==="box"?"selected":""}>box</option>
-    <option value="mosaic" ${m==="mosaic"?"selected":""}>mosaic</option>
-   </select></span>`;
- }).join("");
-}
-function onCatToggle(c,on){
- CATMODE[c]=on?"":"__off";
- const sel=document.querySelector(`.catmode[data-c="${c}"]`);
- if(sel)sel.disabled=!on;
-}
-renderCats();
-
 async function refreshModelPanel(){
  // always visible: model choice lives on the settings page now, so users
  // can set up face/plate models before ticking the categories on a job
@@ -1462,261 +1353,8 @@ async function dlModel(kind,id,btn){
    else{btn.disabled=false;btn.textContent="retry";btn.title=s.error||"download failed";}}
  },500);
 }
-document.getElementById("cats").addEventListener("change",refreshModelPanel);
 refreshModelPanel();
 let CUR=null, EN={}, MAN=[], DUR=0, POLL=null, PHIST=[], LOGN=0, SHELLPH=null, JOBSJSON="";
-
-function opts(){return{
- engine:engine.value,device:device.value,encoder:encoder.value,mode:mode.value,
- sample_interval:+si.value,scan_trigger:+st.value,pad:+pad.value,bridge_gap:+bg.value,
- mrn_regex:mrnrx.value,face_expand:+fex.value,skip_review:skiprev.checked,use_zones:usezones.checked,
- skip_start:+skipstart.value,skip_end:+skipend.value,out_format:outfmt.value,
- // Windows/trim are sent as FRACTIONS of the (client) duration, not
- // seconds: iPhone HEVC/VFR files report a slightly different length in
- // the browser than the server measures, which desynced absolute seconds.
- // The server resolves these against ITS OWN duration — always in register.
- clip_frac:(SCOPE.dur&&(SCOPE.cin>0.05||SCOPE.cout<SCOPE.dur-0.05))
-   ?((SCOPE.cin/SCOPE.dur).toFixed(4)+"-"+(SCOPE.cout/SCOPE.dur).toFixed(4)):"",
- detect_windows_frac:(SCOPE.dur&&!(SCOPE.dets.length===1
-   &&SCOPE.dets[0][0]<=SCOPE.cin+0.05&&SCOPE.dets[0][1]>=SCOPE.cout-0.05))
-   ?SCOPE.dets.map(x=>(x[0]/SCOPE.dur).toFixed(4)+"-"+(x[1]/SCOPE.dur).toFixed(4)).join(","):"",
- mute_tracks:SCOPE.audio.length===1&&SCOPE.audio[0].muted?"all"
-   :SCOPE.audio.map((a,i)=>a.muted?String(i+1):"").filter(Boolean).join(","),
- categories:[...document.querySelectorAll(".cat:checked")].map(e=>e.value).join(","),
- mode_map:Object.entries(CATMODE).filter(([c,m])=>m==="blur"||m==="box")
-   .map(([c,m])=>`${c}=${m}`).join(","),
- allow_names:allow.value,extra_names:extra.value,hdr_output:hdrout.value,
- codec:vcodec.value,face_shape:fshape.value,
- no_memory:nomem.checked,preview_mode:pmode.checked,
- dense_faces:densefaces.checked,face_threshold:+fthr.value,
- detect_scale:+dscale.value,draw_scores:drawscores.checked}}
-
-let UPLOADING=false;
-// ---- pre-scan scope: editor-style timeline ---------------------------
-// rows: ruler (clip in/out bookends + playhead) / Detect track (multiple
-// orange windows, clamped inside the bookends) / one lane per audio track
-// with an M(ute) button. Dragging ANY handle scrubs the preview live.
-let SCOPE={dur:0,cin:0,cout:0,dets:[],audio:[],sel:-1,drag:null,
-          primed:false,seekTo:null,seeking:false};
-const SC_RULER=24,SC_ROW=22;
-document.getElementById("file").addEventListener("change",e=>{
- const f=e.target.files&&e.target.files[0];
- if(!f){document.getElementById("scopecard").style.display="none";SCOPE.dur=0;return;}
- const v=document.getElementById("scopeV");
- SCOPE.primed=false;SCOPE.seekTo=null;SCOPE.seeking=false;
- v.muted=true;v.playsInline=true;v.preload="auto";
- v.src=URL.createObjectURL(f);
- document.getElementById("scopecard").style.display="block";
- v.onloadedmetadata=()=>{
-  SCOPE.dur=v.duration||0;SCOPE.cin=0;SCOPE.cout=SCOPE.dur;
-  SCOPE.dets=[[0,SCOPE.dur]];SCOPE.sel=-1;
-  const n=(v.audioTracks&&v.audioTracks.length)||1;
-  SCOPE.audio=Array.from({length:n},(_,i)=>({muted:false,
-   label:n>1?("A"+(i+1)):"Audio"}));
-  scopeHdr();scopeDraw();};
- // redraw the playhead as each seek lands, and pump the next queued seek
- v.addEventListener("seeked",()=>{SCOPE.seeking=false;scopePump();scopeDraw();});
- v.addEventListener("timeupdate",scopeDraw);
- // best-effort prime once data is ready (may be blocked outside a gesture;
- // the first drag primes it for sure — see scopePrime)
- v.addEventListener("loadeddata",scopePrime,{once:true});
- scopeHook();
-});
-function scopePrime(){
- // iOS Safari will NOT render a frame set via currentTime until the video
- // has played at least once. Do a silent play/pause to unlock scrubbing so
- // the user never has to hit the play button first.
- if(SCOPE.primed)return;SCOPE.primed=true;
- const v=document.getElementById("scopeV");
- try{const p=v.play();
-  if(p&&p.then)p.then(()=>v.pause()).catch(()=>{});else v.pause();
- }catch(err){}
-}
-function scopeHdr(){
- const h=document.getElementById("scopeHdr");
- let html=`<div style="height:${SC_RULER}px;line-height:${SC_RULER}px;padding-left:8px;color:#64748b">timeline</div>`;
- html+=`<div style="height:${SC_ROW}px;line-height:${SC_ROW}px;padding-left:8px;border-top:1px solid #0f172a">Detect</div>`;
- SCOPE.audio.forEach((a,i)=>{
-  html+=`<div style="height:${SC_ROW}px;line-height:${SC_ROW}px;padding-left:8px;border-top:1px solid #0f172a;display:flex;align-items:center;gap:6px">
-   <span style="flex:1">${a.label}</span>
-   <button onclick="scopeMute(${i})" title="mute: remove this audio track from the output"
-    style="width:20px;height:16px;line-height:14px;padding:0;font-size:10.5px;border-radius:3px;border:none;cursor:pointer;
-    background:${a.muted?"#dc2626":"#334155"};color:${a.muted?"#fff":"#94a3b8"}">M</button>
-   <span style="width:6px"></span></div>`;});
- h.innerHTML=html;
-}
-function scopeMute(i){SCOPE.audio[i].muted=!SCOPE.audio[i].muted;scopeHdr();scopeDraw();}
-function scH(){return SC_RULER+SC_ROW*(1+SCOPE.audio.length);}
-function scX(t,w){return Math.max(0,Math.min(w,t/Math.max(0.1,SCOPE.dur)*w));}
-function scFmt(t){const d=new Date(Math.max(0,t)*1000).toISOString();
- return t>=3600?d.substr(11,8):d.substr(14,5);}
-function scopeDraw(){
- const cv=document.getElementById("scopeTL");if(!cv||!SCOPE.dur)return;
- const w=cv.clientWidth||600,H=scH();cv.width=w;cv.height=H;
- cv.style.height=H+"px";
- const g=cv.getContext("2d");
- g.fillStyle="#0b1120";g.fillRect(0,0,w,H);
- // ruler ticks
- g.fillStyle="#1e293b";g.fillRect(0,0,w,SC_RULER);
- g.fillStyle="#64748b";g.font="9px ui-monospace,monospace";
- const stepT=SCOPE.dur>1200?300:SCOPE.dur>240?60:SCOPE.dur>60?15:5;
- for(let t=0;t<=SCOPE.dur;t+=stepT){
-  g.fillRect(scX(t,w),SC_RULER-6,1,6);g.fillText(scFmt(t),scX(t,w)+2,10);}
- // detect track
- const dy=SC_RULER;
- g.fillStyle="#181207";g.fillRect(0,dy,w,SC_ROW);
- SCOPE.dets.forEach((seg,i)=>{
-  g.fillStyle=i===SCOPE.sel?"#fbbf24":"#b45309";
-  g.fillRect(scX(seg[0],w),dy+2,Math.max(2,scX(seg[1],w)-scX(seg[0],w)),SC_ROW-4);
-  g.fillStyle="#fde68a";
-  g.fillRect(scX(seg[0],w),dy+2,3,SC_ROW-4);g.fillRect(scX(seg[1],w)-3,dy+2,3,SC_ROW-4);});
- // audio lanes
- SCOPE.audio.forEach((a,i)=>{
-  const y=SC_RULER+SC_ROW*(1+i);
-  g.fillStyle=a.muted?"#111827":"#14532d";g.fillRect(0,y,w,SC_ROW);
-  g.fillStyle=a.muted?"#374151":"#22c55e";
-  g.fillRect(scX(SCOPE.cin,w),y+7,Math.max(2,scX(SCOPE.cout,w)-scX(SCOPE.cin,w)),SC_ROW-14);
-  if(a.muted){g.fillStyle="#6b7280";g.font="9px sans-serif";
-   g.fillText("muted — removed from output",scX(SCOPE.cin,w)+6,y+14);}});
- // dim everything outside the clip in/out, full height (editor-style)
- g.fillStyle="rgba(2,6,23,0.72)";
- g.fillRect(0,0,scX(SCOPE.cin,w),H);g.fillRect(scX(SCOPE.cout,w),0,w-scX(SCOPE.cout,w),H);
- // clip bookends: white brackets on the ruler, lines full height
- g.fillStyle="#f8fafc";
- for(const t of [SCOPE.cin,SCOPE.cout]){
-  g.fillRect(scX(t,w)-1,0,2,H);
-  g.beginPath();
-  const x=scX(t,w),d=t===SCOPE.cin?1:-1;
-  g.moveTo(x,2);g.lineTo(x+8*d,2);g.lineTo(x,12);g.closePath();g.fill();}
- // playhead follows the preview player
- const v=document.getElementById("scopeV");
- g.strokeStyle="#e2e8f0";g.beginPath();
- g.moveTo(scX(v.currentTime||0,w),0);g.lineTo(scX(v.currentTime||0,w),H);g.stroke();
- const full=SCOPE.cin<0.05&&SCOPE.cout>SCOPE.dur-0.05;
- const dfull=SCOPE.dets.length===1&&SCOPE.dets[0][0]<=SCOPE.cin+0.05&&SCOPE.dets[0][1]>=SCOPE.cout-0.05;
- document.getElementById("scopeL").textContent=
-  `keep: ${full?"whole video":scFmt(SCOPE.cin)+"\u2013"+scFmt(SCOPE.cout)}`+
-  ` \u00b7 detect: ${dfull?"everything kept":SCOPE.dets.map(s=>scFmt(s[0])+"\u2013"+scFmt(s[1])).join(", ")}`+
-  (SCOPE.audio.some(a=>a.muted)?" \u00b7 muted: "+SCOPE.audio.filter(a=>a.muted).map(a=>a.label).join(","):"");
- document.getElementById("scopeDel").style.display=SCOPE.sel>=0?"inline-block":"none";
-}
-function scopeSeek(t){
- // Seek-QUEUE (not a time throttle): remember the latest target, and only
- // issue the next seek once the previous one has landed ('seeked'). This
- // keeps the preview locked to the drag without flooding the decoder, and
- // never drops the final position the way a fixed throttle can.
- SCOPE.seekTo=Math.max(0,Math.min(SCOPE.dur||t,t));
- scopePump();
-}
-function scopePump(){
- if(SCOPE.seeking||SCOPE.seekTo==null)return;
- const v=document.getElementById("scopeV");
- const t=SCOPE.seekTo;SCOPE.seekTo=null;SCOPE.seeking=true;
- try{v.currentTime=t;}catch(e){SCOPE.seeking=false;}
-}
-function scopeClamp(){
- // clip bookends push detection windows inward, exactly as far as they
- // moved; windows squeezed to nothing are dropped
- SCOPE.dets=SCOPE.dets.map(s=>[Math.max(s[0],SCOPE.cin),Math.min(s[1],SCOPE.cout)])
-   .filter(s=>s[1]-s[0]>0.2);
- if(SCOPE.sel>=SCOPE.dets.length)SCOPE.sel=-1;
-}
-function scopeAddWin(){
- if(!SCOPE.dur)return;
- const v=document.getElementById("scopeV");
- const c=Math.min(Math.max(v.currentTime||0,SCOPE.cin),SCOPE.cout);
- const half=Math.max(1,SCOPE.dur*0.03);
- let s=[Math.max(SCOPE.cin,c-half),Math.min(SCOPE.cout,c+half)];
- SCOPE.dets.push(s);SCOPE.sel=SCOPE.dets.length-1;scopeDraw();
-}
-function scopeDelWin(){
- if(SCOPE.sel>=0){SCOPE.dets.splice(SCOPE.sel,1);SCOPE.sel=-1;scopeDraw();}
-}
-function scopeReset(){
- SCOPE.cin=0;SCOPE.cout=SCOPE.dur;SCOPE.dets=[[0,SCOPE.dur]];SCOPE.sel=-1;
- SCOPE.audio.forEach(a=>a.muted=false);scopeHdr();scopeDraw();
-}
-function scopeHook(){
- const cv=document.getElementById("scopeTL");
- if(cv.dataset.hooked)return;cv.dataset.hooked=1;
- const tAt=e=>{const r=cv.getBoundingClientRect();
-  return Math.max(0,Math.min(SCOPE.dur,(e.clientX-r.left)/r.width*SCOPE.dur));};
- cv.addEventListener("pointerdown",e=>{
-  cv.setPointerCapture(e.pointerId);
-  scopePrime();                    // unlock iOS scrubbing on first touch
-  const r=cv.getBoundingClientRect(),px=e.clientX-r.left,py=e.clientY-r.top,
-        w=cv.clientWidth,t=tAt(e);
-  // clip bookends grab from any row (they span full height)
-  if(Math.abs(px-scX(SCOPE.cin,w))<7){SCOPE.drag={k:"cin"};scopeSeek(SCOPE.cin);return;}
-  if(Math.abs(px-scX(SCOPE.cout,w))<7){SCOPE.drag={k:"cout"};scopeSeek(SCOPE.cout);return;}
-  if(py>=SC_RULER&&py<SC_RULER+SC_ROW){        // detect track
-   for(let i=0;i<SCOPE.dets.length;i++){
-    const s=SCOPE.dets[i];
-    if(Math.abs(px-scX(s[0],w))<7){SCOPE.drag={k:"d0",i};SCOPE.sel=i;scopeSeek(s[0]);scopeDraw();return;}
-    if(Math.abs(px-scX(s[1],w))<7){SCOPE.drag={k:"d1",i};SCOPE.sel=i;scopeSeek(s[1]);scopeDraw();return;}
-   }
-   const hit=SCOPE.dets.findIndex(s=>t>=s[0]&&t<=s[1]);
-   SCOPE.sel=hit;
-   if(hit>=0){SCOPE.drag={k:"dmove",i:hit,off:t-SCOPE.dets[hit][0]};}
-   scopeSeek(t);scopeDraw();return;
-  }
-  // ruler / audio rows: seek the preview to the clicked time
-  SCOPE.drag={k:"seek"};scopeSeek(t);scopeDraw();
- });
- cv.addEventListener("pointermove",e=>{
-  if(!SCOPE.drag)return;
-  const t=tAt(e),d=SCOPE.drag;
-  if(d.k==="cin"){SCOPE.cin=Math.min(t,SCOPE.cout-0.3);scopeClamp();scopeSeek(SCOPE.cin);}
-  else if(d.k==="cout"){SCOPE.cout=Math.max(t,SCOPE.cin+0.3);scopeClamp();scopeSeek(SCOPE.cout);}
-  else if(d.k==="d0"){const s=SCOPE.dets[d.i];
-   s[0]=Math.max(SCOPE.cin,Math.min(t,s[1]-0.3));scopeSeek(s[0]);}
-  else if(d.k==="d1"){const s=SCOPE.dets[d.i];
-   s[1]=Math.min(SCOPE.cout,Math.max(t,s[0]+0.3));scopeSeek(s[1]);}
-  else if(d.k==="dmove"){const s=SCOPE.dets[d.i],len=s[1]-s[0];
-   let a=Math.max(SCOPE.cin,Math.min(t-d.off,SCOPE.cout-len));
-   SCOPE.dets[d.i]=[a,a+len];scopeSeek(a);}
-  else if(d.k==="seek"){scopeSeek(t);}
-  scopeDraw();
- });
- cv.addEventListener("pointerup",()=>{SCOPE.drag=null;scopeDraw();});
-}
-
-function startJob(){
- if(UPLOADING)return;                       // double-click guard
- if(!file.files.length&&!spath.value.trim()){
-  alert("Choose a video file or enter a server path first.");return}
- if(![...document.querySelectorAll(".cat:checked")].length){
-  if(!confirm("No detection categories are checked, so nothing will be "+
-   "found automatically. Run a MANUAL-ONLY job? You can draw and track "+
-   "objects yourself in review (Preview video & edit boxes)."))return}
- const fd=new FormData();
- let bytes=0;
- for(const f of file.files){fd.append("video",f);bytes+=f.size}
- fd.append("server_path",spath.value);
- fd.append("options",JSON.stringify(opts()));
- UPLOADING=true;
- const btn=document.getElementById("startbtn");
- const ust=document.getElementById("upstat");
- btn.disabled=true;ust.style.display="inline";
- ust.textContent=bytes?"uploading… 0%":"submitting…";
- // XHR instead of fetch: it reports UPLOAD progress, which is the whole
- // wait when the UI is reached over the internet (upstream-bound)
- const xhr=new XMLHttpRequest();
- xhr.open("POST","api/jobs");
- xhr.upload.onprogress=e=>{if(e.lengthComputable){
-  const p=Math.round(100*e.loaded/e.total);
-  ust.textContent=p<100?`uploading… ${p}%`:"upload received — queuing…"}};
- const done=()=>{UPLOADING=false;btn.disabled=false;ust.style.display="none"};
- xhr.onerror=()=>{done();alert("Upload failed — check the connection and try again.")};
- xhr.onload=()=>{
-  done();
-  let j={};try{j=JSON.parse(xhr.responseText)}catch(e){}
-  if(xhr.status>=400||j.error){alert(j.error||("Upload failed (HTTP "+xhr.status+")"));return}
-  file.value="";spath.value="";
-  loadJobs(); if(j.jobs&&j.jobs.length)openJob(j.jobs[0]);
- };
- xhr.send(fd);
-}
 
 async function loadJobs(){
  const r=await fetch("api/jobs");
@@ -2482,14 +2120,6 @@ async function removeCerts(){
  alert((await r.json()).note);
  loadCertInfo();
 }
-async function zoneStatus(){
- const el=document.getElementById("zstat");
- if(!el)return;   // badge retired with the Scan Setup editor
- const z=await (await fetch("api/zones")).json();
- const n=Object.keys(z).length;
- el.textContent=
-  n?(n+" class"+(n>1?"es":"")+" zoned — outside them nothing is blurred"):"none configured (full frame)";
-}
 async function updCheck(){
  try{
   const d=await (await fetch("/api/update_check")).json();
@@ -2556,28 +2186,6 @@ async function vaultDoLock(){
  alert(r.ok?("Locked — "+(await r.json()).encrypted+" file(s) encrypted."):await r.text());
  vaultStatus();loadJobs();
 }
-async function ccLoad(){
- try{
-  CC=await (await fetch("/api/custom_cats")).json();
-  renderCats();
-  document.getElementById("cclist").innerHTML=CC.length?CC.map(c=>
-   `<div class="row" style="justify-content:space-between;padding:3px 0"><span><b>${c.label}</b> <code style="color:#6b7280">${c.regex}</code></span><button onclick="ccDel('${c.id}')">remove</button></div>`).join(""):'<span style="color:#9ca3af">none yet</span>';
- }catch(e){}
-}
-async function ccAdd(){
- const name=document.getElementById("ccname").value.trim(),rx=document.getElementById("ccregex").value;
- if(!name){alert("Name the new category first — the name is required and appears on the zones page.");return;}
- if(!rx){alert("A regex pattern is required.");return;}
- const r=await fetch("/api/custom_cats",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:name,regex:rx})});
- if(!r.ok){alert(await r.text());return;}
- document.getElementById("ccname").value="";document.getElementById("ccregex").value="";
- ccLoad();
-}
-async function ccDel(id){
- if(!confirm("Remove this category? Future scans stop detecting it; existing reports are unaffected."))return;
- await fetch("/api/custom_cats/"+id,{method:"DELETE"});
- ccLoad();
-}
 let EXTPOLL=null;
 async function extrasStatus(){
  try{
@@ -2601,7 +2209,7 @@ async function extraInstall(id){
  if(!r.ok){alert(await r.text());return;}
  extrasStatus();
 }
-zoneStatus();loadPersist();loadCertInfo();loadJobs();setInterval(loadJobs,5000);
+loadPersist();loadCertInfo();loadJobs();setInterval(loadJobs,5000);
 function showView(){
  const s=location.hash==="#settings";
  document.getElementById("mainview").style.display=s?"none":"block";
@@ -2609,7 +2217,7 @@ function showView(){
  if(s)window.scrollTo(0,0);
 }
 window.addEventListener("hashchange",showView);
-updCheck();vaultStatus();extrasStatus();ccLoad();showView();
+updCheck();vaultStatus();extrasStatus();showView();
 </script></body></html>"""
 
 

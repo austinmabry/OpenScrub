@@ -155,6 +155,8 @@ details .inner .full{grid-column:1/-1}
   <div><label>HDR output</label><select id="hdrout"><option value="match">match source</option>
    <option value="sdr">tone-map to SDR</option></select></div>
   <div><label>Codec</label><select id="vcodec"><option>h264</option><option>hevc</option></select></div>
+  <div><label>Output format</label><select id="outfmt"><option>mp4</option>
+   <option>mov</option><option>mkv</option></select></div>
   <div class="full"><label>Allow names (keep visible, one per line)</label>
    <textarea id="allow" rows="2"></textarea></div>
   <div class="full"><label>Always blur (extra names)</label>
@@ -590,8 +592,16 @@ async function loadCustomList(){
   $("cclist").innerHTML=cats.map(x=>
    '<span class="chip"><span class="dot" style="background:'
    +(CATS[x.id]||"#94a3b8")+'"></span>'+x.id
-   +' <b style="font-family:monospace">'+(x.regex||"")+'</b></span>').join("");
+   +' <b style="font-family:monospace">'+(x.regex||"")+'</b>'
+   +' <span style="cursor:pointer;color:#f87171" title="remove this category"'
+   +' onclick="delCustom(\''+x.id+'\')">&#10005;</span></span>').join("");
  }catch(e){}
+}
+async function delCustom(id){
+ if(!confirm("Remove this category? Future scans stop detecting it; "
+   +"existing reports are unaffected."))return;
+ await fetch("/api/custom_cats/"+id,{method:"DELETE"});
+ location.reload();
 }
 function unionCats(){
  const u={};S.wins.forEach(w=>Object.keys(w.cats).forEach(c=>u[c]=true));
@@ -610,6 +620,7 @@ async function startScan(){
   face_expand:+$("fex").value,face_threshold:+$("fthr").value,
   face_shape:$("fshape").value,detect_scale:+$("dscale").value,
   hdr_output:$("hdrout").value,codec:$("vcodec").value,
+  out_format:$("outfmt").value,
   allow_names:$("allow").value,extra_names:$("extra").value,
   dense_faces:$("densefaces").checked,skip_review:$("skiprev").checked,
   no_memory:$("nomem").checked,preview_mode:$("pmode").checked,
@@ -631,11 +642,24 @@ async function startScan(){
  fd.append("server_path",$("spath").value.trim());
  fd.append("options",JSON.stringify(o));
  const btns=document.querySelectorAll("button");btns.forEach(b=>b.disabled=true);
- const res=await fetch("/api/jobs",{method:"POST",body:fd});
- if(res.ok){location.href="/";}
- else{btns.forEach(b=>b.disabled=false);
-  let msg="upload failed";try{msg=(await res.json()).error||msg;}catch(e){}
-  alert("Could not start: "+msg);}
+ const sum=$("summary");
+ // XHR instead of fetch: it reports UPLOAD progress, which is the whole
+ // wait when the UI is reached over the internet (upstream-bound)
+ const xhr=new XMLHttpRequest();
+ xhr.open("POST","/api/jobs");
+ xhr.upload.onprogress=e=>{if(e.lengthComputable){
+  const p=Math.round(100*e.loaded/e.total);
+  sum.textContent=p<100?("uploading… "+p+"%"):"upload received — queuing…";}};
+ const fail=msg=>{btns.forEach(b=>b.disabled=false);summary();
+  alert("Could not start: "+msg);};
+ xhr.onerror=()=>fail("upload failed — check the connection and try again");
+ xhr.onload=()=>{
+  let j={};try{j=JSON.parse(xhr.responseText);}catch(e){}
+  if(xhr.status>=400||j.error)fail(j.error||("HTTP "+xhr.status));
+  else location.href="/";
+ };
+ sum.textContent=S.file?"uploading… 0%":"submitting…";
+ xhr.send(fd);
 }
 setMode("draw");loadCustomList();
 </script></body></html>

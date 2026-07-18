@@ -143,19 +143,17 @@ Key classes/functions (locate with grep, line numbers drift):
   to SDR (the web render phase does exactly this). Dolby Vision RPUs are
   dropped by design (proprietary; HLG/HDR10 base layer survives). Report
   provenance records `hdr_tonemapped` + `hdr_output`.
-- Pre-scan scoping: the main page shows a "Scan scope & output trim" card
-  when a local file is picked (client-side objectURL preview — nothing
-  uploads until Start). Editor-style timeline (DaVinci-inspired): header
-  column + canvas rows — ruler with WHITE clip bookends (`--clip-start/
-  --clip-end`; dims outside, full height), an orange DETECT track holding
-  MULTIPLE windows. The web sends windows/trim as FRACTIONS of duration
+- Pre-scan scoping: all scoping lives in the Scan Setup editor (below);
+  the timeline has WHITE clip bookends (`--clip-start/--clip-end`; dims
+  outside, full height) and detection windows.
+  The web sends windows/trim as FRACTIONS of duration
   (`--detect-windows-frac`, `--clip-frac`; the server resolves them
   against its OWN ffprobe duration — iPhone HEVC/VFR reported a
   different length in-browser than the server measured, desyncing
   absolute seconds). CLI keeps `--detect-windows`/`--clip-start/end`
   (seconds). Windows still override skip fields;
   windows clamp inside the bookends, and bookends pushed inward DRAG
-  window edges with them), and one lane per audio track with an M button
+  window edges with them, and one lane per audio track with an M button
   (`--mute-audio-tracks "1,2"|"all"` — muted tracks are REMOVED from the
   output; audio_ffmpeg_args now carries ALL source tracks, not just the
   first, and span redaction applies per kept track). Dragging any handle
@@ -165,8 +163,10 @@ Key classes/functions (locate with grep, line numbers drift):
   offsets otherwise. Trim is SDR-only for now (HDR logs a NOTE and renders full
   length). Category ids are a compat surface but "mrn" DISPLAYS as
   "regex" everywhere (CATDN map in PAGE, DN maps in zones page).
-- Unified Scan Setup editor (`/zones`, zones_ui.py): the full-featured
-  successor to the homepage scope card. One editor: video preview (local
+- Unified Scan Setup editor (`/zones`, zones_ui.py): the ONLY intake
+  path — the homepage is a jobs dashboard (New scan card → /zones, Jobs
+  list, review/detail, settings incl. the Learned safe words card); it
+  has NO upload form. One editor: video preview (local
   file objectURL or `/api/server_video?path=` — Range-aware send_file
   behind server_path_error), STACKED detection windows each on its OWN
   timeline lane (windows may overlap: faces 1.2–19.5s AND names 5–7s),
@@ -184,9 +184,11 @@ Key classes/functions (locate with grep, line numbers drift):
   covering window ⇒ unrestricted for that category; a category in NO
   covering window is dropped silently (win_inactive counter); window
   cats union into the engine load set, and merged window coverage feeds
-  the fast-skip gating. Report provenance records `windows`. The
-  homepage form still exists for one release (validation overlap); its
-  button is "＋ New scan" → /zones.
+  the fast-skip gating. Report provenance records `windows`. Upload uses
+  XHR for progress %; `out_format` and every option the old homepage
+  form carried lives in the editor's Advanced accordion. PAGE keeps
+  `const CATS`/`CATDN` (review rendering + the alignment rule) even
+  though the homepage checkbox grid is gone.
 - Targeted redaction: `track_manual_region` template-tracks a user-drawn
   box through a chosen time window (both directions from t_ref, adaptive
   template refresh gated on confidence >0.80, stops fail-closed below
@@ -271,12 +273,12 @@ no confirmation delay. Verify alignment:
 `grep -o 'name,dob[^"]*' openscrub.py` vs the two JS lists.
 
 USER-DEFINED categories (custom_categories.json in the data root) are
-separate from this rule: the web injects them dynamically — into the
-checkbox row (JS `CC` via /api/custom_cats), job argv (`--custom-regex
-id=pattern`, engine activates only ids present in --categories), and the
-zones page (server-side injection anchored on `face:"#ec4899"` in
-ZONES_PAGE — keep that literal stable; customs land between it and the
-`ignore` pseudo-class).
+separate from this rule: managed on the Scan Setup page (add/remove via
+/api/custom_cats; adding reloads the page because colors are injected
+server-side, anchored on `face:"#ec4899"` in ZONES_PAGE — keep that
+literal stable; customs land between it and the `ignore` pseudo-class).
+They ride every job argv as `--custom-regex id=pattern`; the engine
+activates only ids present in --categories.
 
 The zones page also has an `ignore` pseudo-class (never-blur zones,
 color #334155): NOT a detection category. Ignore zones are GLOBAL (not
