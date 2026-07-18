@@ -597,7 +597,7 @@ class PhiMemory:
     one differing digit (so benign numbers don't collide with MRNs)."""
 
     IMMEDIATE = {"dob", "phone", "ssn", "email", "mrn", "address",
-                 "apikey", "ipaddr", "card", "plate"}
+                 "apikey", "ipaddr", "card", "plate", "person"}
 
     def __init__(self, threshold=82, name_sightings=2):
         from rapidfuzz import fuzz
@@ -2224,7 +2224,7 @@ def user_data_dir():
     return d
 
 
-MODEL_KINDS = ("plate", "face")
+MODEL_KINDS = ("plate", "face", "person")
 
 
 def model_registry_path(kind="plate"):
@@ -2245,7 +2245,12 @@ def model_registry_path(kind="plate"):
     # credit membership-in-a-module-constant as a taint barrier (its
     # "uncontrolled data in path expression" alerts survived it); a literal
     # in every branch leaves nothing to flag, for this or any scanner.
-    fname = "face_models.json" if kind == "face" else "plate_models.json"
+    if kind == "face":
+        fname = "face_models.json"
+    elif kind == "person":
+        fname = "person_models.json"
+    else:
+        fname = "plate_models.json"
     here = os.path.dirname(os.path.abspath(__file__))
     packaged = os.path.join(here, fname)
     if not install_is_readonly():
@@ -2386,6 +2391,12 @@ class PlateDetector:
 
     INPUT = 640          # YOLOv8 square input
     MODEL_ENV = "OPENSCRUB_PLATE_MODEL"
+    KIND = "plate"                     # registry kind + log label
+    LABEL = "plate detector"
+    DEFAULT_BASE = "plate_yolov8.onnx"  # conventional model filename
+    WANT_CLASS = None    # None = single-class model (plates); an int keeps
+                         # only that class id from multi-class COCO models
+                         # (PersonDetector uses 0 = person)
 
     def __init__(self, cb=None, model_path=None, thresh=0.35, nms=0.45,
                  expand=0.08, input_size=640):
@@ -2413,15 +2424,15 @@ class PlateDetector:
             roots.append(user_data_dir())
         for r in roots:
             candidates += [
-                os.path.join(r, "models", "plate_yolov8.onnx"),
-                os.path.join(r, "plate_yolov8.onnx"),
+                os.path.join(r, "models", self.DEFAULT_BASE),
+                os.path.join(r, self.DEFAULT_BASE),
             ]
         # registry-downloaded models are saved as models/<registry-id>.onnx;
         # search those too (recommended entries first), and pick up each
         # model's declared input size from the registry.
         reg_size = {}
         try:
-            reg = load_plate_registry()
+            reg = load_model_registry(self.KIND)
             for m in sorted(reg, key=lambda x: not x.get("recommended", False)):
                 for r in roots:
                     mp = os.path.join(r, "models", "%s.onnx" % m.get("id"))
@@ -2433,9 +2444,10 @@ class PlateDetector:
         if found in reg_size:
             self.INPUT = reg_size[found]
         if not found:
-            self.log("      plate detector: no model found — plate category "
-                     "inactive. Place a YOLOv8 plate ONNX at models/"
-                     "plate_yolov8.onnx or set $%s." % self.MODEL_ENV)
+            self.log("      %s: no model found — %s category "
+                     "inactive. Place a YOLO ONNX at models/%s or set $%s."
+                     % (self.LABEL, self.KIND, self.DEFAULT_BASE,
+                        self.MODEL_ENV))
             return
         base = os.path.basename(found)
         # Backend 1 — OpenCV DNN. Handles raw YOLO detect heads (1,5,8400) and
@@ -2472,7 +2484,7 @@ class PlateDetector:
                 except Exception:
                     pass
         if self.net is not None:
-            self.log("      plate detector: loaded %s (OpenCV DNN)" % base)
+            self.log("      %s: loaded %s (OpenCV DNN)" % (self.LABEL, base))
             return
         # Backend 2 — onnxruntime. REQUIRED for "end2end" exports whose baked-in
         # NonMaxSuppression node OpenCV's DNN cannot build — that includes EVERY
@@ -2483,10 +2495,11 @@ class PlateDetector:
         try:
             import onnxruntime as ort
         except Exception:
-            self.log("      plate detector: OpenCV DNN can't load %s (%s) and "
-                     "onnxruntime is not installed — plate category INACTIVE. "
-                     "Install onnxruntime (pip install onnxruntime) to enable "
-                     "the license-plate models." % (base, cv2_err))
+            self.log("      %s: OpenCV DNN can't load %s (%s) and "
+                     "onnxruntime is not installed — %s category INACTIVE. "
+                     "Install onnxruntime (pip install onnxruntime) to "
+                     "enable these models." % (self.LABEL, base, cv2_err,
+                                               self.KIND))
             return
         try:
             # Run plates on the GPU when possible: prefer CUDA if this
@@ -2505,12 +2518,12 @@ class PlateDetector:
             self.ort = sess
             self._ort_in = sess.get_inputs()[0].name
             self._ort_out = [o.name for o in sess.get_outputs()]
-            self.log("      plate detector: loaded %s (onnxruntime, %s)"
-                     % (base, sess.get_providers()[0]))
+            self.log("      %s: loaded %s (onnxruntime, %s)"
+                     % (self.LABEL, base, sess.get_providers()[0]))
         except Exception as e:
-            self.log("      plate detector: failed to load model — OpenCV DNN "
-                     "(%s) and onnxruntime (%s) both errored. Plate category "
-                     "INACTIVE." % (cv2_err, e))
+            self.log("      %s: failed to load model — OpenCV DNN "
+                     "(%s) and onnxruntime (%s) both errored. %s category "
+                     "INACTIVE." % (self.LABEL, cv2_err, e, self.KIND))
             self.net = None
             self.ort = None
 
@@ -2591,10 +2604,15 @@ class PlateDetector:
                     x1, y1, x2, y2, score = (float(r[1]), float(r[2]),
                                              float(r[3]), float(r[4]),
                                              float(r[6]))
+                    kls = float(r[5])
                 else:              # x1,y1,x2,y2,score,class
                     x1, y1, x2, y2, score = (float(r[0]), float(r[1]),
                                              float(r[2]), float(r[3]),
                                              float(r[4]))
+                    kls = float(r[5]) if len(r) > 5 else 0.0
+                # multi-class COCO models (person): keep ONLY the wanted class
+                if self.WANT_CLASS is not None and int(kls) != self.WANT_CLASS:
+                    continue
                 if score < self.thresh:
                     continue
                 # scale from letterboxed INPUT-space back to full frame
@@ -2611,7 +2629,7 @@ class PlateDetector:
             out = out.T
         boxes, scores = [], []
         for row in out:
-            score = float(row[4])
+            score = float(row[4 + (self.WANT_CLASS or 0)])
             if score < self.thresh:
                 continue
             cx, cy, bw, bh = row[0], row[1], row[2], row[3]
@@ -2629,6 +2647,27 @@ class PlateDetector:
             x2 = min(w, bx + bw + ex); y2 = min(h, by + bh + ey)
             res.append((float(x1), float(y1), float(x2), float(y2), scores[i]))
         return res
+
+
+class PersonDetector(PlateDetector):
+    """Full-BODY person detector: a face blur hides the face, but clothing,
+    build, tattoos and gait still identify someone — the person category
+    blurs the whole silhouette box. Same dual-backend YOLO ONNX machinery
+    as PlateDetector; multi-class COCO models are filtered to class 0
+    (person). Curated models live in person_models.json (YOLOv10 end2end
+    exports: NMS-free (1,300,6) output, handled by the 6-col decode path).
+    INERT without a model file — exactly like plates."""
+
+    MODEL_ENV = "OPENSCRUB_PERSON_MODEL"
+    KIND = "person"
+    LABEL = "person detector"
+    DEFAULT_BASE = "person_yolov8.onnx"
+    WANT_CLASS = 0       # COCO class 0 = person
+
+    def __init__(self, cb=None, model_path=None, thresh=0.5, nms=0.45,
+                 expand=0.06, input_size=640):
+        super().__init__(cb, model_path=model_path, thresh=thresh, nms=nms,
+                         expand=expand, input_size=input_size)
 
 
 def _nms_boxes(boxes, thr=0.4):
@@ -3271,6 +3310,15 @@ def build_parser():
     ap.add_argument("--plate-threshold", type=float, default=0.35,
                     help="license-plate detector confidence cutoff (0-1). "
                          "Default 0.35.")
+    ap.add_argument("--person-model", default=None,
+                    help="path to a YOLO person-detection ONNX model (see "
+                         "person_models.json). If omitted, OpenScrub looks "
+                         "for models/person_yolov8.onnx or "
+                         "$OPENSCRUB_PERSON_MODEL. The person (full-body "
+                         "blur) category is inactive without a model.")
+    ap.add_argument("--person-threshold", type=float, default=0.5,
+                    help="person detector confidence cutoff (0-1). "
+                         "Default 0.5.")
     ap.add_argument("--face-threshold", type=float, default=0.6,
                     help="face detector confidence cutoff (0-1). Lower catches "
                          "more faces but risks false positives; higher is "
@@ -3407,7 +3455,7 @@ def build_parser():
     ap.add_argument("--vfr", choices=["auto", "ignore"], default="auto",
                     help="auto: detect variable frame rate and normalize to "
                          "CFR before processing (default); ignore: skip check")
-    ap.add_argument("--categories", default="name,dob,phone,ssn,mrn,email,address,card,apikey,ipaddr,plate,face")
+    ap.add_argument("--categories", default="name,dob,phone,ssn,mrn,email,address,card,apikey,ipaddr,plate,face,person")
     return ap
 
 
@@ -3572,7 +3620,7 @@ def run_scan(args, cb=None):
     # OCR output into detect_phi. Load ONLY what the selected categories
     # actually need — a faces-only job must not pay for PaddleOCR (seconds
     # of startup + 2-3 GB of RAM) or spaCy.
-    text_cats = cats - {"face", "plate"}
+    text_cats = cats - {"face", "plate", "person"}
 
     cb.log(f"[1/4] OCR engine   (openscrub v{VERSION})")
     if text_cats:
@@ -3611,6 +3659,10 @@ def run_scan(args, cb=None):
     plater = (PlateDetector(cb, model_path=getattr(args, "plate_model", None),
                             thresh=getattr(args, "plate_threshold", 0.35))
               if "plate" in cats else None)
+    personer = (PersonDetector(cb,
+                               model_path=getattr(args, "person_model", None),
+                               thresh=getattr(args, "person_threshold", 0.5))
+                if "person" in cats else None)
     detect_scale = float(getattr(args, "detect_scale", 1.0) or 1.0)
     if args.ignore_regions:
         cb.log(f"      ignore regions: {len(args.ignore_regions)}")
@@ -3954,6 +4006,29 @@ def run_scan(args, cb=None):
                     "plate", "plate", round(pconf, 3), (cx, cy),
                     dense=True))
                 dense_now.append((px1, py1, px2, py2))
+        # per-frame full-body person detection: bodies move like faces do, so
+        # (like dense faces/plates) re-detect every frame at the true
+        # position. Only runs if a person model is loaded — INERT otherwise.
+        if (personer is not None and personer.available()
+                and "person" in cats and idx % max(1, dense_stride) == 0):
+            bhold = 0.3 * max(1, dense_stride) / fps
+            _bsc = _scope_at(t_now)
+            _bzr = _bsc.get("person")
+            for (bx1, by1, bx2, by2, bconf) in (
+                    personer.find(frame, detect_scale) if "person" in _bsc
+                    else []):
+                if _bzr and not in_any_zone((bx1, by1, bx2, by2), _bzr):
+                    continue
+                if in_ignore_region((bx1, by1, bx2, by2),
+                                    args.ignore_regions):
+                    continue
+                raw.append(Detection(
+                    t_now, t_now + bhold,
+                    (int(bx1 - cx), int(by1 - cy),
+                     int(bx2 - cx), int(by2 - cy)),
+                    "person", "person", round(bconf, 3), (cx, cy),
+                    dense=True))
+                dense_now.append((bx1, by1, bx2, by2))
         moved = abs(cx - scan_cx) + abs(cy - scan_cy)
         step_eff, trig_eff = step, args.scan_trigger
         if adapt:

@@ -35,6 +35,7 @@ except Exception:
 DATAS = [
     (os.path.join(ROOT, "plate_models.json"), "."),
     (os.path.join(ROOT, "face_models.json"), "."),
+    (os.path.join(ROOT, "person_models.json"), "."),
     (os.path.join(ROOT, "LICENSE"), "."),
 ] + _ort_datas
 HIDDEN = [

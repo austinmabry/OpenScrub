@@ -107,7 +107,7 @@ assert 'CUDAExecutionProvider' in provs, ('onnxruntime CUDA provider missing: %r
 print('onnxruntime', ort.__version__, '| providers', provs)"
 
 # ---- app layers: tiny, change every release
-COPY pyproject.toml README.md LICENSE NOTICE plate_models.json face_models.json ./
+COPY pyproject.toml README.md LICENSE NOTICE plate_models.json face_models.json person_models.json ./
 COPY openscrub.py openscrub_web.py openscrub_setup.py openscrub_update.py \
      openscrub_vault.py zones_ui.py install.py test_openscrub.py ./
 COPY assets/openscrub.ico assets/

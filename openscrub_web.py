@@ -44,13 +44,20 @@ import zones_ui
 
 # Anchor to the script's own folder, NOT the process working directory —
 # double-clicking a .py on Windows can launch with cwd=C:\Windows\system32
+# Computed ONCE at import: the vault's atexit lock hook runs during
+# interpreter teardown, where module globals like __file__ may already be
+# gone (a real NameError silently skipped the shutdown lock and left job
+# files in plaintext). A captured constant survives teardown.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
+
 def _data_root():
     """Writable data root. From a normal checkout/deploy: the script's own
     folder (unchanged behavior). When pip-installed (module lives inside
     site-packages) or frozen into an exe (PyInstaller under Program Files),
     use a per-user data dir instead — PII jobs and TLS keys must never be
     written into the install tree."""
-    here = os.path.dirname(os.path.abspath(__file__))
+    here = _HERE
     if ("site-packages" in here or "dist-packages" in here
             or getattr(sys, "frozen", False)):
         # Confine the env-derived root to the user's own profile before any
@@ -334,7 +341,8 @@ def build_args(job, for_render=False):
     # whose file is missing falls back to the engine default silently-safe
     # ladder (YuNet / plate auto-search).
     sel = load_model_select()
-    for kind, flag in (("face", "--face-model"), ("plate", "--plate-model")):
+    for kind, flag in (("face", "--face-model"), ("plate", "--plate-model"),
+                       ("person", "--person-model")):
         mid = sel.get(kind)
         if mid:
             p = find_model_file("%s.onnx" % mid)
@@ -982,10 +990,18 @@ def _models_state(kind):
         status = ("Active: " + active) if p else \
             "Active: built-in YuNet (works out of the box — models below are optional upgrades)"
     else:
-        active = os.environ.get("OPENSCRUB_PLATE_MODEL")
+        # plate and person share the same model-required pattern: INERT
+        # (loudly) until a model is installed or provided
+        env = ("OPENSCRUB_PERSON_MODEL" if kind == "person"
+               else "OPENSCRUB_PLATE_MODEL")
+        base = ("person_yolov8.onnx" if kind == "person"
+                else "plate_yolov8.onnx")
+        what = ("person (full-body blur)" if kind == "person"
+                else "plate")
+        active = os.environ.get(env)
         if not (active and os.path.exists(active)):
             active = ((find_model_file("%s.onnx" % sel) if sel else None)
-                      or find_model_file("plate_yolov8.onnx"))
+                      or find_model_file(base))
         if not active:
             for m in models:
                 p = find_model_file("%s.onnx" % m.get("id"))
@@ -993,21 +1009,22 @@ def _models_state(kind):
                     active = p
                     break
         status = ("Active model: " + os.path.basename(active)) if active else \
-            "No model installed — plate detection is INACTIVE until you install or provide one."
+            ("No model installed — %s detection is INACTIVE until you "
+             "install or provide one." % what)
     return {"models": out, "selected": sel, "status": status,
-            "active": bool(active) if kind == "plate" else True}
+            "active": bool(active) if kind != "face" else True}
 
 
 @app.route("/api/models/<kind>")
 def models_list(kind):
-    if kind not in ("face", "plate"):
+    if kind not in ("face", "plate", "person"):
         abort(404)
     return jsonify(_models_state(kind))
 
 
 @app.route("/api/models/<kind>/select", methods=["POST"])
 def models_select(kind):
-    if kind not in ("face", "plate"):
+    if kind not in ("face", "plate", "person"):
         abort(404)
     mid = (request.get_json(force=True) or {}).get("id", "")
     if mid and not any(m.get("id") == mid
@@ -1025,7 +1042,7 @@ _model_dl = {"state": "idle", "pct": 0, "error": "", "id": "", "kind": ""}
 @app.route("/api/models/<kind>/<mid>/download", methods=["POST"])
 def model_download(kind, mid):
     """Download+verify a registry model in a background thread."""
-    if kind not in ("face", "plate"):
+    if kind not in ("face", "plate", "person"):
         abort(404)
     entry = next((m for m in openscrub.load_model_registry(kind)
                   if m.get("id") == mid), None)
@@ -1249,6 +1266,7 @@ to any per-job allow names set in the Scan Setup editor.</div>
 <h2>Detection models <span class="qm" data-tip="Face detection works out of the box (built-in YuNet); optional higher-accuracy models can be downloaded and selected here. Plate detection needs a model file (not bundled). Every download is SHA-256 verified against a pinned hash before use, and each entry shows its license — some are non-commercial.">?</span></h2>
  <div id="msec_face"></div>
  <div id="msec_plate"></div>
+ <div id="msec_person"></div>
 </div>
 <div class="card"><h2>Optional detection engines</h2>
 <div id="extras" style="font-size:13px">loading…</div>
@@ -1300,12 +1318,12 @@ FOOT_HTML = """<footer style="text-align:center;color:#9ca3af;font-size:12px;pad
 OpenScrub v%%VERSION%% <span id="upd"></span>· <a href="license" style="color:#94a3b8">Apache-2.0 license</a>
 · best-effort redaction — always review output before sharing PII</footer>"""
 
-APP_JS = """const CATDN={mrn:"regex"};   // display names — ids are a compat surface
+APP_JS = """const CATDN={mrn:"regex",person:"person (full body)"};   // display names — ids are a compat surface
 async function refreshModelPanel(){
  // always visible: model choice lives on the settings page now, so users
  // can set up face/plate models before ticking the categories on a job
  document.getElementById("modelpanel").style.display="block";
- for(const kind of ["face","plate"]){
+ for(const kind of ["face","plate","person"]){
   const sec=document.getElementById("msec_"+kind);
   sec.style.display="block";
   try{
@@ -1318,7 +1336,7 @@ async function refreshModelPanel(){
       onchange="selModel('${kind}','${val}')" style="margin:0" title="${disabled?'download the model first':'use this model'}">
      <div style="flex:1;min-width:0">${inner}</div>${right||""}
     </div>`;
-   let h=`<div style="font-weight:600;font-size:13.5px;margin:8px 0 2px">${kind==="face"?"Face":"License-plate"} model</div>
+   let h=`<div style="font-weight:600;font-size:13.5px;margin:8px 0 2px">${kind==="face"?"Face":kind==="person"?"Person (full-body blur)":"License-plate"} model</div>
     <div style="font-size:12px;margin-bottom:4px;color:${d.active?'#4ade80':'#fbbf24'}">${d.status}</div>`;
    h+=row("",!d.selected,false,
      `<div style="font-size:12.5px;font-weight:600">${dflt}</div>`);
@@ -2380,15 +2398,20 @@ def _vault_lock_now():
 
 
 def _vault_lock_atexit():
-    if vault_enabled() and VAULT["key"] is not None:
-        busy = any(j.get("phase") in ("queued", "scanning", "rendering",
-                                      "queued_render") for j in JOBS.values())
-        if busy:
-            print("vault: NOT locking on exit — a job was still running; "
-                  "job files remain in plaintext. Restart and lock.")
-            return
-        n = _vault_lock_now()
-        print("vault: locked on shutdown (%d file(s) encrypted)" % n)
+    try:
+        if vault_enabled() and VAULT["key"] is not None:
+            busy = any(j.get("phase") in ("queued", "scanning", "rendering",
+                                          "queued_render") for j in JOBS.values())
+            if busy:
+                print("vault: NOT locking on exit — a job was still running; "
+                      "job files remain in plaintext. Restart and lock.")
+                return
+            n = _vault_lock_now()
+            print("vault: locked on shutdown (%d file(s) encrypted)" % n)
+    except Exception as e:
+        # never die silently here: a swallowed error means plaintext on disk
+        print("vault: LOCK ON SHUTDOWN FAILED (%s) — job files may remain "
+              "in plaintext. Restart the server and use the Lock button." % e)
 
 
 @app.route("/api/vault")
@@ -2850,6 +2873,27 @@ def main():
     os.makedirs(JOBS_DIR, exist_ok=True)
     import atexit
     atexit.register(_vault_lock_atexit)
+    # docker stop sends SIGTERM. Python's default SIGTERM disposition kills
+    # the process WITHOUT running atexit hooks — and as PID 1 in a container
+    # an unhandled SIGTERM is ignored outright, so the container just waits
+    # out the grace period and gets SIGKILLed: either way the vault never
+    # locked and job files stayed in plaintext (verified empirically).
+    # sys.exit() is NOT enough here — cheroot's serve loop swallows the
+    # SystemExit (also verified) — so the handler locks the vault itself and
+    # then hard-exits. os._exit skips atexit, so the lock cannot run twice.
+    # NOTE: encryption must finish within the stop grace period — give
+    # Docker a generous one (docker stop -t 120).
+    import signal
+    _terming = []
+
+    def _on_sigterm(sig, frm):
+        if _terming:                      # second SIGTERM: just die
+            os._exit(1)
+        _terming.append(1)
+        print("SIGTERM — locking vault before exit…")
+        _vault_lock_atexit()
+        os._exit(0)
+    signal.signal(signal.SIGTERM, _on_sigterm)
     threading.Thread(target=_autolock_watcher, daemon=True).start()
     rehydrate_jobs()
     threading.Thread(target=worker, daemon=True).start()

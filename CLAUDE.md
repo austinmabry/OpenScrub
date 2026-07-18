@@ -1,7 +1,7 @@
 # CLAUDE.md — OpenScrub
 
 OpenScrub is a local, GPU-accelerated video redaction tool: it detects and
-blurs PII (faces, names, SSNs, addresses, license plates — 12 categories) in
+blurs PII (faces, names, SSNs, addresses, license plates, full-body person blur — 13 categories) in
 videos and screen recordings, with a human-review step before anything is
 trusted. Apache-2.0. Python 3.10+. Runs on Windows/Linux; primary dev/deploy
 target is Windows 10 + NVIDIA RTX 3060.
@@ -20,10 +20,11 @@ target is Windows 10 + NVIDIA RTX 3060.
 | `docker/` | `Dockerfile.opencv-cuda` builds the CUDA-OpenCV base image (rare, via opencv-cuda-base.yml); `Dockerfile.cuda` FROMs it (base published to ghcr; bump the FROM tag only when the base is rebuilt). |
 | `plate_models.json` | Curated license-plate model registry (see PLATES.md). |
 | `face_models.json` | Curated optional face-model registry (CenterFace/SCRFD); built-in YuNet needs no file. Ships everywhere plate_models.json does (wheel, sdist, Dockerfiles, PyInstaller spec, updater pin-carry). |
+| `person_models.json` | Curated person-model registry (YOLOv10 ONNX from onnx-community on HF, AGPL — download-only, never bundled; hashes PRE-pinned, validated at authoring). Ships everywhere plate_models.json does. |
 | `fetch_plate_models.py` | Alt path to fetch plate models via the open-image-models pip package. |
 | `openscrub_update.py` | `openscrub-update` command + web self-update backend: PyPI version check, sha256-verified sdist download, data-preserving folder update (PRESERVE set), TOFU pin carry-forward. Ships in the wheel. |
-| `openscrub_vault.py` | At-rest encryption for the job store: scrypt keystore, chunked AES-256-GCM files (`.osvault`), lock/unlock tree walkers. NO password reset by design. Ships in the wheel. |
-| `test_openscrub.py` | pytest suite (42 tests). Must stay green. |
+| `openscrub_vault.py` | At-rest encryption for the job store: scrypt keystore, chunked AES-256-GCM files (`.osvault`), lock/unlock tree walkers. NO password reset by design. Ships in the wheel. Lock-on-shutdown lives in openscrub_web: a SIGTERM handler (docker stop; locks then os._exit — sys.exit is swallowed by cheroot) + an atexit hook (Ctrl+C; uses the import-time `_HERE` constant because `__file__` is gone during interpreter teardown — both failure modes were real and verified). Encryption must finish inside the container stop grace period (`docker stop -t 120`). |
+| `test_openscrub.py` | pytest suite (43 tests). Must stay green. |
 | `tools/make_icons.py` | Regenerates every icon/logo asset from `assets/badge_master.png`. |
 | `tools/make_wordmark.py` | Regenerates the typeset Poppins wordmarks (navy + white). |
 | `assets/` | Brand assets. `badge_master.png` (canonical, mosaic+brackets style) and `badge_master_blurbox_alt.png` (alternate) are the sources; everything else is generated. |
@@ -73,6 +74,21 @@ Key classes/functions (locate with grep, line numbers drift):
   Model resolution: `--plate-model` arg → `$OPENSCRUB_PLATE_MODEL`
   → `models/plate_yolov8.onnx` → `models/<registry-id>.onnx` (recommended
   first, adopts registry `input_size`).
+- `PersonDetector(PlateDetector)` — full-BODY person blur ("person"
+  category): a face blur hides the face but clothing/build/gait still
+  identify someone. Same dual-backend YOLO ONNX machinery as plates with
+  `WANT_CLASS=0` (multi-class COCO outputs filtered to person; end2end
+  6/7-col rows carry class in col 5, raw v8 heads put class-0 score at
+  row[4] — the SAME channel single-class models use, so plate decode is
+  byte-identical). ALWAYS dense (per-frame, like faces), feeds the same
+  assign/smooth track pipeline → ONE review card per tracked body
+  (displays as "person (full body)"; SFace grouping stays face-only).
+  INERT without a model (exactly like plates); `--person-model` →
+  `$OPENSCRUB_PERSON_MODEL` → `models/person_yolov8.onnx` → registry ids.
+  `--person-threshold` default 0.5. Registry models are YOLOv10 end2end
+  ONNX (NMS-free (1,300,6)) from onnx-community on HF with PRE-pinned
+  sha256 (validated on real footage at authoring time) — AGPL-3.0,
+  registry-download only, never bundled.
 - `detect_phi` — text-category detection over OCR line dicts. Word-loop
   order matters: card (Luhn-gated) before apikey before SSN. The `mrn`
   ID-number category is BRING-YOUR-OWN-REGEX: `--mrn-regex` defaults to
@@ -176,7 +192,11 @@ Key classes/functions (locate with grep, line numbers drift):
   zones between windows, clip bookends drag window edges inward
   (`clampWins`; windows <0.2s drop; the last window resets to
   whole-clip), audio lanes with M mute buttons, iOS prime + seek-queue
-  live scrubbing. Serialization: startScan POSTs the normal /api/jobs
+  live scrubbing. Categories default ALL OFF (every new window too —
+  nothing is detected until the user checks a category or draws a zone;
+  the summary line under Start shows an amber "nothing will be detected"
+  warning while empty, and startScan confirms manual-only). Serialization:
+  startScan POSTs the normal /api/jobs
   FormData with `options.windows` = [{t0,t1 (FRACTIONS of duration),
   cats:[ids], zones:{cat:[normrects]}}] + `options.ignore_zones`;
   build_args writes them to `windows.json` in the job dir and passes
@@ -275,15 +295,17 @@ defined — there was a real UnboundLocalError from ordering once.
 
 ## The 12-category alignment rule (easy to break!)
 
-The category list exists in TWO places that must stay identical:
-1. `openscrub.py` — argparse default `"name,dob,phone,ssn,mrn,email,address,card,apikey,ipaddr,plate,face"`
+The category list (13 now) exists in TWO places that must stay identical:
+1. `openscrub.py` — argparse default `"name,dob,phone,ssn,mrn,email,address,card,apikey,ipaddr,plate,face,person"`
 2. `zones_ui.py` — `const CATS={...}` color map in ZONES_PAGE (the app's
    only JS category list since the homepage checkbox grid was retired;
    `CATDN` in APP_JS keeps display names for review headings)
 
 When adding a category, update both + the `IMMEDIATE` set if it needs
 no confirmation delay. Verify alignment:
-`grep -o 'name,dob[^"]*' openscrub.py` vs the CATS map keys.
+`grep -o 'name,dob[^"]*' openscrub.py` vs the CATS map keys. In the
+CATS map `person` sits BEFORE the `face:"#ec4899"` anchor — customs still
+land right after face.
 
 USER-DEFINED categories (custom_categories.json in the data root) are
 separate from this rule: managed on the Scan Setup page (add/remove via
@@ -310,7 +332,7 @@ python -c "import ast; ast.parse(open('openscrub.py').read())"   # each edited .
 #   PAGE now holds TWO <script> blocks (editor + app) sharing one global
 #   scope — join them so duplicate top-level declarations are caught too:
 #   python -c "import openscrub_web as w, re; open('/tmp/p.js','w').write('\n'.join(re.findall(r'<script>(.*?)</script>', w.PAGE, re.S)))" && node --check /tmp/p.js
-python -m pytest test_openscrub.py -q                             # 42 tests, all green
+python -m pytest test_openscrub.py -q                             # 43 tests, all green
 python -m build          # FULL build (sdist->wheel), NEVER just `-w`:
                          # the wheel is built FROM the sdist in CI, so any
                          # file the wheel force-includes must be in the

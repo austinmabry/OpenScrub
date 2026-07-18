@@ -1177,3 +1177,55 @@ def test_cuda_dnn_gating_cpu_fallback():
     finally:
         del os.environ["OPENSCRUB_CPU_DNN"]
         openscrub._CUDA_DNN = None
+
+
+def test_person_detector_class_filter_and_registry():
+    """The person category rides PlateDetector's machinery with a COCO class
+    filter (WANT_CLASS=0). A multi-class end2end output must keep ONLY person
+    rows; PlateDetector (single-class, WANT_CLASS=None) must keep every row
+    above threshold regardless of the class column — plate models put their
+    only class there and its value is meaningless to filter on."""
+    pdet = openscrub.PersonDetector(thresh=0.5, expand=0.0, input_size=640)
+    assert not pdet.available()          # no model resolved -> inert
+    assert pdet.find(np.zeros((64, 64, 3), np.uint8)) == []   # fail closed
+    s, w, h = 1.0, 640, 640
+
+    # 6-col end2end (YOLOv10 layout): x1,y1,x2,y2,score,class — one person
+    # (cls 0), one skateboard (cls 36) above threshold, one weak person
+    out6 = np.array([[100, 50, 200, 90, 0.9, 0],
+                     [300, 60, 400, 99, 0.8, 36],
+                     [10, 10, 20, 20, 0.2, 0]], np.float32)
+    r = pdet._decode(out6, s, w, h)
+    assert len(r) == 1
+    assert tuple(round(v) for v in r[0][:4]) == (100, 50, 200, 90)
+
+    # 7-col end2end: batch,x1,y1,x2,y2,class,score — same class filtering
+    out7 = np.array([[0, 100, 50, 200, 90, 0, 0.9],
+                     [0, 300, 60, 400, 99, 2, 0.9]], np.float32)
+    assert len(pdet._decode(out7, s, w, h)) == 1
+
+    # PlateDetector ignores the class column entirely (single-class models)
+    plat = openscrub.PlateDetector(thresh=0.5, expand=0.0, input_size=640)
+    assert len(plat._decode(out6[:2], s, w, h)) == 2
+
+    # raw multi-class YOLOv8 head (84, N): person score lives at row 4+0 —
+    # identical channel to the single-class head, so plate decode is unchanged
+    raw = np.zeros((84, 100), np.float32)
+    raw[0, 3], raw[1, 3], raw[2, 3], raw[3, 3] = 320, 240, 100, 200   # cx,cy,w,h
+    raw[4, 3] = 0.9                                   # person class channel
+    r = pdet._decode(raw, s, w, h)
+    assert len(r) == 1
+    x1, y1, x2, y2 = (round(v) for v in r[0][:4])
+    assert (x1, y1, x2, y2) == (270, 140, 370, 340)
+
+    # registry: the person kind resolves to person_models.json with pinned
+    # hashes (never TOFU for these — they were validated at authoring time)
+    assert openscrub.model_registry_path("person").endswith("person_models.json")
+    reg = openscrub.load_model_registry("person")
+    assert reg and all(m.get("sha256") for m in reg)
+    assert any(m.get("recommended") for m in reg)
+
+    # the 13-category alignment rule now includes person
+    parser = openscrub.build_parser()
+    cats = parser.get_default("categories").split(",")
+    assert "person" in cats and len(cats) == 13

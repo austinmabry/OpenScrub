@@ -222,11 +222,10 @@ details .inner .full{grid-column:1/-1}
 // colors anchored on it
 const CATS={name:"#3b82f6",dob:"#22c55e",phone:"#f59e0b",ssn:"#ef4444",
             mrn:"#8b5cf6",email:"#14b8a6",address:"#f97316",card:"#db2777",
-            apikey:"#0891b2",ipaddr:"#65a30d",plate:"#7c3aed",face:"#ec4899",
+            apikey:"#0891b2",ipaddr:"#65a30d",plate:"#7c3aed",
+            person:"#0ea5e9",face:"#ec4899",
             ignore:"#334155"};
-const DN={mrn:"regex",ignore:"ignore (never blur)"};
-const DEFAULT_ON=["name","dob","phone","ssn","email","address","card",
-                  "apikey","ipaddr","face"];
+const DN={mrn:"regex",person:"person (full body)",ignore:"ignore (never blur)"};
 const RULER=24,WROW=20,AROW=16;
 
 let S={file:null,dur:0,vw:0,vh:0,cin:0,cout:0,wins:[],sel:0,ignore:[],
@@ -259,8 +258,7 @@ function openEditor(url,label){
  v.onloadedmetadata=()=>{
   S.dur=v.duration||0;S.vw=v.videoWidth;S.vh=v.videoHeight;
   S.cin=0;S.cout=S.dur;
-  const dc={};DEFAULT_ON.forEach(c=>dc[c]=true);
-  S.wins=[newWin(0,S.dur,dc)];S.sel=0;S.ignore=[];S.undo=[];
+  S.wins=[newWin(0,S.dur,{})];S.sel=0;S.ignore=[];S.undo=[];
   const n=(v.audioTracks&&v.audioTracks.length)||1;
   S.audio=Array.from({length:n},(_,i)=>({muted:false,
    label:n>1?("A"+(i+1)):"Audio"}));
@@ -454,16 +452,14 @@ function addWin(){
  const c=Math.min(Math.max(v.currentTime||0,S.cin),S.cout);
  const half=Math.max(1,S.dur*0.03);
  pushUndo();
- S.wins.push(newWin(Math.max(S.cin,c-half),Math.min(S.cout,c+half),
-                    selWin()?selWin().cats:{}));
+ S.wins.push(newWin(Math.max(S.cin,c-half),Math.min(S.cout,c+half),{}));
  S.sel=S.wins.length-1;
  tlHdr();renderCats();draw();tlDraw();
 }
 function delWin(){
  pushUndo();
  if(S.wins.length<=1){    // last window resets to the whole-clip default
-  const dc={};DEFAULT_ON.forEach(c=>dc[c]=true);
-  S.wins=[newWin(S.cin,S.cout,dc)];S.sel=0;
+  S.wins=[newWin(S.cin,S.cout,{})];S.sel=0;
  }else{S.wins.splice(S.sel,1);S.sel=Math.max(0,S.sel-1);}
  tlHdr();renderCats();draw();tlDraw();
 }
@@ -477,8 +473,7 @@ function clearZones(){pushUndo();selWin().zones={};renderCats();draw();}
 function clampWins(){
  S.wins.forEach(w=>{w.t0=Math.max(w.t0,S.cin);w.t1=Math.min(w.t1,S.cout);});
  S.wins=S.wins.filter(w=>w.t1-w.t0>0.2);
- if(!S.wins.length){const dc={};DEFAULT_ON.forEach(c=>dc[c]=true);
-  S.wins=[newWin(S.cin,S.cout,dc)];}
+ if(!S.wins.length){S.wins=[newWin(S.cin,S.cout,{})];}
  if(S.sel>=S.wins.length)S.sel=S.wins.length-1;
 }
 
@@ -579,10 +574,18 @@ function hookTL(){
 
 // ---------- summary + custom cats + start ----------
 function summary(){
- if(!S.dur){$("summary").textContent="";return;}
+ const el=$("summary");
+ if(!S.dur){el.textContent="";return;}
  const muted=S.audio.filter(a=>a.muted).map(a=>a.label);
  const full=S.cin<0.05&&S.cout>S.dur-0.05;
- $("summary").textContent=
+ // categories start ALL OFF — flag the nothing-selected state loudly so an
+ // empty scan is always a deliberate choice, never a surprise
+ if(!unionCats().length){
+  el.innerHTML='<span style="color:#fbbf24">&#9888; no categories selected '
+   +'&mdash; nothing will be detected (check categories or draw a zone)</span>';
+  return;
+ }
+ el.textContent=
   S.wins.length+" window"+(S.wins.length>1?"s":"")
   +(muted.length?" · muted: "+muted.join(","):"")
   +(full?"":" · output "+fmt(S.cin)+"–"+fmt(S.cout));

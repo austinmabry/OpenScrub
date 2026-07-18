@@ -1,0 +1,31 @@
+{
+  "_comment": "Curated full-body person-detection models for the 'person' category (whole-silhouette blur). ONNX exports published by the onnx-community org on Hugging Face; downloads are SHA-256 verified against the pinned hashes below (computed from the exact files validated during development). NOTE the AGPL-3.0 license on the YOLOv10 family: models are downloaded on demand and NEVER bundled with OpenScrub (same policy as the non-commercial SCRFD face model) - the license badge is shown in the model picker so users can make their own call.",
+  "models": [
+    {
+      "id": "yolov10n-person",
+      "label": "YOLOv10-N (nano - fast, good default)",
+      "license": "AGPL-3.0",
+      "family": "yolov10-end2end",
+      "input_size": 640,
+      "source_url": "https://huggingface.co/onnx-community/yolov10n",
+      "attribution": "YOLOv10 (THU-MIG, arXiv:2405.14458), ONNX export by onnx-community. AGPL-3.0.",
+      "download_url": "https://huggingface.co/onnx-community/yolov10n/resolve/main/onnx/model.onnx",
+      "sha256": "a77dd863933f184a19e84361c64b788228a7c7dacc2c78939239a96ad3efca3b",
+      "notes": "9 MB. NMS-free end2end export; detects whole bodies for the person (full-body blur) category. COCO-trained; OpenScrub keeps only the person class.",
+      "recommended": true
+    },
+    {
+      "id": "yolov10s-person",
+      "label": "YOLOv10-S (small - more accurate)",
+      "license": "AGPL-3.0",
+      "family": "yolov10-end2end",
+      "input_size": 640,
+      "source_url": "https://huggingface.co/onnx-community/yolov10s",
+      "attribution": "YOLOv10 (THU-MIG, arXiv:2405.14458), ONNX export by onnx-community. AGPL-3.0.",
+      "download_url": "https://huggingface.co/onnx-community/yolov10s/resolve/main/onnx/model.onnx",
+      "sha256": "e2df1b4f5190e1ab4b7305181b2a80eb84ed7cc36d11aee0318781e91b0ad0b8",
+      "notes": "31 MB. Higher recall on small/distant or partially occluded people; a little slower per frame.",
+      "recommended": false
+    }
+  ]
+}
