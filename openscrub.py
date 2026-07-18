@@ -3555,6 +3555,13 @@ def run_scan(args, cb=None):
     normalize_vfr(args, cb)
     cats = {c.strip() for c in args.categories.split(",")
             if c.strip() and c.strip() != "none"}
+    # per-window categories (unified editor) extend the load set: a category
+    # any window asks for must have its engines loaded, whatever --categories
+    # says. Union only ever ADDS detection — fail closed.
+    for _w in (getattr(args, "windows_data", None) or []):
+        for _c in (_w.get("cats") or []):
+            if _c and _c.strip():
+                cats.add(_c.strip())
     if not cats:
         # manual-only job: no automatic detection at all. The scan still
         # runs (it produces the render_state/report the review needs) but
@@ -3691,14 +3698,16 @@ def run_scan(args, cb=None):
             merged.append(w)
     dwin = merged
 
-    # Unified windows model: each detection window carries its OWN zones
-    # (window-specific zones from the editor). windows_px = [(t0, t1,
-    # zones_px_dict_or_None)]. Three sources, in priority order:
-    #   1. args.windows_data (new editor): explicit windows, each with zones.
-    #   2. legacy detect_windows time ranges: each gets the GLOBAL zones.
-    #   3. no windows: one whole-clip window with the global zones (today's
-    #      behavior — the whole clip is the default window).
-    # A window whose zones dict is None/empty scans its whole frame.
+    # Unified windows model: each detection window carries its own TIME
+    # RANGE, its own CATEGORIES, and its own ZONES. Windows may OVERLAP
+    # (stack): "blur faces 1.2-19.5s" and "also blur names 5-7s" are two
+    # stacked windows. At any time t the effective scope is the UNION of
+    # everything the covering windows ask for. windows_px = [(t0, t1,
+    # cats_set_or_None, zones_px_or_None)]; cats None = all scan cats,
+    # zones None = whole frame. Sources, in priority order:
+    #   1. args.windows_data (editor): explicit windows with cats + zones.
+    #   2. legacy detect_windows time ranges: global cats + global zones.
+    #   3. no windows: one whole-clip window (today's exact behavior).
     windows_px = []
     uwin = getattr(args, "windows_data", None)
     if uwin:
@@ -3707,40 +3716,68 @@ def run_scan(args, cb=None):
             t1 = max(0.0, min(1.0, float(w.get("t1", 1.0)))) * duration
             if t1 <= t0:
                 continue
+            wc = w.get("cats")
+            wc = {c.strip() for c in wc if c and c.strip()} if wc else None
             wz = w.get("zones") or {}
             wz = {c: rs for c, rs in wz.items() if c != "ignore" and rs}
             zp = zones_to_pixels(wz, vw, vh) if wz else None
-            windows_px.append((t0, t1, zp))
-        windows_px.sort()
+            windows_px.append((t0, t1, wc, zp))
+        windows_px.sort(key=lambda w: (w[0], w[1]))
     if windows_px:
-        dwin = [(t0, t1) for t0, t1, _ in windows_px]
+        ivals = sorted((t0, t1) for t0, t1, _, _ in windows_px)
     elif dwin:
-        windows_px = [(t0, t1, global_zones_px) for t0, t1 in dwin]
+        windows_px = [(t0, t1, None, global_zones_px) for t0, t1 in dwin]
+        ivals = list(dwin)
     else:
-        dwin = [(win_start, win_end)]
-        windows_px = [(win_start, win_end, global_zones_px)]
+        windows_px = [(win_start, win_end, None, global_zones_px)]
+        ivals = [(win_start, win_end)]
+    # dwin = merged COVERAGE intervals (decode/scan gating + fast-skip);
+    # windows_px stays unmerged so overlapping windows keep their identity
+    dwin = []
+    for w in ivals:
+        if dwin and w[0] <= dwin[-1][1] + 0.05:
+            dwin[-1] = (dwin[-1][0], max(dwin[-1][1], w[1]))
+        else:
+            dwin.append(tuple(w))
     win_start, win_end = dwin[0][0], dwin[-1][1]
-    if len(dwin) > 1 or win_start > 0 or win_end < duration:
+    if len(windows_px) > 1 or win_start > 0 or win_end < duration:
         cb.log("      detection windows: "
-               + ", ".join(f"{a:.1f}-{b:.1f}s" for a, b in dwin)
+               + ", ".join(
+                   f"{a:.1f}-{b:.1f}s"
+                   + (f" [{','.join(sorted(wc))}]" if wc else "")
+                   for a, b, wc, _ in windows_px)
                + f" (of {duration:.1f}s) — nothing outside them is "
                  "detected or blurred")
 
-    def _zones_at(t):
-        """Zone rects dict for the window containing time t (None = the
-        window has no zones -> whole-frame; also None if t is in no window)."""
-        for t0, t1, zp in windows_px:
-            if t0 <= t <= t1:
-                return zp
-        return None
+    def _scope_at(t):
+        """Effective detection scope at time t: {category: rects_or_None},
+        the UNION across every window covering t. A category absent from
+        the dict is not detected at t; rects None = unrestricted (any
+        covering window that leaves the category unzoned wins)."""
+        scope = {}
+        for t0, t1, wc, zp in windows_px:
+            if not (t0 <= t <= t1):
+                continue
+            for c in (wc if wc is not None else cats):
+                rects = (zp or {}).get(c)
+                if rects is None:
+                    scope[c] = None
+                elif c in scope:
+                    if scope[c] is not None:
+                        scope[c] = scope[c] + rects
+                else:
+                    scope[c] = list(rects)
+        return scope
 
-    any_zones = any(zp for _, _, zp in windows_px)
+    any_zones = any(zp for _, _, _, zp in windows_px)
+    scoped = bool(uwin) or any_zones
     zone_dropped = {}
+    win_inactive = {}
     zdrop_raw = []
     if any_zones:
         per_win = [f"[{a:.0f}-{b:.0f}s: " + ", ".join(
             f"{c}({len(r)})" for c, r in zp.items()) + "]"
-            for a, b, zp in windows_px if zp]
+            for a, b, _, zp in windows_px if zp]
         cb.log("      detection zones active: " + " ".join(per_win))
 
     scroll_mode = getattr(args, "scroll_track", "auto")
@@ -3802,7 +3839,7 @@ def run_scan(args, cb=None):
     dense_stride = max(1, int(getattr(args, "dense_face_stride", 1) or 1))
     # per-window zones: face/plate gating rects are looked up by time in the
     # frame loop via _zones_at(t_now), not fixed once here.
-    any_face_zone = any(zp and zp.get("face") for _, _, zp in windows_px)
+    any_face_zone = any(zp and zp.get("face") for _, _, _, zp in windows_px)
     if dense_faces:
         cb.log("      dense faces: detecting "
                + (f"every {dense_stride} frames" if dense_stride > 1
@@ -3873,8 +3910,13 @@ def run_scan(args, cb=None):
         if (dense_faces and facer is not None and "face" in cats
                 and idx % dense_stride == 0):
             dense_hold = 0.3 * dense_stride / fps
-            _fzr = (_zones_at(t_now) or {}).get("face")
-            for (fx1, fy1, fx2, fy2, conf) in facer.find(frame, detect_scale):
+            _fsc = _scope_at(t_now)
+            if "face" not in _fsc:
+                _fzr = ()       # no covering window wants faces at this time
+            else:
+                _fzr = _fsc["face"]
+            for (fx1, fy1, fx2, fy2, conf) in (
+                    facer.find(frame, detect_scale) if "face" in _fsc else []):
                 # zone-filter by the face's screen center, exactly like every
                 # other category (robust; no cropped-background detector quirks)
                 if _fzr and not in_any_zone((fx1, fy1, fx2, fy2), _fzr):
@@ -3895,8 +3937,11 @@ def run_scan(args, cb=None):
         if (plater is not None and plater.available() and "plate" in cats
                 and idx % max(1, dense_stride) == 0):
             phold = 0.3 * max(1, dense_stride) / fps
-            _pzr = (_zones_at(t_now) or {}).get("plate")
-            for (px1, py1, px2, py2, pconf) in plater.find(frame, detect_scale):
+            _psc = _scope_at(t_now)
+            _pzr = _psc.get("plate")
+            for (px1, py1, px2, py2, pconf) in (
+                    plater.find(frame, detect_scale) if "plate" in _psc
+                    else []):
                 if _pzr and not in_any_zone((px1, py1, px2, py2), _pzr):
                     continue
                 if in_ignore_region((px1, py1, px2, py2),
@@ -3980,16 +4025,23 @@ def run_scan(args, cb=None):
                     (d.cbox[0] + cx, d.cbox[1] + cy,
                      d.cbox[2] + cx, d.cbox[3] + cy), args.ignore_regions)]
 
-            if any_zones:
-                _zt = _zones_at(t) or {}
+            if scoped:
+                _st = _scope_at(t)
                 kept = []
                 for d in found:
-                    rects = _zt.get(d.category)
+                    if getattr(d, "dense", False):
+                        kept.append(d)          # dense dets pre-filtered
+                        continue
+                    if d.category not in _st:
+                        # no covering window asks for this category at t —
+                        # deliberate time-scoping, dropped without warning
+                        win_inactive[d.category] = \
+                            win_inactive.get(d.category, 0) + 1
+                        continue
+                    rects = _st[d.category]
                     sb = (d.cbox[0] + cx, d.cbox[1] + cy,
                           d.cbox[2] + cx, d.cbox[3] + cy)
-                    if getattr(d, "dense", False):
-                        kept.append(d)          # dense faces pre-filtered
-                    elif rects and not in_any_zone(sb, rects):
+                    if rects and not in_any_zone(sb, rects):
                         zone_dropped[d.category] = zone_dropped.get(d.category, 0) + 1
                         zdrop_raw.append(d)
                     else:
@@ -4191,10 +4243,15 @@ def run_scan(args, cb=None):
                 (d.cbox[0] + d.aoff[0], d.cbox[1] + d.aoff[1],
                  d.cbox[2] + d.aoff[0], d.cbox[3] + d.aoff[1]),
                 args.ignore_regions)]
-        if any_zones:
+        if scoped:
             kept = []
             for d in extra:
-                rects = (_zones_at(d.t_start) or {}).get(d.category)
+                _st = _scope_at(d.t_start)
+                if d.category not in _st:
+                    win_inactive[d.category] = \
+                        win_inactive.get(d.category, 0) + 1
+                    continue
+                rects = _st[d.category]
                 sb = (d.cbox[0] + d.aoff[0], d.cbox[1] + d.aoff[1],
                       d.cbox[2] + d.aoff[0], d.cbox[3] + d.aoff[1])
                 if rects and not in_any_zone(sb, rects):
@@ -4391,6 +4448,11 @@ def run_scan(args, cb=None):
                + ", ".join(f"{c} x{n}" for c, n in sorted(zone_dropped.items()))
                + " detection(s) fell OUTSIDE their category's zones and were "
                  "NOT blurred. Verify your zones actually cover all PII. ***")
+    if win_inactive:
+        cb.log("      window scoping: "
+               + ", ".join(f"{c} x{n}" for c, n in sorted(win_inactive.items()))
+               + " detection(s) at times where no window asks for that "
+                 "category — dropped by design")
     if recall_counts:
         top = sorted(recall_counts.items(), key=lambda kv: -kv[1])[:8]
         cb.log("      top recalled strings (check for false positives): "

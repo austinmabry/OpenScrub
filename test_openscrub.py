@@ -920,6 +920,59 @@ def test_per_window_zones(tmp_path):
     assert doc["provenance"].get("windows"), "windows recorded in report"
 
 
+def test_stacked_windows_union_and_per_window_cats(tmp_path):
+    """Overlapping (stacked) windows: at any time t the scope is the UNION
+    of every covering window — and each window carries its own categories,
+    so 'faces the whole clip, names only 5-7s' works as two stacked
+    windows."""
+    v = str(tmp_path / "z.mp4")
+    w = cv2.VideoWriter(v, cv2.VideoWriter_fourcc(*"mp4v"), 10, (640, 480))
+    for i in range(100):
+        fr = np.full((480, 640, 3), 255, np.uint8)
+        pos = (20, 60) if i < 50 else (380, 440)
+        cv2.putText(fr, "CLM-1234567", pos, cv2.FONT_HERSHEY_SIMPLEX,
+                    1.2, (0, 0, 0), 3)
+        w.write(fr)
+    w.release()
+
+    def run(windows, cats):
+        wf = str(tmp_path / "w.json")
+        json.dump({"windows": windows}, open(wf, "w"))
+        parser = openscrub.build_parser()
+        args = parser.parse_args(
+            [v, "--categories", cats, "--mrn-regex", r"CLM-\d{7}",
+             "--engine", "tesseract", "--windows", wf,
+             "-o", str(tmp_path / "o.mp4"),
+             "--report", str(tmp_path / "r.json")])
+        args = openscrub._prep_args(args, parser)
+
+        class Q(openscrub.Callbacks):
+            def log(self, m):
+                pass
+        openscrub.run_pipeline(args, Q())
+        doc = json.load(open(str(tmp_path / "r.json")))
+        return [x for x in doc["detections"]
+                if x.get("enabled", True) and not x.get("zone_dropped")]
+
+    # W1 all-time zoned TOP-LEFT stacked with W2 (second half) zoned
+    # BOTTOM-RIGHT: both token positions survive via the union
+    en = run([
+        {"t0": 0.0, "t1": 1.0, "cats": ["mrn"],
+         "zones": {"mrn": [[0.0, 0.0, 0.5, 0.5]]}},
+        {"t0": 0.5, "t1": 1.0, "cats": ["mrn"],
+         "zones": {"mrn": [[0.5, 0.5, 1.0, 1.0]]}}], "mrn")
+    assert [x for x in en if x["t_start"] < 5], "TL kept via W1"
+    assert [x for x in en if x["t_start"] >= 5], "BR kept via W2 (union)"
+
+    # per-window cats: mrn requested ONLY by the second-half window — the
+    # engine still loads it (union) but it fires only inside that window
+    en = run([{"t0": 0.0, "t1": 1.0, "cats": ["face"]},
+              {"t0": 0.5, "t1": 1.0, "cats": ["mrn"]}], "face")
+    mrn = [x for x in en if x["category"] == "mrn"]
+    assert mrn and all(x["t_start"] >= 5 for x in mrn), \
+        "mrn fires only during the window that declares it"
+
+
 def test_fraction_windows_resolve_against_server_duration(tmp_path):
     """The web UI sends detection windows and output trim as FRACTIONS of
     the duration (not seconds) so an iPhone's browser-reported length can't
