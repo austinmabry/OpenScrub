@@ -306,9 +306,6 @@ def build_args(job, for_render=False):
             "--scan-trigger", str(o.get("scan_trigger", 60)),
             "--pad", str(o.get("pad", 8)),
             "--bridge-gap", str(o.get("bridge_gap", 4.0)),
-            # empty = user brought no pattern -> the mrn ID category is
-            # inactive (the engine default is empty too; no prefill anymore)
-            "--mrn-regex", o.get("mrn_regex", ""),
             "--face-expand", str(o.get("face_expand", 0.15)),
             "--face-threshold", str(o.get("face_threshold", 0.6)),
             "--plate-threshold", str(o.get("plate_threshold", 0.35)),
@@ -327,7 +324,7 @@ def build_args(job, for_render=False):
                              if o.get("face_shape") in ("ellipse", "rect")
                              else "ellipse"),
             "--categories", o.get("categories",
-                                  "name,dob,phone,ssn,mrn,email,address,card,apikey,ipaddr,plate,face"),
+                                  "name,dob,phone,ssn,email,address,card,apikey,ipaddr,plate,face,person"),
             "-o", os.path.join(jdir, "output."
                                + (o.get("out_format", "mp4")
                                   if o.get("out_format") in ("mp4", "mov", "mkv")
@@ -1539,7 +1536,7 @@ async function loadBoxEdit(fromReview){
 const TLC={name:"#3b82f6",dob:"#22c55e",phone:"#f59e0b",ssn:"#ef4444",
  mrn:"#8b5cf6",email:"#14b8a6",address:"#f97316",card:"#db2777",
  apikey:"#0891b2",ipaddr:"#65a30d",plate:"#7c3aed",face:"#ec4899",
- manual:"#eab308"};
+ person:"#0ea5e9",manual:"#eab308"};
 async function tlInit(){
  // one fetch of the full report: detection spans for the lanes (dense
  // tracks collapse to one span per track) + stored audio redactions

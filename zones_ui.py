@@ -150,8 +150,6 @@ details .inner .full{grid-column:1/-1}
   <div><label>Scan trigger (px)</label><input type="number" id="st" value="60" step="5"></div>
   <div><label>Blur buffer (px)</label><input type="number" id="pad" value="8"></div>
   <div><label>Bridge gap (s)</label><input type="number" id="bgap" value="4" step="0.5"></div>
-  <div class="full"><label>Regex (mrn ID category &mdash; empty = off)</label>
-   <input type="text" id="mrnrx" value="" placeholder="e.g. \b\d{7}\b"></div>
   <div><label>Face threshold</label><input type="number" id="fthr" value="0.6" step="0.05" min="0" max="1"></div>
   <div><label>Face expand</label><input type="number" id="fex" value="0.15" step="0.05"></div>
   <div><label>Face mask shape</label><select id="fshape"><option>ellipse</option>
@@ -205,6 +203,16 @@ details .inner .full{grid-column:1/-1}
     onclick="addWin()">&#65291; Add window</button>
   </div>
   <div class="tlwrap"><div id="tlhdr"></div><canvas id="tl"></canvas></div>
+  <div class="tlfoot" style="align-items:center">
+   <button class="mini" onclick="zoomBy(1/1.5)" title="zoom out">&#8722;</button>
+   <input type="range" id="zslide" min="0" max="1" step="0.01" value="0"
+    style="width:120px" oninput="zoomSlide(+this.value)" title="timeline zoom">
+   <button class="mini" onclick="zoomBy(1.5)" title="zoom in">&#65291;</button>
+   <span class="mutd" id="zlab" style="min-width:30px">1&times;</span>
+   <input type="range" id="pslide" min="0" max="1000" value="0" disabled
+    style="flex:1;min-width:80px" oninput="panSlide(+this.value)"
+    title="pan the zoomed view">
+  </div>
   <div class="tlfoot"><span id="foot"></span><span style="flex:1"></span>
    <span class="mutd">drag any handle &mdash; the preview scrubs live &middot;
     click a window lane to select it</span></div>
@@ -221,14 +229,15 @@ details .inner .full{grid-column:1/-1}
 // keep the face literal exactly as-is: the server injects custom category
 // colors anchored on it
 const CATS={name:"#3b82f6",dob:"#22c55e",phone:"#f59e0b",ssn:"#ef4444",
-            mrn:"#8b5cf6",email:"#14b8a6",address:"#f97316",card:"#db2777",
+            email:"#14b8a6",address:"#f97316",card:"#db2777",
             apikey:"#0891b2",ipaddr:"#65a30d",plate:"#7c3aed",
             person:"#0ea5e9",face:"#ec4899",
             ignore:"#334155"};
-const DN={mrn:"regex",person:"person (full body)",ignore:"ignore (never blur)"};
+const DN={person:"person (full body)",ignore:"ignore (never blur)"};
 const RULER=24,WROW=20,AROW=16;
 
 let S={file:null,dur:0,vw:0,vh:0,cin:0,cout:0,wins:[],sel:0,ignore:[],
+ zoom:1,view0:0,
  audio:[],cls:"face",mode:"draw",selZone:null,anchor:null,fl:null,drag:null,
  seekTo:null,seeking:false,primed:false,paste:null,undo:[],mm:{}};
 
@@ -264,7 +273,8 @@ function openEditor(url,label){
    label:n>1?("A"+(i+1)):"Audio"}));
   $("vmeta").textContent=label+" · "+fmt(S.dur)+" · "+S.vw+"×"+S.vh;
   $("empty").style.display="none";$("editor").style.display="block";
-  fitCanvas();renderCats();tlHdr();draw();tlDraw();
+  fitCanvas();renderCats();tlHdr();draw();
+  S.zoom=1;S.view0=0;setZoom(1);
  };
  v.addEventListener("seeked",()=>{S.seeking=false;pump();tlDraw();});
  v.addEventListener("timeupdate",tlDraw);
@@ -489,7 +499,33 @@ function tlHdr(){
   +' onclick="S.audio['+i+'].muted=!S.audio['+i+'].muted;tlHdr();tlDraw();summary()">M</button></div>';});
  $("tlhdr").innerHTML=h;
 }
-function tx(t,w){return Math.max(0,Math.min(w,t/Math.max(0.1,S.dur)*w));}
+// txr: raw view-mapped x (may be off-canvas — used for handle hit tests so
+// an off-view handle can never be grabbed at the clamped edge). tx: clamped
+// for drawing.
+function txr(t,w){const span=S.dur/S.zoom;
+ return (t-S.view0)/Math.max(0.1,span)*w;}
+function tx(t,w){return Math.max(0,Math.min(w,txr(t,w)));}
+const MAXZ=40;
+function setZoom(z){
+ z=Math.max(1,Math.min(MAXZ,z));
+ const span=S.dur/S.zoom,c=S.view0+span/2;   // keep the view center fixed
+ S.zoom=z;
+ const ns=S.dur/z;
+ S.view0=Math.max(0,Math.min(Math.max(0,S.dur-ns),c-ns/2));
+ $("zslide").value=Math.log(z)/Math.log(MAXZ);
+ $("zlab").textContent=(z>=10?z.toFixed(0):z.toFixed(1).replace(/\.0$/,""))+"\u00d7";
+ const ps=$("pslide");
+ ps.disabled=z<=1.001;
+ ps.value=S.dur-ns>0.01?Math.round(1000*S.view0/(S.dur-ns)):0;
+ tlDraw();
+}
+function zoomBy(f){setZoom(S.zoom*f);}
+function zoomSlide(v){setZoom(Math.pow(MAXZ,v));}
+function panSlide(v){
+ const ns=S.dur/S.zoom;
+ S.view0=Math.max(0,Math.min(Math.max(0,S.dur-ns),(v/1000)*(S.dur-ns)));
+ tlDraw();
+}
 function tlDraw(){
  const c=$("tl");if(!c||!S.dur)return;
  const w=c.clientWidth||600,H=tlH();
@@ -498,9 +534,12 @@ function tlDraw(){
  g.fillStyle="#0b1120";g.fillRect(0,0,w,H);
  g.fillStyle="#1e293b";g.fillRect(0,0,w,RULER);
  g.fillStyle="#64748b";g.font="9px ui-monospace,monospace";
- const step=S.dur>1200?300:S.dur>240?60:S.dur>60?15:5;
- for(let t=0;t<=S.dur;t+=step){
-  g.fillRect(tx(t,w),RULER-6,1,6);g.fillText(fmt(t),tx(t,w)+2,10);}
+ const span=S.dur/S.zoom;
+ const step=span>1200?300:span>240?60:span>60?15:span>12?5:span>4?1:0.5;
+ for(let t=Math.max(0,Math.ceil(S.view0/step)*step);
+     t<=Math.min(S.dur,S.view0+span)+1e-6;t+=step){
+  g.fillRect(tx(t,w),RULER-6,1,6);
+  g.fillText(step>=1?fmt(t):t.toFixed(1)+"s",tx(t,w)+2,10);}
  S.wins.forEach((win,i)=>{
   const y=RULER+WROW*i;
   g.fillStyle="#181207";g.fillRect(0,y,w,WROW);
@@ -535,18 +574,19 @@ function hookTL(){
  const c=$("tl");
  if(c.dataset.hooked)return;c.dataset.hooked=1;
  const tAt=e=>{const r=c.getBoundingClientRect();
-  return Math.max(0,Math.min(S.dur,(e.clientX-r.left)/r.width*S.dur));};
+  return Math.max(0,Math.min(S.dur,
+   S.view0+(e.clientX-r.left)/r.width*(S.dur/S.zoom)));};
  c.addEventListener("pointerdown",e=>{
   c.setPointerCapture(e.pointerId);prime();
   const r=c.getBoundingClientRect(),px=e.clientX-r.left,py=e.clientY-r.top,
         w=c.clientWidth,t=tAt(e);
-  if(Math.abs(px-tx(S.cin,w))<7){S.drag={k:"cin"};seek(S.cin);return;}
-  if(Math.abs(px-tx(S.cout,w))<7){S.drag={k:"cout"};seek(S.cout);return;}
+  if(Math.abs(px-txr(S.cin,w))<7){S.drag={k:"cin"};seek(S.cin);return;}
+  if(Math.abs(px-txr(S.cout,w))<7){S.drag={k:"cout"};seek(S.cout);return;}
   if(py>=RULER&&py<RULER+WROW*S.wins.length){
    const i=Math.floor((py-RULER)/WROW),win=S.wins[i];
    if(S.sel!==i){S.sel=i;tlHdr();renderCats();draw();}
-   if(Math.abs(px-tx(win.t0,w))<7){S.drag={k:"w0",i:i};seek(win.t0);}
-   else if(Math.abs(px-tx(win.t1,w))<7){S.drag={k:"w1",i:i};seek(win.t1);}
+   if(Math.abs(px-txr(win.t0,w))<7){S.drag={k:"w0",i:i};seek(win.t0);}
+   else if(Math.abs(px-txr(win.t1,w))<7){S.drag={k:"w1",i:i};seek(win.t1);}
    else if(t>=win.t0&&t<=win.t1){S.drag={k:"wm",i:i,off:t-win.t0};seek(t);}
    else{S.drag={k:"seek"};seek(t);}
    tlDraw();return;
@@ -630,7 +670,7 @@ async function startScan(){
  const o={
   engine:$("engine").value,device:$("device").value,encoder:$("encoder").value,
   mode:$("mode").value,sample_interval:+$("si").value,scan_trigger:+$("st").value,
-  pad:+$("pad").value,bridge_gap:+$("bgap").value,mrn_regex:$("mrnrx").value,
+  pad:+$("pad").value,bridge_gap:+$("bgap").value,
   face_expand:+$("fex").value,face_threshold:+$("fthr").value,
   face_shape:$("fshape").value,detect_scale:+$("dscale").value,
   hdr_output:$("hdrout").value,codec:$("vcodec").value,

@@ -3650,7 +3650,7 @@ def build_parser():
     ap.add_argument("--vfr", choices=["auto", "ignore"], default="auto",
                     help="auto: detect variable frame rate and normalize to "
                          "CFR before processing (default); ignore: skip check")
-    ap.add_argument("--categories", default="name,dob,phone,ssn,mrn,email,address,card,apikey,ipaddr,plate,face,person")
+    ap.add_argument("--categories", default="name,dob,phone,ssn,email,address,card,apikey,ipaddr,plate,face,person")
     return ap
 
 

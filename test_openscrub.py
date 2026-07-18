@@ -131,9 +131,12 @@ def chart(tmp_path_factory):
                    [(150, "Patient: Robert Henderson"),
                     (230, "MRN: 1234567   DOB: 03/15/1978"),
                     (310, "Assessment and Plan documented")])
-    # the mrn ID category is bring-your-own-pattern now (empty default =
-    # inactive), so the fixture supplies the documented example pattern
-    res, dets = run(v, "--mrn-regex", openscrub.RE_MRN_DEFAULT)
+    # mrn is CLI-only now (retired from the default list — the web UI
+    # replaces it with custom regex categories), so the fixture opts in
+    res, dets = run(v, "--mrn-regex", openscrub.RE_MRN_DEFAULT,
+                    "--categories",
+                    "name,dob,phone,ssn,mrn,email,address,card,apikey,"
+                    "ipaddr,plate,face")
     return v, res, dets
 
 
@@ -1225,10 +1228,11 @@ def test_person_detector_class_filter_and_registry():
     assert reg and all(m.get("sha256") for m in reg)
     assert any(m.get("recommended") for m in reg)
 
-    # the 13-category alignment rule now includes person
+    # the category alignment rule: person is in, mrn is retired from the
+    # defaults (CLI-only via --categories mrn + --mrn-regex)
     parser = openscrub.build_parser()
     cats = parser.get_default("categories").split(",")
-    assert "person" in cats and len(cats) == 13
+    assert "person" in cats and "mrn" not in cats and len(cats) == 12
 
 
 def test_person_silhouette_decode_and_render(tmp_path):

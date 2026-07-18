@@ -1,7 +1,7 @@
 # CLAUDE.md — OpenScrub
 
 OpenScrub is a local, GPU-accelerated video redaction tool: it detects and
-blurs PII (faces, names, SSNs, addresses, license plates, full-body person blur — 13 categories) in
+blurs PII (faces, names, SSNs, addresses, license plates, full-body person blur — 12 default categories) in
 videos and screen recordings, with a human-review step before anything is
 trusted. Apache-2.0. Python 3.10+. Runs on Windows/Linux; primary dev/deploy
 target is Windows 10 + NVIDIA RTX 3060.
@@ -187,8 +187,8 @@ Key classes/functions (locate with grep, line numbers drift):
   outside the windows (seek past head, seek across gaps >1.5s, break
   after the last) but ONLY when scroll tracking is off — sequential
   offsets otherwise. Trim is SDR-only for now (HDR logs a NOTE and renders full
-  length). Category ids are a compat surface but "mrn" DISPLAYS as
-  "regex" everywhere (CATDN map in PAGE, DN maps in zones page).
+  length). Category ids are a compat surface; legacy "mrn" detections
+  DISPLAY as "regex" in review (CATDN map).
 - Unified Scan Setup editor (`/zones`, zones_ui.py): the ONLY intake
   path — and the editor IS the homepage: one page with the editor on
   top, Jobs + job detail/review below it (`#appzone`), settings behind
@@ -201,7 +201,11 @@ Key classes/functions (locate with grep, line numbers drift):
   frame; whole-frame when a checked category has no zones). Copy/paste
   zones between windows, clip bookends drag window edges inward
   (`clampWins`; windows <0.2s drop; the last window resets to
-  whole-clip), audio lanes with M mute buttons, iOS prime + seek-queue
+  whole-clip), audio lanes with M mute buttons, a timeline ZOOM bar
+  (−/slider/+ to 40×, log scale, plus a pan slider; `tx` clamps for
+  drawing while `txr` is the raw mapping used for handle hit tests so an
+  off-view handle can't be grabbed at the clamped edge; ruler ticks
+  adapt to the visible span down to 0.5s), iOS prime + seek-queue
   live scrubbing. Categories default ALL OFF (every new window too —
   nothing is detected until the user checks a category or draws a zone;
   the summary line under Start shows an amber "nothing will be detected"
@@ -305,8 +309,13 @@ defined — there was a real UnboundLocalError from ordering once.
 
 ## The 12-category alignment rule (easy to break!)
 
-The category list (13 now) exists in TWO places that must stay identical:
-1. `openscrub.py` — argparse default `"name,dob,phone,ssn,mrn,email,address,card,apikey,ipaddr,plate,face,person"`
+The category list (12 now) exists in TWO places that must stay identical:
+1. `openscrub.py` — argparse default `"name,dob,phone,ssn,email,address,card,apikey,ipaddr,plate,face,person"`
+   ("mrn" is RETIRED from the defaults and from the whole UI — regex
+   detection is custom-categories only now. The engine machinery stays:
+   CLI `--categories ...,mrn --mrn-regex PAT` still works, review CATDN
+   still displays legacy "mrn" detections as "regex", and BUILTIN_CATS
+   still reserves the id so a custom category can't claim it.)
 2. `zones_ui.py` — `const CATS={...}` color map in ZONES_PAGE (the app's
    only JS category list since the homepage checkbox grid was retired;
    `CATDN` in APP_JS keeps display names for review headings)
