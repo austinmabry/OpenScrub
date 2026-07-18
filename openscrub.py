@@ -586,6 +586,10 @@ class Detection:
     person: int = -1           # face tracks clustered by facial IDENTITY
                                # (SFace embeddings): one review decision per
                                # PERSON, applied to all their appearances
+    poly: tuple = ()           # silhouette contour(s) from a segmentation
+                               # model, points NORMALIZED to cbox (0..1) —
+                               # render blurs ONLY inside them (person
+                               # category); empty = plain box redaction
 
 
 class PhiMemory:
@@ -1038,7 +1042,7 @@ def smooth_dense_tracks(dets, fps, video, cum=None, win_start=0.0, cb=None):
                          (int(sbox[0] - o[0]), int(sbox[1] - o[1]),
                           int(sbox[2] - o[0]), int(sbox[3] - o[1])),
                          ref.category, ref.text, ref.confidence, o,
-                         last_seen=t0, dense=True, track=tid)
+                         last_seen=t0, dense=True, track=tid, poly=ref.poly)
 
     cap = cv2.VideoCapture(video) if video else None
     if cap is not None and not cap.isOpened():
@@ -1543,6 +1547,55 @@ def blur_region(frame, x1, y1, x2, y2, mode, shape="rect"):
         frame[y1:y2, x1:x2] = filled
 
 
+def blur_silhouette(frame, x1, y1, x2, y2, mode, polys, poly_box,
+                    pad_px=0):
+    """Redact ONLY the pixels inside a detection's silhouette polygon(s) —
+    the segmentation-model equivalent of blur_region, so a walking person's
+    body is masked without a box of blurred background around them.
+
+    (x1..y2) is the PADDED region to operate in; poly points are normalized
+    to poly_box (the unpadded detection box). pad_px dilates the mask
+    outward — the silhouette version of the box pad: over-blur beats
+    under-blur. Any degenerate mask falls back to the full box redaction
+    (fail closed), never to nothing."""
+    h, w = frame.shape[:2]
+    x1i, y1i = max(0, int(x1)), max(0, int(y1))
+    x2i, y2i = min(w, int(x2)), min(h, int(y2))
+    if x2i <= x1i or y2i <= y1i:
+        return
+    if not polys:
+        blur_region(frame, x1, y1, x2, y2, mode)
+        return
+    pbx1, pby1, pbx2, pby2 = poly_box
+    pbw, pbh = max(1.0, pbx2 - pbx1), max(1.0, pby2 - pby1)
+    rw, rh = x2i - x1i, y2i - y1i
+    mask = np.zeros((rh, rw), np.uint8)
+    for pts in polys:
+        arr = np.array([[int(round(float(qx) * pbw + pbx1)) - x1i,
+                         int(round(float(qy) * pbh + pby1)) - y1i]
+                        for qx, qy in pts], np.int32)
+        if len(arr) >= 3:
+            cv2.fillPoly(mask, [arr], 255)
+    if not mask.any():
+        blur_region(frame, x1, y1, x2, y2, mode)   # fail closed
+        return
+    if pad_px > 0:
+        k = 2 * int(pad_px) + 1
+        mask = cv2.dilate(mask, np.ones((k, k), np.uint8))
+    roi = frame[y1i:y2i, x1i:x2i]
+    if mode == "box":
+        filled = np.zeros_like(roi)
+    elif mode == "mosaic":
+        fw = max(2, rw // 14)
+        small = cv2.resize(roi, (max(1, rw // fw), max(1, rh // fw)),
+                           interpolation=cv2.INTER_LINEAR)
+        filled = cv2.resize(small, (rw, rh), interpolation=cv2.INTER_NEAREST)
+    else:
+        k = max(31, ((rw // 3) | 1))
+        filled = cv2.GaussianBlur(roi, (k, k), 0)
+    roi[mask > 0] = filled[mask > 0]
+
+
 def probe_audio_streams(src):
     """Number of audio streams in the file (0 if none / no ffprobe)."""
     try:
@@ -1809,6 +1862,10 @@ def render_hdr(src, dst, detections, cum, bands, fps, pad, mode,
     source's color tags (PQ/HLG + BT.2020) carried over. `hvc1` tagging
     keeps QuickTime/Apple players happy. No preview mode — previews use
     the SDR copy."""
+    if any(getattr(d, "poly", ()) for d in detections):
+        print("      NOTE: silhouette masks are not supported in the 10-bit "
+              "HDR render yet — person detections use full-box redaction "
+              "here (over-blur, never under).")
     mode_map = mode_map or {}
     def _mode_for(cat):
         return mode_map.get(cat, mode)
@@ -2061,14 +2118,28 @@ def render(src, dst, detections, cum, bands, fps, pad, mode, preview,
             y1 = d.cbox[1] + oy - px
             x2 = d.cbox[2] + ox + px
             y2 = d.cbox[3] + oy + px
+            pbox = (d.cbox[0] + ox, d.cbox[1] + oy,
+                    d.cbox[2] + ox, d.cbox[3] + oy)
             if preview:
                 cv2.rectangle(frame, (int(max(0, x1)), int(max(0, y1))),
                               (int(min(w, x2)), int(min(h, y2))), (0, 0, 255), 2)
+                for pts in (d.poly or ()):
+                    arr = np.array(
+                        [[int(float(qx) * (pbox[2] - pbox[0]) + pbox[0]),
+                          int(float(qy) * (pbox[3] - pbox[1]) + pbox[1])]
+                         for qx, qy in pts], np.int32)
+                    if len(arr) >= 3:
+                        cv2.polylines(frame, [arr], True, (0, 0, 255), 2)
                 label = d.category
                 if draw_scores and d.category == "face":
                     label = f"face {d.confidence:.2f}"
                 cv2.putText(frame, label, (int(max(0, x1)), int(max(12, y1 - 4))),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+            elif d.poly:
+                # segmentation silhouette: mask only the body, not the box —
+                # px (pad+drift) becomes an outward mask dilation
+                blur_silhouette(frame, x1, y1, x2, y2, _mode_for(d.category),
+                                d.poly, pbox, pad_px=px)
             else:
                 blur_region(frame, x1, y1, x2, y2, _mode_for(d.category),
                             shape=("ellipse" if d.category == "face"
@@ -2668,6 +2739,129 @@ class PersonDetector(PlateDetector):
                  expand=0.06, input_size=640):
         super().__init__(cb, model_path=model_path, thresh=thresh, nms=nms,
                          expand=expand, input_size=input_size)
+        # segmentation models (YOLO -seg exports) have a SECOND output: the
+        # (1,32,160,160) prototype masks. When present, find() returns
+        # per-person silhouette polygons and the renderer masks only the
+        # body — detection-only models still work and blur the box.
+        self.seg = False
+        try:
+            if self.ort is not None:
+                self.seg = len(self.ort.get_outputs()) >= 2
+            elif self.net is not None:
+                self.seg = len(self.net.getUnconnectedOutLayersNames()) >= 2
+        except Exception:
+            self.seg = False
+        if self.seg:
+            self.log("      person detector: segmentation model — masking "
+                     "body silhouettes, not boxes")
+
+    def find(self, frame, detect_scale=1.0):
+        """-> [(x1,y1,x2,y2,conf[,polys])] — 6th element (silhouette
+        contours normalized to the box) present only for -seg models."""
+        if not self.seg:
+            return super().find(frame, detect_scale)
+        if self.net is None and self.ort is None:
+            return []
+        h, w = frame.shape[:2]
+        sc = self.INPUT / max(h, w)
+        nw, nh = int(round(w * sc)), int(round(h * sc))
+        canvas = np.full((self.INPUT, self.INPUT, 3), 114, np.uint8)
+        canvas[:nh, :nw] = cv2.resize(frame, (nw, nh))
+        if self.ort is not None:
+            inp = np.ascontiguousarray(
+                canvas[:, :, ::-1].transpose(2, 0, 1)[None]).astype(np.float32)
+            inp /= 255.0
+            outs = self.ort.run(None, {self._ort_in: inp})
+        else:
+            blob = cv2.dnn.blobFromImage(canvas, 1 / 255.0,
+                                         (self.INPUT, self.INPUT),
+                                         swapRB=True, crop=False)
+            self.net.setInput(blob)
+            outs = self.net.forward(self.net.getUnconnectedOutLayersNames())
+        proto = next((np.asarray(o) for o in outs
+                      if np.asarray(o).ndim == 4
+                      and np.asarray(o).shape[1] == 32), None)
+        det = next((np.asarray(o) for o in outs
+                    if np.asarray(o) is not None
+                    and np.asarray(o).ndim in (2, 3)
+                    and np.asarray(o).shape[-1] >= 100), None)
+        if proto is None or det is None:
+            # not the layout we expect after all — degrade to box decode
+            det0 = next((np.asarray(o) for o in outs
+                         if np.asarray(o).ndim in (2, 3)), None)
+            return self._decode(det0, sc, w, h) if det0 is not None else []
+        return self._decode_seg(det, proto, sc, w, h)
+
+    def _decode_seg(self, det, proto, s, w, h):
+        """Pure (unit-testable): YOLO-seg output pair -> silhouette boxes.
+        det: (1, 4+nc+32, N) raw head; proto: (1, 32, ph, pw) prototype
+        masks. Mask = sigmoid(coeffs @ protos), cropped to the box,
+        thresholded at 0.5, then traced into polygons normalized to the
+        (expanded) detection box."""
+        det = np.asarray(det, np.float32)
+        while det.ndim > 2 and det.shape[0] == 1:
+            det = det[0]
+        if det.ndim != 2:
+            return []
+        if det.shape[0] < det.shape[1]:
+            det = det.T                        # (N, 4+nc+32)
+        nc = det.shape[1] - 36
+        if nc < 1:
+            return []
+        ccol = 4 + (self.WANT_CLASS or 0)
+        boxes, scores, coefs = [], [], []
+        for r in det:
+            score = float(r[ccol])
+            if score < self.thresh:
+                continue
+            cx, cy, bw, bh = (float(r[0]), float(r[1]),
+                              float(r[2]), float(r[3]))
+            boxes.append([int(cx - bw / 2), int(cy - bh / 2),
+                          int(bw), int(bh)])
+            scores.append(score)
+            coefs.append(np.asarray(r[4 + nc:4 + nc + 32], np.float32))
+        if not boxes:
+            return []
+        idxs = cv2.dnn.NMSBoxes(boxes, scores, self.thresh, self.nms)
+        proto = np.asarray(proto, np.float32)
+        ph, pw = proto.shape[2], proto.shape[3]
+        P = proto[0].reshape(32, -1)
+        res = []
+        for i in np.array(idxs).flatten():
+            bx, by, bw, bh = boxes[i]
+            m = (coefs[i] @ P).reshape(ph, pw)
+            m = 1.0 / (1.0 + np.exp(-m))
+            m = cv2.resize(m, (self.INPUT, self.INPUT))
+            x1i, y1i = max(0, bx), max(0, by)
+            x2i = min(self.INPUT, bx + bw)
+            y2i = min(self.INPUT, by + bh)
+            if x2i <= x1i or y2i <= y1i:
+                continue
+            mask = np.zeros((self.INPUT, self.INPUT), np.uint8)
+            mask[y1i:y2i, x1i:x2i] = (m[y1i:y2i, x1i:x2i] > 0.5)                 .astype(np.uint8)
+            # expanded box in frame coordinates (this becomes cbox)
+            fx1, fy1, fx2, fy2 = x1i / s, y1i / s, x2i / s, y2i / s
+            ex = (fx2 - fx1) * self.expand
+            ey = (fy2 - fy1) * self.expand
+            rx1, ry1 = max(0.0, fx1 - ex), max(0.0, fy1 - ey)
+            rx2 = min(float(w), fx2 + ex)
+            ry2 = min(float(h), fy2 + ey)
+            cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
+                                       cv2.CHAIN_APPROX_SIMPLE)
+            polys = []
+            for c in cnts:
+                if cv2.contourArea(c) < 16:
+                    continue
+                c = cv2.approxPolyDP(c, 2.0, True).reshape(-1, 2)
+                c = c.astype(np.float64) / s          # to frame coords
+                qx = (c[:, 0] - rx1) / max(1e-6, rx2 - rx1)
+                qy = (c[:, 1] - ry1) / max(1e-6, ry2 - ry1)
+                polys.append(tuple(
+                    (round(float(a), 4), round(float(b), 4))
+                    for a, b in zip(qx, qy)))
+            res.append((rx1, ry1, rx2, ry2, round(scores[i], 3),
+                        tuple(polys)))
+        return res
 
 
 def _nms_boxes(boxes, thr=0.4):
@@ -3019,7 +3213,8 @@ def load_report(path):
             # exploded the re-opened review into one card per frame sample
             dense=bool(r.get("dense", False)),
             track=int(r.get("track", -1)),
-            person=int(r.get("person", -1))))
+            person=int(r.get("person", -1)),
+            poly=tuple(r.get("poly") or ())))
     return dets, state, prov
 
 
@@ -4014,9 +4209,11 @@ def run_scan(args, cb=None):
             bhold = 0.3 * max(1, dense_stride) / fps
             _bsc = _scope_at(t_now)
             _bzr = _bsc.get("person")
-            for (bx1, by1, bx2, by2, bconf) in (
+            for det_row in (
                     personer.find(frame, detect_scale) if "person" in _bsc
                     else []):
+                bx1, by1, bx2, by2, bconf = det_row[:5]
+                bpoly = det_row[5] if len(det_row) > 5 else ()
                 if _bzr and not in_any_zone((bx1, by1, bx2, by2), _bzr):
                     continue
                 if in_ignore_region((bx1, by1, bx2, by2),
@@ -4027,7 +4224,7 @@ def run_scan(args, cb=None):
                     (int(bx1 - cx), int(by1 - cy),
                      int(bx2 - cx), int(by2 - cy)),
                     "person", "person", round(bconf, 3), (cx, cy),
-                    dense=True))
+                    dense=True, poly=bpoly))
                 dense_now.append((bx1, by1, bx2, by2))
         moved = abs(cx - scan_cx) + abs(cy - scan_cy)
         step_eff, trig_eff = step, args.scan_trigger

@@ -24,7 +24,7 @@ target is Windows 10 + NVIDIA RTX 3060.
 | `fetch_plate_models.py` | Alt path to fetch plate models via the open-image-models pip package. |
 | `openscrub_update.py` | `openscrub-update` command + web self-update backend: PyPI version check, sha256-verified sdist download, data-preserving folder update (PRESERVE set), TOFU pin carry-forward. Ships in the wheel. |
 | `openscrub_vault.py` | At-rest encryption for the job store: scrypt keystore, chunked AES-256-GCM files (`.osvault`), lock/unlock tree walkers. NO password reset by design. Ships in the wheel. Lock-on-shutdown lives in openscrub_web: a SIGTERM handler (docker stop; locks then os._exit — sys.exit is swallowed by cheroot) + an atexit hook (Ctrl+C; uses the import-time `_HERE` constant because `__file__` is gone during interpreter teardown — both failure modes were real and verified). Encryption must finish inside the container stop grace period (`docker stop -t 120`). |
-| `test_openscrub.py` | pytest suite (43 tests). Must stay green. |
+| `test_openscrub.py` | pytest suite (44 tests). Must stay green. |
 | `tools/make_icons.py` | Regenerates every icon/logo asset from `assets/badge_master.png`. |
 | `tools/make_wordmark.py` | Regenerates the typeset Poppins wordmarks (navy + white). |
 | `assets/` | Brand assets. `badge_master.png` (canonical, mosaic+brackets style) and `badge_master_blurbox_alt.png` (alternate) are the sources; everything else is generated. |
@@ -74,21 +74,31 @@ Key classes/functions (locate with grep, line numbers drift):
   Model resolution: `--plate-model` arg → `$OPENSCRUB_PLATE_MODEL`
   → `models/plate_yolov8.onnx` → `models/<registry-id>.onnx` (recommended
   first, adopts registry `input_size`).
-- `PersonDetector(PlateDetector)` — full-BODY person blur ("person"
+- `PersonDetector(PlateDetector)` — full-BODY person masking ("person"
   category): a face blur hides the face but clothing/build/gait still
   identify someone. Same dual-backend YOLO ONNX machinery as plates with
   `WANT_CLASS=0` (multi-class COCO outputs filtered to person; end2end
   6/7-col rows carry class in col 5, raw v8 heads put class-0 score at
   row[4] — the SAME channel single-class models use, so plate decode is
-  byte-identical). ALWAYS dense (per-frame, like faces), feeds the same
-  assign/smooth track pipeline → ONE review card per tracked body
-  (displays as "person (full body)"; SFace grouping stays face-only).
-  INERT without a model (exactly like plates); `--person-model` →
-  `$OPENSCRUB_PERSON_MODEL` → `models/person_yolov8.onnx` → registry ids.
-  `--person-threshold` default 0.5. Registry models are YOLOv10 end2end
-  ONNX (NMS-free (1,300,6)) from onnx-community on HF with PRE-pinned
-  sha256 (validated on real footage at authoring time) — AGPL-3.0,
-  registry-download only, never bundled.
+  byte-identical). SILHOUETTES, not boxes: a YOLO -seg model (detected by
+  its second (1,32,160,160) prototype output) makes find() return a 6th
+  element — body contour polygons normalized to the box
+  (`_decode_seg`: sigmoid(coeffs @ protos), crop, threshold 0.5,
+  approxPolyDP) — stored on `Detection.poly` (report-additive) and
+  rendered by `blur_silhouette` which masks ONLY inside the contours
+  (pad becomes an outward mask dilation; degenerate masks fall back to
+  the full box, fail closed; HDR render logs a NOTE and uses boxes).
+  Detection-only models still work and blur the box. ALWAYS dense
+  (per-frame, like faces), feeds the same assign/smooth track pipeline —
+  smoothing's `_mk` copies `poly` from the ref sample so interpolated/
+  onset samples keep their silhouette — → ONE review card per tracked
+  body ("person (full body)"; SFace grouping stays face-only). INERT
+  without a model (exactly like plates); `--person-model` →
+  `$OPENSCRUB_PERSON_MODEL` → `models/person_yolov8.onnx` → registry
+  ids. `--person-threshold` default 0.5. Registry models are YOLO11n-seg
+  / YOLOv8n-seg ONNX (HF mirrors, PRE-pinned sha256, validated on real
+  footage at authoring) — AGPL-3.0, registry-download only, never
+  bundled.
 - `detect_phi` — text-category detection over OCR line dicts. Word-loop
   order matters: card (Luhn-gated) before apikey before SSN. The `mrn`
   ID-number category is BRING-YOUR-OWN-REGEX: `--mrn-regex` defaults to
@@ -332,7 +342,7 @@ python -c "import ast; ast.parse(open('openscrub.py').read())"   # each edited .
 #   PAGE now holds TWO <script> blocks (editor + app) sharing one global
 #   scope — join them so duplicate top-level declarations are caught too:
 #   python -c "import openscrub_web as w, re; open('/tmp/p.js','w').write('\n'.join(re.findall(r'<script>(.*?)</script>', w.PAGE, re.S)))" && node --check /tmp/p.js
-python -m pytest test_openscrub.py -q                             # 43 tests, all green
+python -m pytest test_openscrub.py -q                             # 44 tests, all green
 python -m build          # FULL build (sdist->wheel), NEVER just `-w`:
                          # the wheel is built FROM the sdist in CI, so any
                          # file the wheel force-includes must be in the

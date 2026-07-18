@@ -1229,3 +1229,65 @@ def test_person_detector_class_filter_and_registry():
     parser = openscrub.build_parser()
     cats = parser.get_default("categories").split(",")
     assert "person" in cats and len(cats) == 13
+
+
+def test_person_silhouette_decode_and_render(tmp_path):
+    """Segmentation path: YOLO-seg output pairs decode into silhouette
+    polygons, blur_silhouette masks ONLY inside them (dilated by pad), and
+    poly survives the report round trip. All pure — no model needed."""
+    det = openscrub.PersonDetector(thresh=0.5, expand=0.0, input_size=640)
+
+    # synthetic seg output: one person row whose box covers a known square;
+    # proto channel 0 is strongly positive inside x[100:200), y[25:50) of the
+    # 160x160 proto grid (=> x[400:800)->clipped, y[100:200) at 640 input)
+    N = 200
+    raw = np.zeros((116, N), np.float32)
+    raw[0, 7], raw[1, 7] = 300, 150        # cx, cy
+    raw[2, 7], raw[3, 7] = 300, 200        # w, h -> box x[150,450) y[50,250)
+    raw[4, 7] = 0.9                        # person score
+    raw[84, 7] = 1.0                       # coeff for proto channel 0
+    proto = np.full((1, 32, 160, 160), -10.0, np.float32)
+    proto[0, 0, 25:50, 50:100] = 10.0      # y[100:200) x[200:400) at 640
+    rows = det._decode_seg(raw, proto, 1.0, 640, 640)
+    assert len(rows) == 1
+    x1, y1, x2, y2, conf, polys = rows[0]
+    assert (round(x1), round(y1), round(x2), round(y2)) == (150, 50, 450, 250)
+    assert polys and all(0.0 <= v <= 1.0 for p in polys for pt in p for v in pt)
+
+    # non-person class rows must be ignored even with a strong score
+    raw2 = raw.copy()
+    raw2[4, 7] = 0.0
+    raw2[7, 7] = 0.95                      # class 3 (car), not person
+    assert det._decode_seg(raw2, proto, 1.0, 640, 640) == []
+
+    # blur_silhouette: only pixels inside the polygon change
+    frame = np.full((100, 100, 3), 200, np.uint8)
+    sq = ((0.0, 0.0), (0.5, 0.0), (0.5, 1.0), (0.0, 1.0))   # left half of box
+    openscrub.blur_silhouette(frame, 20, 20, 80, 80, "box", (sq,),
+                              (20, 20, 80, 80), pad_px=0)
+    assert frame[50, 30].tolist() == [0, 0, 0]        # inside poly: filled
+    assert frame[50, 70].tolist() == [200, 200, 200]  # right half untouched
+    assert frame[10, 10].tolist() == [200, 200, 200]  # outside box untouched
+
+    # pad dilates the mask outward (fail closed)
+    frame2 = np.full((100, 100, 3), 200, np.uint8)
+    openscrub.blur_silhouette(frame2, 20, 20, 80, 80, "box", (sq,),
+                              (20, 20, 80, 80), pad_px=6)
+    assert frame2[50, 53].tolist() == [0, 0, 0]       # beyond 0.5 edge: padded
+
+    # empty/degenerate polys fall back to the whole box, never to nothing
+    frame3 = np.full((100, 100, 3), 200, np.uint8)
+    openscrub.blur_silhouette(frame3, 20, 20, 80, 80, "box", (),
+                              (20, 20, 80, 80))
+    assert frame3[50, 70].tolist() == [0, 0, 0]
+
+    # report round trip preserves poly
+    d = openscrub.Detection(0.0, 1.0, (10, 10, 50, 50), "person", "person",
+                            0.9, (0, 0), dense=True, track=0, poly=(sq,))
+    args = openscrub.build_parser().parse_args(["dummy.mp4"])
+    state = {"fps": 30.0, "cum": [(0.0, 0.0)], "bands": [(0.0, 0.0)],
+             "detections": [d], "input_sha256": "x"}
+    path = str(tmp_path / "r.json")
+    openscrub.write_report(path, args, state)
+    back, _, _ = openscrub.load_report(path)
+    assert back and back[0].poly and len(back[0].poly[0]) == 4
