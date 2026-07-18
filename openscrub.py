@@ -35,7 +35,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.43"
+VERSION = "1.0.44"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -2512,6 +2512,7 @@ class PlateDetector:
         except Exception:
             pass
         found = next((c for c in candidates if c and os.path.exists(c)), None)
+        self.model_path = found
         if found in reg_size:
             self.INPUT = reg_size[found]
         if not found:
@@ -2751,6 +2752,37 @@ class PersonDetector(PlateDetector):
                 self.seg = len(self.net.getUnconnectedOutLayersNames()) >= 2
         except Exception:
             self.seg = False
+        # Segmentation graphs have TWO outputs, and OpenCV DNN's layer
+        # fusion can assert on multi-output forward AT INFERENCE TIME
+        # ('biasLayerData->outputBlobsWrappers.size() == 1 in fuseLayers',
+        # seen on the 4.10 CUDA build) — a failure the load-time probe
+        # cannot catch and that used to kill the whole scan. Segmentation
+        # therefore ALWAYS runs on onnxruntime (a hard dep; GPU build in
+        # the CUDA image), rebuilding the session from the resolved path.
+        if self.seg and self.ort is None and self.net is not None:
+            try:
+                import onnxruntime as ort
+                avail = ort.get_available_providers()
+                force_cpu = os.environ.get("OPENSCRUB_CPU_DNN") == "1"
+                providers = (["CUDAExecutionProvider", "CPUExecutionProvider"]
+                             if ("CUDAExecutionProvider" in avail
+                                 and not force_cpu)
+                             else ["CPUExecutionProvider"])
+                sess = ort.InferenceSession(self.model_path,
+                                            providers=providers)
+                self.ort = sess
+                self._ort_in = sess.get_inputs()[0].name
+                self._ort_out = [o.name for o in sess.get_outputs()]
+                self.net = None
+                self.log("      person detector: segmentation model moved "
+                         "to onnxruntime (%s) — OpenCV DNN multi-output "
+                         "inference is unreliable"
+                         % sess.get_providers()[0])
+            except Exception as e:
+                self.seg = False
+                self.log("      person detector: could not open the "
+                         "segmentation model with onnxruntime (%s) — "
+                         "falling back to BOX masks via OpenCV DNN." % e)
         if self.seg:
             self.log("      person detector: segmentation model — masking "
                      "body silhouettes, not boxes")
@@ -2773,11 +2805,22 @@ class PersonDetector(PlateDetector):
             inp /= 255.0
             outs = self.ort.run(None, {self._ort_in: inp})
         else:
-            blob = cv2.dnn.blobFromImage(canvas, 1 / 255.0,
-                                         (self.INPUT, self.INPUT),
-                                         swapRB=True, crop=False)
-            self.net.setInput(blob)
-            outs = self.net.forward(self.net.getUnconnectedOutLayersNames())
+            try:
+                blob = cv2.dnn.blobFromImage(canvas, 1 / 255.0,
+                                             (self.INPUT, self.INPUT),
+                                             swapRB=True, crop=False)
+                self.net.setInput(blob)
+                outs = self.net.forward(
+                    self.net.getUnconnectedOutLayersNames())
+            except Exception as e:
+                # e.g. OpenCV 4.10 fuseLayers assertion — degrade to box
+                # detection instead of crashing the scan (logged once)
+                self.seg = False
+                self.log("      person detector: multi-output inference "
+                         "failed on this OpenCV build (%s) — continuing "
+                         "with BOX masks instead of silhouettes."
+                         % str(e).strip().splitlines()[-1][:120])
+                return super().find(frame, detect_scale)
         proto = next((np.asarray(o) for o in outs
                       if np.asarray(o).ndim == 4
                       and np.asarray(o).shape[1] == 32), None)

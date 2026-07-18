@@ -24,7 +24,7 @@ target is Windows 10 + NVIDIA RTX 3060.
 | `fetch_plate_models.py` | Alt path to fetch plate models via the open-image-models pip package. |
 | `openscrub_update.py` | `openscrub-update` command + web self-update backend: PyPI version check, sha256-verified sdist download, data-preserving folder update (PRESERVE set), TOFU pin carry-forward. Ships in the wheel. |
 | `openscrub_vault.py` | At-rest encryption for the job store: scrypt keystore, chunked AES-256-GCM files (`.osvault`), lock/unlock tree walkers. NO password reset by design. Ships in the wheel. Lock-on-shutdown lives in openscrub_web: a SIGTERM handler (docker stop; locks then os._exit — sys.exit is swallowed by cheroot) + an atexit hook (Ctrl+C; uses the import-time `_HERE` constant because `__file__` is gone during interpreter teardown — both failure modes were real and verified). Encryption must finish inside the container stop grace period (`docker stop -t 120`). |
-| `test_openscrub.py` | pytest suite (44 tests). Must stay green. |
+| `test_openscrub.py` | pytest suite (45 tests). Must stay green. |
 | `tools/make_icons.py` | Regenerates every icon/logo asset from `assets/badge_master.png`. |
 | `tools/make_wordmark.py` | Regenerates the typeset Poppins wordmarks (navy + white). |
 | `assets/` | Brand assets. `badge_master.png` (canonical, mosaic+brackets style) and `badge_master_blurbox_alt.png` (alternate) are the sources; everything else is generated. |
@@ -85,7 +85,12 @@ Key classes/functions (locate with grep, line numbers drift):
   element — body contour polygons normalized to the box
   (`_decode_seg`: sigmoid(coeffs @ protos), crop, threshold 0.5,
   approxPolyDP) — stored on `Detection.poly` (report-additive) and
-  rendered by `blur_silhouette` which masks ONLY inside the contours
+  rendered by `blur_silhouette` which masks ONLY inside the contours.
+  Seg models ALWAYS run on onnxruntime: OpenCV DNN's layer fusion
+  asserts AT INFERENCE TIME on multi-output graphs on some builds
+  (fuseLayers, 4.10 CUDA) — the load probe can't catch it and it killed
+  a whole scan once; a residual cv2 forward failure degrades LOUDLY to
+  box masks instead of crashing. Silhouettes are masked
   (pad becomes an outward mask dilation; degenerate masks fall back to
   the full box, fail closed; HDR render logs a NOTE and uses boxes).
   Detection-only models still work and blur the box. ALWAYS dense
@@ -351,7 +356,7 @@ python -c "import ast; ast.parse(open('openscrub.py').read())"   # each edited .
 #   PAGE now holds TWO <script> blocks (editor + app) sharing one global
 #   scope — join them so duplicate top-level declarations are caught too:
 #   python -c "import openscrub_web as w, re; open('/tmp/p.js','w').write('\n'.join(re.findall(r'<script>(.*?)</script>', w.PAGE, re.S)))" && node --check /tmp/p.js
-python -m pytest test_openscrub.py -q                             # 44 tests, all green
+python -m pytest test_openscrub.py -q                             # 45 tests, all green
 python -m build          # FULL build (sdist->wheel), NEVER just `-w`:
                          # the wheel is built FROM the sdist in CI, so any
                          # file the wheel force-includes must be in the

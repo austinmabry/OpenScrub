@@ -1295,3 +1295,35 @@ def test_person_silhouette_decode_and_render(tmp_path):
     openscrub.write_report(path, args, state)
     back, _, _ = openscrub.load_report(path)
     assert back and back[0].poly and len(back[0].poly[0]) == 4
+
+
+def test_person_seg_forward_crash_degrades_to_boxes():
+    """OpenCV DNN's layer fusion can assert AT INFERENCE TIME on multi-output
+    (segmentation) graphs — 'biasLayerData->outputBlobsWrappers.size() == 1
+    in fuseLayers' on the 4.10 CUDA build — which the load-time probe cannot
+    catch and which used to kill the whole scan. A forward failure must
+    degrade LOUDLY to box detection and keep the scan alive. (Seg models are
+    also moved onto onnxruntime at load; this guards any remaining cv2 path.)"""
+    class BoomNet:
+        def getUnconnectedOutLayersNames(self):
+            return ("output0", "output1")
+
+        def setInput(self, b):
+            pass
+
+        def forward(self, names=None):
+            if names is not None:
+                raise cv2.error("biasLayerData->outputBlobsWrappers.size()"
+                                " == 1 in function 'fuseLayers'")
+            out = np.zeros((1, 116, 300), np.float32)
+            out[0, 0, 5], out[0, 1, 5] = 320, 240
+            out[0, 2, 5], out[0, 3, 5] = 100, 200
+            out[0, 4, 5] = 0.9
+            return out
+
+    det = openscrub.PersonDetector(thresh=0.5)
+    det.net, det.ort, det.seg = BoomNet(), None, True
+    rows = det.find(np.zeros((480, 854, 3), np.uint8))
+    assert det.seg is False, "must drop out of seg mode after the failure"
+    assert len(rows) == 1 and len(rows[0]) == 5, \
+        "box fallback must still return detections"
