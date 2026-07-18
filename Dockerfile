@@ -24,9 +24,14 @@
 
 FROM python:3.12-slim
 
+# dist-upgrade pulls the latest Debian security patches even when the base
+# image tag lags behind; the weekly scheduled rebuild (docker-image.yml)
+# re-runs this layer with --no-cache so published tags keep absorbing fixes
 RUN apt-get update \
+ && apt-get dist-upgrade -y \
  && apt-get install -y --no-install-recommends tesseract-ocr ffmpeg \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/* \
+ && pip install --no-cache-dir --upgrade pip setuptools wheel
 
 WORKDIR /src
 

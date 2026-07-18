@@ -17,6 +17,13 @@ name: Docker image
 on:
   release:
     types: [published]
+  # Weekly security refresh: rebuild the LATEST RELEASE with --no-cache so
+  # the apt dist-upgrade layer re-runs and published tags absorb the Debian/
+  # Ubuntu security patches that shipped since the release was cut. Same
+  # code, fresher packages — this is what keeps Docker Scout counts down
+  # between releases.
+  schedule:
+    - cron: "17 8 * * 1"
   workflow_dispatch:
     inputs:
       tag:
@@ -37,11 +44,19 @@ jobs:
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0    # scheduled refresh needs tags to find the release
 
       - name: Compute tags
         id: meta
         run: |
           RAW="${{ github.event.inputs.tag || github.event.release.tag_name }}"
+          if [ -z "$RAW" ]; then
+            # scheduled refresh: build the latest release's code, not main
+            RAW="$(git describe --tags --abbrev=0)"
+            git checkout "$RAW"
+            echo "::notice::scheduled refresh of $RAW"
+          fi
           V="${RAW#v}"
           TAGS="ghcr.io/austinmabry/openscrub:${V}"
           TAGS="$TAGS,ghcr.io/austinmabry/openscrub:latest"
@@ -71,6 +86,7 @@ jobs:
       - uses: docker/build-push-action@v7
         with:
           context: .
+          no-cache: ${{ github.event_name == 'schedule' }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           # registry build cache: unchanged layers (base, apt, the pip
@@ -88,6 +104,8 @@ jobs:
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0    # scheduled refresh needs tags to find the release
 
       - name: Free runner disk (CUDA image is large)
         run: |
@@ -98,6 +116,12 @@ jobs:
         id: meta
         run: |
           RAW="${{ github.event.inputs.tag || github.event.release.tag_name }}"
+          if [ -z "$RAW" ]; then
+            # scheduled refresh: build the latest release's code, not main
+            RAW="$(git describe --tags --abbrev=0)"
+            git checkout "$RAW"
+            echo "::notice::scheduled refresh of $RAW"
+          fi
           V="${RAW#v}"
           TAGS="ghcr.io/austinmabry/openscrub:${V}-cuda"
           TAGS="$TAGS,ghcr.io/austinmabry/openscrub:cuda"
@@ -128,6 +152,7 @@ jobs:
         with:
           context: .
           file: Dockerfile.cuda
+          no-cache: ${{ github.event_name == 'schedule' }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           # registry build cache: the multi-GB CUDA/Paddle layers keep their

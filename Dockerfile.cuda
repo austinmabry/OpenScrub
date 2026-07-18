@@ -36,9 +36,14 @@ ENV DEBIAN_FRONTEND=noninteractive \
     NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
 
+# dist-upgrade pulls the latest Ubuntu security patches even when the base
+# image lags; the weekly scheduled rebuild (docker-image.yml) re-runs this
+# layer with --no-cache so published tags keep absorbing fixes
 RUN apt-get update \
+ && apt-get dist-upgrade -y \
  && apt-get install -y --no-install-recommends tesseract-ocr ffmpeg \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/* \
+ && pip install --no-cache-dir --upgrade pip setuptools wheel
 
 WORKDIR /src
 
