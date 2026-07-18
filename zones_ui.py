@@ -1,481 +1,642 @@
-"""Zone Management page for openscrub_web. Kept as a raw string in its own
-module so JavaScript escape sequences can never be mangled by patch layers."""
+"""Scan Setup page (served at /zones — the route name is historical).
 
-ZONES_PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
+The unified pre-scan editor: load a video (client-side preview, nothing
+uploads until Start), stack detection windows on an editor-style timeline
+(one lane per window — windows may overlap in time), give each window its
+own categories and its own zones drawn on the frame, mute audio tracks,
+trim the output with clip bookends, and start the scan — all in one place.
+
+Serialization: windows go to the job as fractions of duration (immune to
+client/server duration mismatch) with per-window cats + normalized zones;
+the engine's --windows flag consumes them (see openscrub.py run_scan).
+
+The CATS color map below is a compatibility surface: openscrub_web.py
+injects user-defined custom categories server-side, anchored on the
+literal `face:"#ec4899"` — keep that literal stable.
+"""
+
+ZONES_PAGE = r"""<!doctype html>
+<html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>OpenScrub — Detection Zones</title>
+<title>OpenScrub — Scan Setup</title>
 <link rel="icon" href="favicon.ico"><style>
-:root{--bg:#f5f6f8;--card:#fff;--ink:#1f2937;--mut:#6b7280;--acc:#2563eb}
+:root{--bg:#0b1120;--panel:#0f172a;--card:#1e293b;--mut:#94a3b8;--txt:#e2e8f0;
+ --acc:#3b82f6;--org:#f59e0b}
 *{box-sizing:border-box}
-body{font:15px/1.45 system-ui,Segoe UI,Roboto,sans-serif;margin:0;
- background:var(--bg);color:var(--ink)}
-header{background:#111827;color:#fff;padding:8px 16px;display:flex;
- align-items:center;gap:14px}
-header b{font-weight:600}
-header img{height:34px;display:block}
-header a{color:#93c5fd;text-decoration:none;font-size:14px}
-main{max-width:1400px;margin:0 auto;padding:12px;display:grid;
- grid-template-columns:290px minmax(0,1fr);gap:12px}
-@media(max-width:900px){main{grid-template-columns:1fr}}
-.card{background:var(--card);border-radius:12px;padding:14px;
- box-shadow:0 1px 3px rgba(0,0,0,.08)}
-h2{margin:0 0 10px;font-size:16px}
-.warnbox{grid-column:1/-1;background:linear-gradient(90deg,#fffbeb,#fef3c7);
- border:1px solid #f59e0b;border-radius:12px;padding:12px 16px;font-size:13.5px}
-.warnbox b{color:#92400e}
-.chips{display:flex;flex-direction:column;gap:6px}
-.chip{display:flex;align-items:center;gap:10px;padding:8px 10px;
- border-radius:9px;border:2px solid transparent;cursor:pointer;
- transition:all .15s ease;background:#f9fafb}
-.chip:hover{background:#f3f4f6;transform:translateX(2px)}
-.chip.active{border-color:var(--c);background:#fff;
- box-shadow:0 0 0 3px color-mix(in srgb,var(--c) 18%,transparent)}
-.chip .dot{width:14px;height:14px;border-radius:4px;background:var(--c);
- box-shadow:0 0 6px color-mix(in srgb,var(--c) 55%,transparent)}
-.chip .n{margin-left:auto;font-size:12px;color:var(--mut);
- background:#eef2f7;border-radius:10px;padding:1px 8px}
-.chip.viewall{border-style:dashed;border-color:#d1d5db;justify-content:center;
- color:var(--mut)}
-.chip.viewall.active{border-color:#9ca3af;color:var(--ink)}
-.tools{display:flex;gap:6px;margin:10px 0}
-.tools button{flex:1}
-button{background:var(--acc);color:#fff;border:0;border-radius:8px;
- padding:8px 12px;font:inherit;cursor:pointer;transition:filter .12s}
-button:hover{filter:brightness(1.08)}
-button.sec{background:#6b7280}button.danger{background:#dc2626}
-button.tog{background:#e5e7eb;color:var(--ink)}
-button.tog.on{background:var(--acc);color:#fff}
-select,input[type=range]{width:100%}
-select{padding:7px;border:1px solid #d1d5db;border-radius:7px;font:inherit}
-label{display:block;margin:8px 0 3px;font-size:12.5px;color:var(--mut)}
-.stage{background:linear-gradient(160deg,#111827,#1e293b);border-radius:12px;
- padding:14px;display:flex;flex-direction:column;gap:8px}
-.stagebar{display:flex;align-items:center;gap:10px;color:#cbd5e1;font-size:12.5px}
-#saved{margin-left:auto;font-size:12px;padding:2px 10px;border-radius:10px;
- background:#064e3b;color:#6ee7b7;transition:opacity .3s}
-#cwrap{position:relative;align-self:center;max-width:100%;
- box-shadow:0 8px 30px rgba(0,0,0,.45);border-radius:6px;overflow:hidden}
-#bg,#bgv{display:block;max-width:100%;max-height:72vh;width:auto;height:auto}
-#cv{display:block;max-width:100%}
-#cv{position:absolute;left:0;top:0;touch-action:none}
-#coords{font:12px ui-monospace,Consolas,monospace;color:#93c5fd;min-width:210px}
-#tl{display:flex;align-items:center;gap:10px;padding:2px 4px;user-select:none}
-.tltime{font:12px ui-monospace,Consolas,monospace;color:#cbd5e1;min-width:44px;text-align:center}
-#tltrack{position:relative;flex:1;height:22px;cursor:pointer}
-#tltrack::before{content:"";position:absolute;left:0;right:0;top:8px;height:6px;
- border-radius:3px;background:#334155}
-#tlticks{position:absolute;left:0;right:0;top:8px;height:6px}
-.tick{position:absolute;top:0;width:1px;height:6px;background:rgba(255,255,255,.18)}
-#tlfill{position:absolute;left:0;top:8px;height:6px;border-radius:3px;
- background:linear-gradient(90deg,#3b82f6,#60a5fa);width:0}
-#tlhead{position:absolute;top:3px;width:16px;height:16px;border-radius:50%;
- background:#fff;border:3px solid #3b82f6;box-shadow:0 1px 6px rgba(0,0,0,.5);
- margin-left:-8px;left:0}
-#tlbub{position:absolute;bottom:26px;transform:translateX(-50%);background:#0f172a;
- color:#e2e8f0;font:11px ui-monospace,monospace;padding:3px 7px;border-radius:6px;
- display:none;white-space:nowrap;border:1px solid #334155}
-#tl.off{opacity:.35;pointer-events:none}
-.hint{font-size:12px;color:#94a3b8}
-kbd{background:#334155;color:#e2e8f0;border-radius:4px;padding:0 5px;
- font:11px ui-monospace,monospace}
+body{margin:0;background:var(--bg);color:var(--txt);
+ font:14px system-ui,-apple-system,"Segoe UI",sans-serif}
+header{display:flex;align-items:center;gap:12px;padding:9px 16px;
+ background:var(--panel);border-bottom:1px solid var(--card)}
+header img{height:30px;display:block}
+header h1{font-size:16px;margin:0;font-weight:600}
+header .meta{color:var(--mut);font-size:12.5px}
+header a{margin-left:auto;color:#93c5fd;text-decoration:none;font-size:13px}
+main{display:grid;grid-template-columns:302px minmax(0,1fr);gap:13px;
+ max-width:1560px;margin:0 auto;padding:13px 16px}
+@media(max-width:980px){main{grid-template-columns:1fr}}
+.card{background:var(--card);border-radius:10px;padding:11px 13px;margin-bottom:11px}
+.card h2{font-size:12.5px;margin:0 0 8px;color:#cbd5e1;text-transform:uppercase;
+ letter-spacing:.04em;font-weight:600}
+.mutd{color:var(--mut);font-size:12px}
+input[type=text],input[type=number],select,textarea{background:var(--panel);
+ border:1px solid #334155;color:var(--txt);border-radius:6px;padding:5px 8px;
+ font-size:12.5px;font-family:inherit}
+button{background:#334155;color:var(--txt);border:none;border-radius:7px;
+ padding:6px 11px;font-size:12.5px;cursor:pointer}
+button.start{width:100%;padding:12px;font-size:15px;background:#2563eb;
+ border-radius:9px;font-weight:700}
+button.mini{background:var(--panel);border:1px solid #475569;padding:3.5px 9px;
+ font-size:11.5px;border-radius:6px}
+button.mini.warn{border-color:#7f1d1d;color:#fca5a5}
+button.mini.on{background:#1d4ed8;border-color:#1d4ed8;color:#fff}
+.filebox{border:1px dashed #475569;border-radius:8px;padding:8px;font-size:12.5px;
+ display:flex;gap:8px;align-items:center;cursor:pointer}
+.catrow{display:flex;align-items:center;gap:7px;font-size:12.5px;padding:2.5px 0}
+.catrow .sw{width:11px;height:11px;border-radius:3px;flex:none;cursor:pointer;
+ outline:2px solid transparent;outline-offset:1.5px}
+.catrow.active .sw{outline-color:#fff}
+.catrow .nm{cursor:pointer;min-width:52px}
+.catrow.active .nm{color:#fff;font-weight:700}
+.catrow select{margin-left:auto;font-size:10.5px;padding:1px 2px;color:var(--mut)}
+.catrow .cnt{font-size:10.5px;color:var(--mut);min-width:18px;text-align:right}
+.note{background:#172554;border-left:3px solid var(--acc);border-radius:6px;
+ padding:6px 8px;font-size:11.5px;color:#bfdbfe;margin-top:8px}
+.chip{display:inline-flex;align-items:center;gap:5px;background:var(--panel);
+ border:1px solid #334155;border-radius:13px;padding:2px 9px;font-size:11.5px;
+ margin:0 4px 4px 0}
+.chip .dot{width:8px;height:8px;border-radius:50%}
+details{margin-bottom:11px}
+details summary{cursor:pointer;background:var(--card);border-radius:10px;
+ padding:10px 13px;font-size:12.5px;color:var(--mut);list-style:none}
+details[open] summary{border-radius:10px 10px 0 0}
+details .inner{background:var(--card);border-radius:0 0 10px 10px;
+ padding:4px 13px 11px;display:grid;grid-template-columns:1fr 1fr;gap:7px 10px;
+ font-size:12px}
+details .inner label{display:block;color:var(--mut);font-size:11px;margin-bottom:2px}
+details .inner input,details .inner select,details .inner textarea{width:100%}
+details .inner .full{grid-column:1/-1}
+.prevwrap{position:relative;background:#000;border-radius:10px;overflow:hidden;
+ display:flex;justify-content:center}
+.prevwrap video{max-width:100%;max-height:52vh;display:block}
+#zc{position:absolute;top:0;touch-action:none;cursor:crosshair}
+.drawhint{position:absolute;right:8px;bottom:8px;background:rgba(2,6,23,.78);
+ color:#cbd5e1;font-size:11px;padding:4px 9px;border-radius:6px;pointer-events:none}
+.winbar{display:flex;align-items:center;gap:7px;background:#241a05;
+ border:1px solid #b45309;border-radius:9px;padding:6px 10px;margin:9px 0;
+ font-size:12.5px;flex-wrap:wrap}
+.winbar .wname{color:#fbbf24;font-weight:700}
+.winbar .sp{flex:1}
+.tlwrap{background:var(--panel);border-radius:9px;overflow:hidden;display:flex}
+#tlhdr{width:104px;flex:none;background:var(--card);font-size:11.5px;color:#cbd5e1}
+#tlhdr>div{padding-left:9px;display:flex;align-items:center;gap:5px;
+ border-top:1px solid var(--panel)}
+#tlhdr .mbtn{width:19px;height:15px;border-radius:3px;border:none;font-size:10px;
+ font-weight:700;margin-left:auto;margin-right:7px;cursor:pointer;padding:0}
+#tlhdr .mbtn.on{background:#dc2626;color:#fff}
+#tlhdr .mbtn.off{background:#334155;color:#94a3b8}
+#tl{flex:1;min-width:0;display:block;touch-action:none;cursor:ew-resize}
+.tlfoot{display:flex;gap:8px;margin-top:7px;font-size:12px;color:var(--mut);
+ flex-wrap:wrap}
+#empty{padding:44px 20px;text-align:center;color:var(--mut)}
 </style></head><body>
-<header><img src="logo_dark.png" alt="OpenScrub">
- <b>Detection Zones</b>
- <a href="./" style="margin-left:auto">← back to jobs</a></header>
+<header>
+ <img src="logo_dark.png" alt="">
+ <h1>Scan Setup</h1><span class="meta" id="vmeta"></span>
+ <a href="/">&larr; back to jobs</a>
+</header>
 <main>
-<div class="warnbox"><b>⚠ Read before using zones.</b> Zones restrict where
-each category is detected. <b>Anything outside a category's zones will NOT be
-blurred — even if the software sees it.</b> A name in a popup, a DOB in an
-unexpected corner, a face outside its zone: all exposed. Zones trade recall
-for precision. Use them only for layouts you know cold, run a
-<i>preview-mode</i> pass after changing them, and watch for the
-<i>ZONE&nbsp;WARNING</i> in the job log — it counts PII that was detected but
-left unblurred because it fell outside your zones. Categories with no zones
-remain full-frame (the safe default). Zones are stored in resolution-independent
-coordinates and apply to <b>all</b> jobs while enabled.</div>
+<div id="left">
+ <div class="card"><h2>Video</h2>
+  <label class="filebox" for="file">&#127902;&#65039; <span id="fname">choose a video file&#8230;</span></label>
+  <input type="file" id="file" accept="video/*" style="display:none">
+  <div class="mutd" style="margin:7px 0 3px">&#8230;or a path on the server (press Enter)</div>
+  <input type="text" id="spath" placeholder="/media/footage/clip.mp4" style="width:100%">
+  <div class="mutd" style="margin-top:6px">Nothing uploads until Start scan.</div>
+ </div>
 
-<div class="card">
-<h2>Classes</h2>
-<div class="chips" id="chips"></div>
-<div class="tools">
- <button class="tog on" id="mDraw" onclick="setMode('draw')">✏ Draw</button>
- <button class="tog" id="mSel" onclick="setMode('select')">⬚ Select</button>
-</div>
-<div class="tools">
- <button class="sec" onclick="undo()" title="Ctrl+Z">↶ Undo</button>
- <button class="sec" onclick="clearClass()">Clear class</button>
- <button class="danger" onclick="resetAll()">Reset all</button>
-</div>
-<label>Background — video file from this device (recommended)</label>
-<input type="file" id="localvid" accept="video/*" onchange="loadLocal()">
-<label>…or a frame from an uploaded job (any phase)</label>
-<select id="jobsel" onchange="pickJob()"></select>
-<input type="hidden" id="tslide" min="0" max="10" value="0" disabled>
-<label>…or a reference screenshot</label>
-<input type="file" id="refimg" accept="image/*" onchange="loadRef()">
-<p class="hint" style="margin-top:12px">
-<b>Draw:</b> click to anchor a corner, move, click again to set the opposite
-corner (or click-drag-release). <kbd>Esc</kbd> cancels.<br>
-<b>Select:</b> click a zone of the active class — drag to move, drag a corner
-handle to resize, <kbd>Del</kbd> to remove.<br>
-Overlapping zones of the same class merge into one shape.</p>
+ <div class="card"><h2 id="cattitle">Categories</h2>
+  <div id="cats"></div>
+  <div class="note">Categories and zones belong to the <b>selected window</b>.
+   Click a color square to pick the class you draw; drawing a zone switches
+   its category on. Checked categories with no zones cover the whole frame
+   during their window.</div>
+ </div>
+
+ <div class="card"><h2>Custom regex categories</h2>
+  <div id="cclist"></div>
+  <div style="display:flex;gap:6px">
+   <input type="text" id="ccname" placeholder="name" style="flex:1;min-width:0">
+   <input type="text" id="ccrx" placeholder="regex" style="flex:1;min-width:0">
+   <button onclick="addCustom()">Add</button></div>
+  <div class="mutd" style="margin-top:5px">Adding reloads the page (colors are
+   assigned server-side) — add customs before building windows.</div>
+ </div>
+
+ <details><summary>Advanced settings &#9656;</summary><div class="inner">
+  <div><label>OCR engine</label><select id="engine"><option>auto</option>
+   <option>paddle</option><option>tesseract</option></select></div>
+  <div><label>OCR device</label><select id="device"><option>auto</option>
+   <option>cpu</option><option>gpu</option></select></div>
+  <div><label>Encoder</label><select id="encoder"><option>auto</option>
+   <option>nvenc</option><option>x264</option></select></div>
+  <div><label>Default redaction</label><select id="mode"><option>blur</option>
+   <option>box</option><option>mosaic</option></select></div>
+  <div><label>Sample interval (s)</label><input type="number" id="si" value="0.5" step="0.1" min="0.1"></div>
+  <div><label>Scan trigger (px)</label><input type="number" id="st" value="60" step="5"></div>
+  <div><label>Blur buffer (px)</label><input type="number" id="pad" value="8"></div>
+  <div><label>Bridge gap (s)</label><input type="number" id="bgap" value="4" step="0.5"></div>
+  <div class="full"><label>Regex (mrn ID category &mdash; empty = off)</label>
+   <input type="text" id="mrnrx" value="" placeholder="e.g. \b\d{7}\b"></div>
+  <div><label>Face threshold</label><input type="number" id="fthr" value="0.6" step="0.05" min="0" max="1"></div>
+  <div><label>Face expand</label><input type="number" id="fex" value="0.15" step="0.05"></div>
+  <div><label>Face mask shape</label><select id="fshape"><option>ellipse</option>
+   <option>rect</option></select></div>
+  <div><label>Detection scale</label><input type="number" id="dscale" value="1.0" step="0.1" min="0.2" max="1"></div>
+  <div><label>HDR output</label><select id="hdrout"><option value="match">match source</option>
+   <option value="sdr">tone-map to SDR</option></select></div>
+  <div><label>Codec</label><select id="vcodec"><option>h264</option><option>hevc</option></select></div>
+  <div class="full"><label>Allow names (keep visible, one per line)</label>
+   <textarea id="allow" rows="2"></textarea></div>
+  <div class="full"><label>Always blur (extra names)</label>
+   <textarea id="extra" rows="2"></textarea></div>
+  <div class="full" style="display:flex;gap:14px;flex-wrap:wrap;font-size:12px">
+   <label style="display:inline"><input type="checkbox" id="densefaces"> dense faces</label>
+   <label style="display:inline"><input type="checkbox" id="skiprev"> skip review</label>
+   <label style="display:inline"><input type="checkbox" id="nomem"> disable memory</label>
+   <label style="display:inline"><input type="checkbox" id="pmode"> preview mode</label>
+   <label style="display:inline"><input type="checkbox" id="drawscores"> face scores</label>
+  </div>
+ </div></details>
+
+ <button class="start" onclick="startScan()">&#9654; Start scan</button>
+ <div class="mutd" id="summary" style="text-align:center;margin-top:7px"></div>
 </div>
 
-<div class="stage">
-<div class="stagebar">
- <span id="modeinfo">Editing: —</span>
- <span id="coords"></span>
- <span id="saved" style="opacity:0">Saved ✓</span>
-</div>
-<div id="cwrap"><img id="bg"><video id="bgv" muted playsinline
- style="display:none"></video><canvas id="cv"></canvas></div>
-<div id="tl" class="off"><span class="tltime" id="tlcur">0:00</span>
- <div id="tltrack"><div id="tlticks"></div><div id="tlfill"></div>
-  <div id="tlhead"></div><div id="tlbub">0:00</div></div>
- <span class="tltime" id="tldur">0:00</span></div>
-<div class="stagebar"><span class="hint" id="reshint"></span></div>
+<div id="right">
+ <div id="empty" class="card">Choose a video (or enter a server path and press
+  Enter) to open the editor.<br><span style="font-size:12px">You get a live
+  preview, a timeline with clip bookends and stackable detection windows,
+  per-window zones, and audio-track mutes.</span></div>
+ <div id="editor" style="display:none">
+  <div class="prevwrap">
+   <video id="vd" muted playsinline controls></video>
+   <canvas id="zc"></canvas>
+   <div class="drawhint" id="hint"></div>
+  </div>
+  <div class="winbar">
+   <span class="wname" id="wname">Window 1</span><span id="wtime"></span>
+   <span class="mutd" id="wzsum"></span>
+   <span class="sp"></span>
+   <button class="mini" id="mdraw" onclick="setMode('draw')">&#9998; Draw</button>
+   <button class="mini" id="msel" onclick="setMode('select')">&#9635; Select</button>
+   <button class="mini" onclick="undoZone()">&#8630; Undo</button>
+   <button class="mini" onclick="copyZones()">&#8862; Copy zones</button>
+   <button class="mini" id="pastebtn" onclick="pasteZones()" disabled>&#8863; Paste</button>
+   <button class="mini" onclick="clearZones()">Clear zones</button>
+   <button class="mini warn" onclick="delWin()">Delete window</button>
+   <button class="mini" style="border-color:#b45309;color:#fbbf24"
+    onclick="addWin()">&#65291; Add window</button>
+  </div>
+  <div class="tlwrap"><div id="tlhdr"></div><canvas id="tl"></canvas></div>
+  <div class="tlfoot"><span id="foot"></span><span style="flex:1"></span>
+   <span class="mutd">drag any handle &mdash; the preview scrubs live &middot;
+    click a window lane to select it</span></div>
+ </div>
 </div>
 </main>
 <script>
+// keep the face literal exactly as-is: the server injects custom category
+// colors anchored on it
 const CATS={name:"#3b82f6",dob:"#22c55e",phone:"#f59e0b",ssn:"#ef4444",
             mrn:"#8b5cf6",email:"#14b8a6",address:"#f97316",card:"#db2777",
-            apikey:"#0891b2",ipaddr:"#65a30d",plate:"#7c3aed",face:"#ec4899",ignore:"#334155"};
-let zones={},active=null,mode="draw",undoStack=[],saveT=null;
-let anchor=null,floatPt=null,dragKind=null,dragIdx=-1,dragOff=null,selIdx=-1,beforeDrag=null;
-let natW=1280,natH=720,DUR=10,CURJOB=null,BGMODE="img";
+            apikey:"#0891b2",ipaddr:"#65a30d",plate:"#7c3aed",face:"#ec4899",
+            ignore:"#334155"};
+const DN={mrn:"regex",ignore:"ignore (never blur)"};
+const DEFAULT_ON=["name","dob","phone","ssn","email","address","card",
+                  "apikey","ipaddr","face"];
+const RULER=24,WROW=20,AROW=16;
 
-const bg=document.getElementById("bg"),bgv=document.getElementById("bgv"),
-      cv=document.getElementById("cv"),ctx=cv.getContext("2d");
-function setBgMode(m){BGMODE=m;
- bg.style.display=m==="img"?"block":"none";
- bgv.style.display=m==="video"?"block":"none";}
+let S={file:null,dur:0,vw:0,vh:0,cin:0,cout:0,wins:[],sel:0,ignore:[],
+ audio:[],cls:"face",mode:"draw",selZone:null,anchor:null,fl:null,drag:null,
+ seekTo:null,seeking:false,primed:false,paste:null,undo:[],mm:{}};
 
-function chips(){
- const el=document.getElementById("chips");
- const DN={mrn:"regex",ignore:"ignore (never blur)"};
- el.innerHTML=Object.entries(CATS).map(([c,col])=>
-  `<div class="chip ${active===c?"active":""}" style="--c:${col}"
-    onclick="setActive('${c}')"><span class="dot"></span>${DN[c]||c}
-    <span class="n">${(zones[c]||[]).length}</span></div>`).join("")
-  +`<div class="chip viewall ${active===null?"active":""}"
-    onclick="setActive(null)">👁 view all classes</div>`;
- const DN2={mrn:"regex"};
- document.getElementById("modeinfo").textContent=
-   active?("Editing: "+(DN2[active]||active)):"Viewing all classes (pick one to edit)";
+function $(id){return document.getElementById(id);}
+function fmt(t){const d=new Date(Math.max(0,t)*1000).toISOString();
+ return t>=3600?d.substr(11,8):d.substr(14,5);}
+function newWin(t0,t1,cats){return {t0:t0,t1:t1,
+ cats:Object.assign({},cats),zones:{}};}
+function selWin(){return S.wins[S.sel];}
+
+// ---------- load ----------
+$("file").addEventListener("change",e=>{
+ const f=e.target.files&&e.target.files[0]; if(!f)return;
+ S.file=f; $("fname").textContent=f.name; $("spath").value="";
+ openEditor(URL.createObjectURL(f), f.name);
+});
+$("spath").addEventListener("keydown",e=>{
+ if(e.key==="Enter"&&e.target.value.trim()){
+  S.file=null; $("fname").textContent="choose a video file…";
+  openEditor("/api/server_video?path="+encodeURIComponent(e.target.value.trim()),
+             e.target.value.trim());
+ }});
+function openEditor(url,label){
+ const v=$("vd");
+ S.primed=false;S.seekTo=null;S.seeking=false;
+ v.preload="auto";v.src=url;
+ v.onloadedmetadata=()=>{
+  S.dur=v.duration||0;S.vw=v.videoWidth;S.vh=v.videoHeight;
+  S.cin=0;S.cout=S.dur;
+  const dc={};DEFAULT_ON.forEach(c=>dc[c]=true);
+  S.wins=[newWin(0,S.dur,dc)];S.sel=0;S.ignore=[];S.undo=[];
+  const n=(v.audioTracks&&v.audioTracks.length)||1;
+  S.audio=Array.from({length:n},(_,i)=>({muted:false,
+   label:n>1?("A"+(i+1)):"Audio"}));
+  $("vmeta").textContent=label+" · "+fmt(S.dur)+" · "+S.vw+"×"+S.vh;
+  $("empty").style.display="none";$("editor").style.display="block";
+  fitCanvas();renderCats();tlHdr();draw();tlDraw();
+ };
+ v.addEventListener("seeked",()=>{S.seeking=false;pump();tlDraw();});
+ v.addEventListener("timeupdate",tlDraw);
+ v.addEventListener("loadeddata",prime,{once:true});
+ window.addEventListener("resize",()=>{fitCanvas();draw();tlDraw();});
+ hookZC();hookTL();
 }
-function setActive(c){active=c;selIdx=-1;anchor=null;chips();draw();}
-function setMode(m){mode=m;selIdx=-1;anchor=null;
- document.getElementById("mDraw").classList.toggle("on",m==="draw");
- document.getElementById("mSel").classList.toggle("on",m==="select");
- cv.style.cursor=m==="draw"?"crosshair":"default";draw();}
+function prime(){
+ if(S.primed)return;S.primed=true;
+ const v=$("vd");
+ try{const p=v.play();if(p&&p.then)p.then(()=>v.pause()).catch(()=>{});
+ else v.pause();}catch(err){}
+}
+function seek(t){S.seekTo=Math.max(0,Math.min(S.dur,t));pump();}
+function pump(){
+ if(S.seeking||S.seekTo==null)return;
+ const v=$("vd"),t=S.seekTo;S.seekTo=null;S.seeking=true;
+ try{v.currentTime=t;}catch(e){S.seeking=false;}
+}
+function fitCanvas(){
+ const v=$("vd"),c=$("zc");
+ c.width=v.clientWidth;c.height=v.clientHeight;
+ c.style.left=v.offsetLeft+"px";
+}
 
-function pushUndo(){undoStack.push(JSON.stringify(zones));
- if(undoStack.length>40)undoStack.shift();}
-function undo(){if(!undoStack.length)return;
- zones=JSON.parse(undoStack.pop());selIdx=-1;chips();draw();save();}
-function clearClass(){if(!active)return alert("Pick a class first.");
- if(!confirm("Remove all "+active+" zones? The category returns to full-frame detection."))return;
- pushUndo();zones[active]=[];chips();draw();save();}
-function resetAll(){
- if(!confirm("Remove ALL zones for ALL classes? Every category returns to full-frame detection."))return;
- pushUndo();zones={};chips();draw();save();}
+// ---------- categories panel (per selected window) ----------
+function renderCats(){
+ const w=selWin(); if(!w)return;
+ $("cattitle").textContent="Categories — Window "+(S.sel+1);
+ let h="";
+ for(const c of Object.keys(CATS)){
+  if(c==="ignore")continue;
+  const on=!!w.cats[c], nz=(w.zones[c]||[]).length,
+        act=S.cls===c?"active":"";
+  h+='<div class="catrow '+act+'">'
+   +'<input type="checkbox" '+(on?"checked":"")
+   +' onchange="togCat(\''+c+'\',this.checked)">'
+   +'<span class="sw" style="background:'+CATS[c]+'" onclick="setCls(\''+c+'\')"></span>'
+   +'<span class="nm" onclick="setCls(\''+c+'\')">'+(DN[c]||c)+'</span>'
+   +'<span class="cnt">'+(nz?nz+"z":"")+'</span>'
+   +'<select onchange="S.mm[\''+c+'\']=this.value">'
+   +'<option value="">default</option>'
+   +'<option '+(S.mm[c]==="blur"?"selected":"")+'>blur</option>'
+   +'<option '+(S.mm[c]==="box"?"selected":"")+'>box</option>'
+   +'<option '+(S.mm[c]==="mosaic"?"selected":"")+'>mosaic</option></select>'
+   +'</div>';
+ }
+ const iact=S.cls==="ignore"?"active":"";
+ h+='<div class="catrow '+iact+'" style="border-top:1px solid #0f172a;margin-top:5px;padding-top:6px">'
+  +'<span style="width:13px"></span>'
+  +'<span class="sw" style="background:'+CATS.ignore+'" onclick="setCls(\'ignore\')"></span>'
+  +'<span class="nm" onclick="setCls(\'ignore\')">'+DN.ignore+'</span>'
+  +'<span class="cnt">'+(S.ignore.length?S.ignore.length+"z":"")+'</span></div>';
+ $("cats").innerHTML=h;
+ winBar();
+}
+function togCat(c,on){const w=selWin();if(on)w.cats[c]=true;else delete w.cats[c];
+ renderCats();summary();}
+function setCls(c){S.cls=c;S.selZone=null;renderCats();draw();}
+function hint(){
+ $("hint").innerHTML=S.mode==="draw"
+  ?('✏️ drawing <b style="color:'+CATS[S.cls]+'">'+(DN[S.cls]||S.cls)
+    +'</b> zones for <b style="color:#fbbf24">Window '+(S.sel+1)+'</b>')
+  :"select mode — click a zone to move it, Del removes it";
+}
 
-// ---------- geometry ----------
-function toNorm(px,py){return[px/cv.width,py/cv.height];}
-function rectPx(r){return[r[0]*cv.width,r[1]*cv.height,
-                          r[2]*cv.width,r[3]*cv.height];}
-function pointer(e){const b=cv.getBoundingClientRect();
- return[(e.clientX-b.left)*cv.width/b.width,
-        (e.clientY-b.top)*cv.height/b.height];}
-
-// ---------- rendering: union fill + union outline per class ----------
-function unionLayer(rects,color,extra){
- const m=document.createElement("canvas");m.width=cv.width;m.height=cv.height;
- const mc=m.getContext("2d");mc.fillStyle="#fff";
- for(const r of rects){const[x1,y1,x2,y2]=rectPx(r);
-  mc.fillRect(Math.min(x1,x2),Math.min(y1,y2),Math.abs(x2-x1),Math.abs(y2-y1));}
- if(extra){const[x1,y1,x2,y2]=extra;
-  mc.fillRect(Math.min(x1,x2),Math.min(y1,y2),Math.abs(x2-x1),Math.abs(y2-y1));}
- // tinted fill
- const f=document.createElement("canvas");f.width=cv.width;f.height=cv.height;
- const fc=f.getContext("2d");fc.drawImage(m,0,0);
- fc.globalCompositeOperation="source-in";fc.fillStyle=color;
- fc.fillRect(0,0,f.width,f.height);
- ctx.globalAlpha=0.16;ctx.drawImage(f,0,0);ctx.globalAlpha=1;
- // outline ring = dilate(mask) - mask, tinted
- const d=document.createElement("canvas");d.width=cv.width;d.height=cv.height;
- const dc=d.getContext("2d");
- for(const[ox,oy] of [[-2,0],[2,0],[0,-2],[0,2],[-2,-2],[2,2],[-2,2],[2,-2]])
-  dc.drawImage(m,ox,oy);
- dc.globalCompositeOperation="destination-out";dc.drawImage(m,0,0);
- dc.globalCompositeOperation="source-in";dc.fillStyle=color;
- dc.fillRect(0,0,d.width,d.height);
- ctx.globalAlpha=0.95;ctx.drawImage(d,0,0);ctx.globalAlpha=1;
+// ---------- zone drawing on the frame ----------
+function zoneList(){return S.cls==="ignore"?S.ignore:
+ (selWin().zones[S.cls]=selWin().zones[S.cls]||[]);}
+function pushUndo(){S.undo.push(JSON.stringify({w:S.wins,i:S.ignore}));
+ if(S.undo.length>40)S.undo.shift();}
+function undoZone(){
+ const s=S.undo.pop();if(!s)return;
+ const d=JSON.parse(s);S.wins=d.w;S.ignore=d.i;
+ if(S.sel>=S.wins.length)S.sel=S.wins.length-1;
+ tlHdr();renderCats();draw();tlDraw();
+}
+function hookZC(){
+ const c=$("zc");
+ if(c.dataset.hooked)return;c.dataset.hooked=1;
+ const pt=e=>{const r=c.getBoundingClientRect();
+  return [(e.clientX-r.left)/r.width,(e.clientY-r.top)/r.height];};
+ c.addEventListener("pointerdown",e=>{
+  c.setPointerCapture(e.pointerId);prime();
+  const p=pt(e);
+  if(S.mode==="draw"){
+   if(!S.anchor){S.anchor=p;S.fl=p;}
+   else{finishRect(S.anchor,p);S.anchor=null;S.fl=null;}
+   draw();return;
+  }
+  S.selZone=null;
+  const w=selWin();
+  const all=[["ignore",S.ignore]].concat(Object.entries(w.zones));
+  outer:
+  for(const [cat,rs] of all)
+   for(let i=rs.length-1;i>=0;i--){const r=rs[i];
+    if(p[0]>=r[0]&&p[0]<=r[2]&&p[1]>=r[1]&&p[1]<=r[3]){
+     S.selZone={cat:cat,i:i};S.drag={off:[p[0]-r[0],p[1]-r[1]]};break outer;}}
+  draw();
+ });
+ c.addEventListener("pointermove",e=>{
+  const p=pt(e);
+  if(S.mode==="draw"&&S.anchor){S.fl=p;draw();return;}
+  if(S.mode==="select"&&S.selZone&&S.drag){
+   const rs=S.selZone.cat==="ignore"?S.ignore:selWin().zones[S.selZone.cat];
+   const r=rs[S.selZone.i],w=r[2]-r[0],h=r[3]-r[1];
+   const x=Math.max(0,Math.min(1-w,p[0]-S.drag.off[0])),
+         y=Math.max(0,Math.min(1-h,p[1]-S.drag.off[1]));
+   rs[S.selZone.i]=[x,y,x+w,y+h];draw();
+  }
+ });
+ c.addEventListener("pointerup",e=>{
+  if(S.mode==="draw"&&S.anchor){
+   const p=pt(e);
+   if(Math.abs(p[0]-S.anchor[0])>0.01||Math.abs(p[1]-S.anchor[1])>0.01){
+    finishRect(S.anchor,p);S.anchor=null;S.fl=null;draw();}
+  }
+  S.drag=null;
+ });
+ document.addEventListener("keydown",e=>{
+  if(e.key==="Escape"){S.anchor=null;S.fl=null;draw();}
+  if((e.key==="Delete"||e.key==="Backspace")&&S.mode==="select"&&S.selZone
+     &&document.activeElement.tagName!=="INPUT"
+     &&document.activeElement.tagName!=="TEXTAREA"){
+   pushUndo();
+   const rs=S.selZone.cat==="ignore"?S.ignore:selWin().zones[S.selZone.cat];
+   rs.splice(S.selZone.i,1);S.selZone=null;renderCats();draw();
+  }
+ });
+}
+function finishRect(a,b){
+ const r=[Math.min(a[0],b[0]),Math.min(a[1],b[1]),
+          Math.max(a[0],b[0]),Math.max(a[1],b[1])];
+ if(r[2]-r[0]<0.01||r[3]-r[1]<0.01)return;
+ pushUndo();
+ zoneList().push(r.map(v=>+v.toFixed(4)));
+ if(S.cls!=="ignore")selWin().cats[S.cls]=true;   // drawing switches it on
+ renderCats();summary();
 }
 function draw(){
- ctx.clearRect(0,0,cv.width,cv.height);
- const show=active?[active]:Object.keys(CATS);
- for(const c of show){
-  const rects=zones[c]||[];
-  let extra=null;
-  if(c===active&&anchor&&floatPt)
-   extra=[anchor[0],anchor[1],floatPt[0],floatPt[1]];
-  if(rects.length||extra)unionLayer(rects,CATS[c],extra);
+ const c=$("zc"),g=c.getContext("2d");
+ g.clearRect(0,0,c.width,c.height);
+ const w=selWin(); if(!w)return;
+ const rect=(r,col,label,seld)=>{
+  const x=r[0]*c.width,y=r[1]*c.height,
+        ww=(r[2]-r[0])*c.width,hh=(r[3]-r[1])*c.height;
+  g.fillStyle=col+"22";g.fillRect(x,y,ww,hh);
+  g.lineWidth=seld?3:2;g.strokeStyle=col;g.strokeRect(x,y,ww,hh);
+  g.fillStyle=col;g.font="bold 11px sans-serif";
+  g.fillRect(x,y,g.measureText(label).width+10,15);
+  g.fillStyle="#fff";g.fillText(label,x+5,y+11);
+ };
+ for(const [cat,rs] of Object.entries(w.zones))
+  rs.forEach((r,i)=>rect(r,CATS[cat]||"#94a3b8",DN[cat]||cat,
+   S.selZone&&S.selZone.cat===cat&&S.selZone.i===i));
+ S.ignore.forEach((r,i)=>rect(r,CATS.ignore,"ignore",
+   S.selZone&&S.selZone.cat==="ignore"&&S.selZone.i===i));
+ if(S.anchor&&S.fl){
+  const a=S.anchor,b=S.fl;
+  g.setLineDash([5,4]);g.strokeStyle=CATS[S.cls];g.lineWidth=2;
+  g.strokeRect(Math.min(a[0],b[0])*c.width,Math.min(a[1],b[1])*c.height,
+   Math.abs(b[0]-a[0])*c.width,Math.abs(b[1]-a[1])*c.height);
+  g.setLineDash([]);
  }
- // selection adorners
- if(active&&mode==="select"&&selIdx>=0&&zones[active]&&zones[active][selIdx]){
-  const[x1,y1,x2,y2]=rectPx(zones[active][selIdx]);
-  ctx.setLineDash([6,4]);ctx.strokeStyle="#fff";ctx.lineWidth=1.5;
-  ctx.strokeRect(x1,y1,x2-x1,y2-y1);ctx.setLineDash([]);
-  for(const[hx,hy] of [[x1,y1],[x2,y1],[x1,y2],[x2,y2]]){
-   ctx.fillStyle=CATS[active];ctx.strokeStyle="#fff";ctx.lineWidth=2;
-   ctx.fillRect(hx-6,hy-6,12,12);ctx.strokeRect(hx-6,hy-6,12,12);}
- }
+ hint();
+}
+function setMode(m){S.mode=m;S.anchor=null;S.selZone=null;
+ $("mdraw").classList.toggle("on",m==="draw");
+ $("msel").classList.toggle("on",m==="select");
+ $("zc").style.cursor=m==="draw"?"crosshair":"default";draw();}
+
+// ---------- windows ----------
+function winBar(){
+ const w=selWin(); if(!w)return;
+ $("wname").textContent="◧ Window "+(S.sel+1);
+ $("wtime").textContent=fmt(w.t0)+" – "+fmt(w.t1);
+ const zs=Object.entries(w.zones).filter(([c,r])=>r.length)
+   .map(([c,r])=>(DN[c]||c)+" ×"+r.length).join(", ");
+ $("wzsum").textContent=zs?("zones: "+zs):"no zones (whole frame)";
+ $("pastebtn").disabled=!S.paste;
+ summary();
+}
+function addWin(){
+ const v=$("vd");
+ const c=Math.min(Math.max(v.currentTime||0,S.cin),S.cout);
+ const half=Math.max(1,S.dur*0.03);
+ pushUndo();
+ S.wins.push(newWin(Math.max(S.cin,c-half),Math.min(S.cout,c+half),
+                    selWin()?selWin().cats:{}));
+ S.sel=S.wins.length-1;
+ tlHdr();renderCats();draw();tlDraw();
+}
+function delWin(){
+ pushUndo();
+ if(S.wins.length<=1){    // last window resets to the whole-clip default
+  const dc={};DEFAULT_ON.forEach(c=>dc[c]=true);
+  S.wins=[newWin(S.cin,S.cout,dc)];S.sel=0;
+ }else{S.wins.splice(S.sel,1);S.sel=Math.max(0,S.sel-1);}
+ tlHdr();renderCats();draw();tlDraw();
+}
+function copyZones(){S.paste=JSON.parse(JSON.stringify(selWin().zones));winBar();}
+function pasteZones(){if(!S.paste)return;pushUndo();
+ selWin().zones=JSON.parse(JSON.stringify(S.paste));
+ for(const c of Object.keys(selWin().zones))
+  if(selWin().zones[c].length)selWin().cats[c]=true;
+ renderCats();draw();}
+function clearZones(){pushUndo();selWin().zones={};renderCats();draw();}
+function clampWins(){
+ S.wins.forEach(w=>{w.t0=Math.max(w.t0,S.cin);w.t1=Math.min(w.t1,S.cout);});
+ S.wins=S.wins.filter(w=>w.t1-w.t0>0.2);
+ if(!S.wins.length){const dc={};DEFAULT_ON.forEach(c=>dc[c]=true);
+  S.wins=[newWin(S.cin,S.cout,dc)];}
+ if(S.sel>=S.wins.length)S.sel=S.wins.length-1;
 }
 
-// ---------- interaction ----------
-function hitHandle(p,r){const[x1,y1,x2,y2]=rectPx(r);
- const hs=[[x1,y1,0],[x2,y1,1],[x1,y2,2],[x2,y2,3]];
- for(const[hx,hy,i] of hs)
-  if(Math.abs(p[0]-hx)<9&&Math.abs(p[1]-hy)<9)return i;
- return -1;}
-function hitRect(p,r){const[x1,y1,x2,y2]=rectPx(r);
- return p[0]>=Math.min(x1,x2)&&p[0]<=Math.max(x1,x2)
-     &&p[1]>=Math.min(y1,y2)&&p[1]<=Math.max(y1,y2);}
-
-let downAt=null,moved=false;
-cv.addEventListener("pointerdown",e=>{
- if(!active){flashPickClass();return;}
- const p=pointer(e);downAt=[...p,Date.now()];moved=false;
- cv.setPointerCapture(e.pointerId);
- if(mode==="select"){
-  const rs=zones[active]||[];
-  if(selIdx>=0&&rs[selIdx]!==undefined){
-   const h=hitHandle(p,rs[selIdx]);
-   if(h>=0){pushUndo();beforeDrag=[...zones[active][selIdx]];dragKind="handle";dragIdx=h;return;}}
-  for(let i=rs.length-1;i>=0;i--)
-   if(hitRect(p,rs[i])){selIdx=i;pushUndo();beforeDrag=[...rs[i]];dragKind="move";
-    const[x1,y1]=rectPx(rs[i]);dragOff=[p[0]-x1,p[1]-y1];draw();return;}
-  selIdx=-1;dragKind=null;draw();
- }else{ // draw
-  if(anchor){commitRect(p);}
-  else{anchor=p;floatPt=p;}
- }
-});
-cv.addEventListener("pointermove",e=>{
- const p=pointer(e);
- const[nx,ny]=toNorm(p[0],p[1]);
- document.getElementById("coords").textContent=
-  `x ${nx.toFixed(3)}  y ${ny.toFixed(3)}   (${Math.round(nx*natW)}, ${Math.round(ny*natH)} px)`;
- if(downAt&&(Math.abs(p[0]-downAt[0])>5||Math.abs(p[1]-downAt[1])>5))moved=true;
- if(mode==="draw"&&anchor){floatPt=p;draw();return;}
- if(mode==="select"&&dragKind&&selIdx>=0){
-  const r=zones[active][selIdx],[x1,y1,x2,y2]=rectPx(r);
-  if(dragKind==="move"){
-   const w=x2-x1,h=y2-y1,nx1=p[0]-dragOff[0],ny1=p[1]-dragOff[1];
-   zones[active][selIdx]=[...toNorm(nx1,ny1),...toNorm(nx1+w,ny1+h)];
-  }else{
-   const c=[[x1,y1],[x2,y1],[x1,y2],[x2,y2]];c[dragIdx]=p;
-   const xs=[c[0][0],c[1][0],c[2][0],c[3][0]],ys=[c[0][1],c[1][1],c[2][1],c[3][1]];
-   if(dragIdx===0){zones[active][selIdx]=[...toNorm(p[0],p[1]),...toNorm(x2,y2)];}
-   if(dragIdx===1){zones[active][selIdx]=[...toNorm(x1,p[1]),...toNorm(p[0],y2)];}
-   if(dragIdx===2){zones[active][selIdx]=[...toNorm(p[0],y1),...toNorm(x2,p[1])];}
-   if(dragIdx===3){zones[active][selIdx]=[...toNorm(x1,y1),...toNorm(p[0],p[1])];}
+// ---------- timeline (one lane per window + audio lanes) ----------
+function tlH(){return RULER+WROW*S.wins.length+AROW*S.audio.length;}
+function tlHdr(){
+ let h='<div style="height:'+RULER+'px;color:#64748b;border-top:none">timeline</div>';
+ S.wins.forEach((w,i)=>{h+='<div style="height:'+WROW+'px;'
+  +(i===S.sel?'color:#fbbf24;font-weight:700':'')+'">W'+(i+1)+'</div>';});
+ S.audio.forEach((a,i)=>{h+='<div style="height:'+AROW+'px">'+a.label
+  +'<button class="mbtn '+(a.muted?"on":"off")
+  +'" title="mute: remove this track from the output"'
+  +' onclick="S.audio['+i+'].muted=!S.audio['+i+'].muted;tlHdr();tlDraw();summary()">M</button></div>';});
+ $("tlhdr").innerHTML=h;
+}
+function tx(t,w){return Math.max(0,Math.min(w,t/Math.max(0.1,S.dur)*w));}
+function tlDraw(){
+ const c=$("tl");if(!c||!S.dur)return;
+ const w=c.clientWidth||600,H=tlH();
+ c.width=w;c.height=H;c.style.height=H+"px";
+ const g=c.getContext("2d");
+ g.fillStyle="#0b1120";g.fillRect(0,0,w,H);
+ g.fillStyle="#1e293b";g.fillRect(0,0,w,RULER);
+ g.fillStyle="#64748b";g.font="9px ui-monospace,monospace";
+ const step=S.dur>1200?300:S.dur>240?60:S.dur>60?15:5;
+ for(let t=0;t<=S.dur;t+=step){
+  g.fillRect(tx(t,w),RULER-6,1,6);g.fillText(fmt(t),tx(t,w)+2,10);}
+ S.wins.forEach((win,i)=>{
+  const y=RULER+WROW*i;
+  g.fillStyle="#181207";g.fillRect(0,y,w,WROW);
+  g.fillStyle=i===S.sel?"#f59e0b":"#b45309";
+  g.fillRect(tx(win.t0,w),y+3,Math.max(2,tx(win.t1,w)-tx(win.t0,w)),WROW-6);
+  g.fillStyle="#fde68a";
+  g.fillRect(tx(win.t0,w),y+2,3,WROW-4);g.fillRect(tx(win.t1,w)-3,y+2,3,WROW-4);
+ });
+ S.audio.forEach((a,i)=>{
+  const y=RULER+WROW*S.wins.length+AROW*i;
+  g.fillStyle=a.muted?"#111827":"#0e2217";g.fillRect(0,y,w,AROW);
+  g.fillStyle=a.muted?"#374151":"#22c55e";
+  g.fillRect(tx(S.cin,w),y+6,Math.max(2,tx(S.cout,w)-tx(S.cin,w)),AROW-12);
+  if(a.muted){g.fillStyle="#6b7280";g.font="8.5px sans-serif";
+   g.fillText("muted — removed from output",tx(S.cin,w)+6,y+11);}
+ });
+ g.fillStyle="rgba(2,6,23,0.68)";
+ g.fillRect(0,0,tx(S.cin,w),H);g.fillRect(tx(S.cout,w),0,w-tx(S.cout,w),H);
+ g.fillStyle="#f8fafc";
+ g.fillRect(tx(S.cin,w)-1,0,2,H);g.fillRect(tx(S.cout,w)-1,0,2,H);
+ const v=$("vd");
+ g.strokeStyle="#e2e8f0";g.beginPath();
+ g.moveTo(tx(v.currentTime||0,w),0);g.lineTo(tx(v.currentTime||0,w),H);g.stroke();
+ const full=S.cin<0.05&&S.cout>S.dur-0.05;
+ $("foot").innerHTML=
+  'keep: <b style="color:#e2e8f0">'+(full?"whole video":fmt(S.cin)+"–"+fmt(S.cout))+'</b>'
+  +" · "+S.wins.map((x,i)=>'<b style="color:#fbbf24">W'+(i+1)+'</b> '
+    +fmt(x.t0)+"–"+fmt(x.t1)).join(" · ");
+ winBar();
+}
+function hookTL(){
+ const c=$("tl");
+ if(c.dataset.hooked)return;c.dataset.hooked=1;
+ const tAt=e=>{const r=c.getBoundingClientRect();
+  return Math.max(0,Math.min(S.dur,(e.clientX-r.left)/r.width*S.dur));};
+ c.addEventListener("pointerdown",e=>{
+  c.setPointerCapture(e.pointerId);prime();
+  const r=c.getBoundingClientRect(),px=e.clientX-r.left,py=e.clientY-r.top,
+        w=c.clientWidth,t=tAt(e);
+  if(Math.abs(px-tx(S.cin,w))<7){S.drag={k:"cin"};seek(S.cin);return;}
+  if(Math.abs(px-tx(S.cout,w))<7){S.drag={k:"cout"};seek(S.cout);return;}
+  if(py>=RULER&&py<RULER+WROW*S.wins.length){
+   const i=Math.floor((py-RULER)/WROW),win=S.wins[i];
+   if(S.sel!==i){S.sel=i;tlHdr();renderCats();draw();}
+   if(Math.abs(px-tx(win.t0,w))<7){S.drag={k:"w0",i:i};seek(win.t0);}
+   else if(Math.abs(px-tx(win.t1,w))<7){S.drag={k:"w1",i:i};seek(win.t1);}
+   else if(t>=win.t0&&t<=win.t1){S.drag={k:"wm",i:i,off:t-win.t0};seek(t);}
+   else{S.drag={k:"seek"};seek(t);}
+   tlDraw();return;
   }
-  normRect(zones[active][selIdx]);
- if(clipToBarriers(zones[active][selIdx],active)===null){
-  zones[active][selIdx]=beforeDrag?[...beforeDrag]:zones[active][selIdx];}
- draw();save();
- }
-});
-cv.addEventListener("pointerup",e=>{
- const p=pointer(e);
- if(mode==="draw"&&anchor&&moved){commitRect(p);}
- if(mode==="select"){dragKind=null;}
- downAt=null;
-});
-function rectsHit(a,b){return a[0]<b[2]&&a[2]>b[0]&&a[1]<b[3]&&a[3]>b[1];}
-function barriersFor(cls){
- let out=[];
- for(const c in zones){
-  if(cls==="ignore"?c!=="ignore":c==="ignore")out=out.concat(zones[c]||[]);
- }
- return out;
-}
-function clipToBarriers(r,cls){
- /* ignore zones and detection zones may never overlap: the edge of one
-    group is a hard barrier for the other. Shrink the rect along whichever
-    edge loses the least area; null = nothing legal remains. */
- const bars=barriersFor(cls);
- for(let guard=0;guard<16;guard++){
-  const hit=bars.find(b=>rectsHit(r,b));
-  if(!hit)return r;
-  const cands=[];
-  if(hit[0]>r[0])cands.push([r[0],r[1],hit[0],r[3]]);
-  if(hit[2]<r[2])cands.push([hit[2],r[1],r[2],r[3]]);
-  if(hit[1]>r[1])cands.push([r[0],r[1],r[2],hit[1]]);
-  if(hit[3]<r[3])cands.push([r[0],hit[3],r[2],r[3]]);
-  const ok=cands.filter(c=>c[2]-c[0]>0.005&&c[3]-c[1]>0.005)
-   .sort((a,b)=>(b[2]-b[0])*(b[3]-b[1])-(a[2]-a[0])*(a[3]-a[1]))[0];
-  if(!ok)return null;
-  r[0]=ok[0];r[1]=ok[1];r[2]=ok[2];r[3]=ok[3];
- }
- return r;
-}
-function commitRect(p){
- const r=[...toNorm(anchor[0],anchor[1]),...toNorm(p[0],p[1])];
- anchor=null;floatPt=null;
- normRect(r);
- if(clipToBarriers(r,active)===null){
-  document.getElementById("modeinfo").textContent=
-   "⚠ blocked — ignore zones and detection zones cannot overlap";
-  setTimeout(chips,1800);draw();return;
- }
- if((r[2]-r[0])*cv.width<8||(r[3]-r[1])*cv.height<8){draw();return;}
- pushUndo();(zones[active]=zones[active]||[]).push(r);
- chips();draw();save();
-}
-function normRect(r){
- const x1=Math.min(r[0],r[2]),x2=Math.max(r[0],r[2]),
-       y1=Math.min(r[1],r[3]),y2=Math.max(r[1],r[3]);
- r[0]=Math.max(0,x1);r[1]=Math.max(0,y1);
- r[2]=Math.min(1,x2);r[3]=Math.min(1,y2);
-}
-document.addEventListener("keydown",e=>{
- if(e.key==="Escape"){anchor=null;floatPt=null;draw();}
- if((e.key==="Delete"||e.key==="Backspace")&&mode==="select"&&active&&selIdx>=0){
-  pushUndo();zones[active].splice(selIdx,1);selIdx=-1;chips();draw();save();
-  e.preventDefault();}
- if(e.ctrlKey&&e.key.toLowerCase()==="z"){undo();e.preventDefault();}
-});
-function flashPickClass(){
- const el=document.getElementById("modeinfo");
- el.textContent="⚠ pick a class on the left to start editing";
- setTimeout(chips,1600);
+  S.drag={k:"seek"};seek(t);tlDraw();
+ });
+ c.addEventListener("pointermove",e=>{
+  if(!S.drag)return;
+  const t=tAt(e),d=S.drag;
+  if(d.k==="cin"){S.cin=Math.min(t,S.cout-0.3);clampWins();seek(S.cin);tlHdr();}
+  else if(d.k==="cout"){S.cout=Math.max(t,S.cin+0.3);clampWins();seek(S.cout);tlHdr();}
+  else if(d.k==="w0"){const w0=S.wins[d.i];
+   if(w0){w0.t0=Math.max(S.cin,Math.min(t,w0.t1-0.3));seek(w0.t0);}}
+  else if(d.k==="w1"){const w1=S.wins[d.i];
+   if(w1){w1.t1=Math.min(S.cout,Math.max(t,w1.t0+0.3));seek(w1.t1);}}
+  else if(d.k==="wm"){const wm=S.wins[d.i];
+   if(wm){const len=wm.t1-wm.t0;
+    const a=Math.max(S.cin,Math.min(t-d.off,S.cout-len));
+    wm.t0=a;wm.t1=a+len;seek(a);}}
+  else if(d.k==="seek"){seek(t);}
+  tlDraw();
+ });
+ c.addEventListener("pointerup",()=>{S.drag=null;tlHdr();tlDraw();});
 }
 
-// ---------- persistence ----------
-async function load(){
- zones=await (await fetch("api/zones")).json();
- chips();draw();
+// ---------- summary + custom cats + start ----------
+function summary(){
+ if(!S.dur){$("summary").textContent="";return;}
+ const muted=S.audio.filter(a=>a.muted).map(a=>a.label);
+ const full=S.cin<0.05&&S.cout>S.dur-0.05;
+ $("summary").textContent=
+  S.wins.length+" window"+(S.wins.length>1?"s":"")
+  +(muted.length?" · muted: "+muted.join(","):"")
+  +(full?"":" · output "+fmt(S.cin)+"–"+fmt(S.cout));
 }
-function save(){
- clearTimeout(saveT);
- const s=document.getElementById("saved");
- s.textContent="Saving…";s.style.opacity=1;
- saveT=setTimeout(async()=>{
-  await fetch("api/zones",{method:"POST",
-   headers:{"Content-Type":"application/json"},body:JSON.stringify(zones)});
-  s.textContent="Saved ✓";
-  setTimeout(()=>{s.style.opacity=0;},1200);
- },500);
+async function addCustom(){
+ const n=$("ccname").value.trim(),rx=$("ccrx").value.trim();
+ if(!n||!rx){alert("Both a name and a regex are required.");return;}
+ const r=await fetch("/api/custom_cats",{method:"POST",
+  headers:{"Content-Type":"application/json"},
+  body:JSON.stringify({name:n,regex:rx})});
+ if(r.ok)location.reload();
+ else alert("Could not add the category.");
 }
-
-// ---------- background ----------
-function fitCanvas(){
- const el=BGMODE==="video"?bgv:bg;
- cv.width=el.clientWidth||960;cv.height=el.clientHeight||540;
- document.getElementById("reshint").textContent=
-  `background: ${natW}×${natH} — zones are stored resolution-independent (0–1) and scale to each video`;
- draw();
+async function loadCustomList(){
+ try{
+  const d=await (await fetch("/api/custom_cats")).json();
+  const cats=Array.isArray(d)?d:(d.cats||[]);
+  $("cclist").innerHTML=cats.map(x=>
+   '<span class="chip"><span class="dot" style="background:'
+   +(CATS[x.id]||"#94a3b8")+'"></span>'+x.id
+   +' <b style="font-family:monospace">'+(x.regex||"")+'</b></span>').join("");
+ }catch(e){}
 }
-bg.onload=()=>{setBgMode("img");natW=bg.naturalWidth;natH=bg.naturalHeight;fitCanvas();};
-bgv.addEventListener("loadedmetadata",()=>{
- setBgMode("video");natW=bgv.videoWidth;natH=bgv.videoHeight;
- DUR=bgv.duration||10;
- const sl=document.getElementById("tslide");
- sl.max=Math.max(0.5,DUR-0.1).toFixed(1);sl.value=0;sl.disabled=false;tlSync();
- requestAnimationFrame(fitCanvas);
-});
-bgv.addEventListener("loadeddata",fitCanvas);
-function loadLocal(){
- const f=document.getElementById("localvid").files[0];
- if(!f)return;
- CURJOB=null;document.getElementById("jobsel").value="";
- bgv.src=URL.createObjectURL(f);
+function unionCats(){
+ const u={};S.wins.forEach(w=>Object.keys(w.cats).forEach(c=>u[c]=true));
+ return Object.keys(u);
 }
-function loadRef(){
- const f=document.getElementById("refimg").files[0];
- if(!f)return;
- CURJOB=null;document.getElementById("jobsel").value="";
- document.getElementById("tslide").disabled=true;
- bg.src=URL.createObjectURL(f);
+async function startScan(){
+ if(!S.dur){alert("Load a video first.");return;}
+ if(!S.file&&!$("spath").value.trim()){alert("Choose a file or server path.");return;}
+ const cats=unionCats();
+ if(!cats.length&&!confirm("No categories are enabled in any window — "
+   +"run a manual-only job (you add tracked objects in review)?"))return;
+ const o={
+  engine:$("engine").value,device:$("device").value,encoder:$("encoder").value,
+  mode:$("mode").value,sample_interval:+$("si").value,scan_trigger:+$("st").value,
+  pad:+$("pad").value,bridge_gap:+$("bgap").value,mrn_regex:$("mrnrx").value,
+  face_expand:+$("fex").value,face_threshold:+$("fthr").value,
+  face_shape:$("fshape").value,detect_scale:+$("dscale").value,
+  hdr_output:$("hdrout").value,codec:$("vcodec").value,
+  allow_names:$("allow").value,extra_names:$("extra").value,
+  dense_faces:$("densefaces").checked,skip_review:$("skiprev").checked,
+  no_memory:$("nomem").checked,preview_mode:$("pmode").checked,
+  draw_scores:$("drawscores").checked,
+  use_zones:false,           // zones travel inside the windows now
+  categories:cats.length?cats.join(","):"none",
+  mode_map:Object.entries(S.mm).filter(([c,m])=>m)
+    .map(([c,m])=>c+"="+m).join(","),
+  clip_frac:(S.cin>0.05||S.cout<S.dur-0.05)
+    ?((S.cin/S.dur).toFixed(4)+"-"+(S.cout/S.dur).toFixed(4)):"",
+  mute_tracks:S.audio.length===1&&S.audio[0].muted?"all"
+    :S.audio.map((a,i)=>a.muted?String(i+1):"").filter(Boolean).join(","),
+  windows:S.wins.map(w=>({t0:+(w.t0/S.dur).toFixed(4),
+    t1:+(w.t1/S.dur).toFixed(4),cats:Object.keys(w.cats),zones:w.zones})),
+  ignore_zones:S.ignore,
+ };
+ const fd=new FormData();
+ if(S.file)fd.append("video",S.file);
+ fd.append("server_path",$("spath").value.trim());
+ fd.append("options",JSON.stringify(o));
+ const btns=document.querySelectorAll("button");btns.forEach(b=>b.disabled=true);
+ const res=await fetch("/api/jobs",{method:"POST",body:fd});
+ if(res.ok){location.href="/";}
+ else{btns.forEach(b=>b.disabled=false);
+  let msg="upload failed";try{msg=(await res.json()).error||msg;}catch(e){}
+  alert("Could not start: "+msg);}
 }
-window.addEventListener("resize",fitCanvas);
-function gridBg(){
- const g=document.createElement("canvas");g.width=1280;g.height=720;
- const gc=g.getContext("2d");gc.fillStyle="#0f172a";gc.fillRect(0,0,1280,720);
- gc.strokeStyle="#1e293b";
- for(let x=0;x<1280;x+=80){gc.beginPath();gc.moveTo(x,0);gc.lineTo(x,720);gc.stroke();}
- for(let y=0;y<720;y+=80){gc.beginPath();gc.moveTo(0,y);gc.lineTo(1280,y);gc.stroke();}
- bg.src=g.toDataURL();
-}
-async function jobs(){
- const js=await (await fetch("api/jobs")).json();
- const sel=document.getElementById("jobsel");
- sel.innerHTML=`<option value="">— grid (no video) —</option>`+
-  js.map(j=>`<option value="${j.id}">${j.name} (${j.phase})</option>`).join("");
-}
-async function pickJob(){
- CURJOB=document.getElementById("jobsel").value||null;
- const sl=document.getElementById("tslide");
- if(!CURJOB){sl.disabled=true;tlSync();setBgMode("img");gridBg();return;}
- const d=await (await fetch(`api/jobs/${CURJOB}/mediainfo`)).json();
- DUR=d.duration;natW=d.width;natH=d.height;
- sl.max=Math.max(0.5,DUR-0.2).toFixed(1);sl.disabled=false;
- scrub();
-}
-const tltrack=document.getElementById("tltrack"),tlfill=document.getElementById("tlfill"),
-      tlhead=document.getElementById("tlhead"),tlbub=document.getElementById("tlbub"),
-      tlcur=document.getElementById("tlcur"),tldur=document.getElementById("tldur"),
-      tlbox=document.getElementById("tl");
-function tfmt(t){t=Math.max(0,+t||0);const m=Math.floor(t/60),s=Math.floor(t%60);
- return m+":"+String(s).padStart(2,"0");}
-let tlThrottle=null,tlDrag=false;
-function tlSync(){
- const sl=document.getElementById("tslide");
- tlbox.classList.toggle("off",sl.disabled);
- const mx=+sl.max||10,v=+sl.value||0,f=Math.min(1,v/mx);
- tlfill.style.width=(f*100)+"%";tlhead.style.left=(f*100)+"%";
- tlcur.textContent=tfmt(v);tldur.textContent=tfmt(mx);
- const tk=document.getElementById("tlticks");
- if(tk.childElementCount!==9){tk.innerHTML="";for(let i=1;i<10;i++){
-  const d=document.createElement("div");d.className="tick";
-  d.style.left=(i*10)+"%";tk.appendChild(d);}}
-}
-function tlSeek(ev,final){
- const sl=document.getElementById("tslide");
- if(sl.disabled)return;
- const r=tltrack.getBoundingClientRect();
- const f=Math.min(1,Math.max(0,(ev.clientX-r.left)/r.width));
- sl.value=(f*(+sl.max||10)).toFixed(2);
- tlSync();
- if(final){clearTimeout(tlThrottle);tlThrottle=null;scrub();}
- else if(!tlThrottle)tlThrottle=setTimeout(()=>{tlThrottle=null;scrub();},160);
-}
-tltrack.addEventListener("pointerdown",e=>{tlDrag=true;
- tltrack.setPointerCapture(e.pointerId);tlSeek(e,false);});
-tltrack.addEventListener("pointermove",e=>{
- const sl=document.getElementById("tslide");
- const r=tltrack.getBoundingClientRect();
- const f=Math.min(1,Math.max(0,(e.clientX-r.left)/r.width));
- tlbub.style.left=(f*100)+"%";tlbub.textContent=tfmt(f*(+sl.max||10));
- if(!sl.disabled)tlbub.style.display="block";
- if(tlDrag)tlSeek(e,false);});
-tltrack.addEventListener("pointerup",e=>{tlDrag=false;tlSeek(e,true);});
-tltrack.addEventListener("pointerleave",()=>{tlbub.style.display="none";});
-function scrub(){
- tlSync();
- const t=document.getElementById("tslide").value;
- if(BGMODE==="video"&&!CURJOB){bgv.currentTime=+t;return;}
- if(!CURJOB)return;
- setBgMode("img");
- bg.src=`api/jobs/${CURJOB}/frame_at?t=${t}`;
-}
-
-gridBg();chips();load();jobs();setMode('draw');tlSync();
-</script>
-<footer style="text-align:center;color:#9ca3af;font-size:12px;padding:18px 12px 26px">
-OpenScrub v%%VERSION%% · <a href="license" style="color:#6b7280">Apache-2.0 license</a>
-· best-effort redaction — always review output before sharing PII</footer>
-</body></html>"""
+setMode("draw");loadCustomList();
+</script></body></html>
+"""

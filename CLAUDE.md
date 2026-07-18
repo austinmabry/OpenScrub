@@ -12,7 +12,7 @@ target is Windows 10 + NVIDIA RTX 3060.
 |---|---|
 | `openscrub.py` | The engine. CLI + all detection/render logic. Single file, ~2400 lines. |
 | `openscrub_web.py` | Flask web app. The entire UI is one embedded `PAGE` string (HTML/CSS/JS). Serves via cheroot (production WSGI, TLS) with Flask-dev fallback. |
-| `zones_ui.py` | Zone-editor page (`ZONES_PAGE`), served by the web app at `/zones`. |
+| `zones_ui.py` | The "Scan Setup" editor page (`ZONES_PAGE`), served at `/zones`: load a video, stack detection windows on a timeline (one lane per window, overlap allowed), give each window its own categories + zones, copy/paste zones, mute audio lanes, set clip bookends, Start scan. Replaced the old global zone editor. |
 | `openscrub_gui.py` | Legacy Tk GUI. Frozen; ships but is not actively developed. |
 | `openscrub_setup.py` | `openscrub-setup` command: detects/installs Tesseract + FFmpeg (winget/apt), optional spaCy model + plate model, Windows Start Menu shortcuts. Ships in the wheel. |
 | `windows/` | Native Windows packaging: `openscrub.spec` (PyInstaller, two branded exes), `installer.iss` (Inno Setup → Program Files), `build_installer.bat` (runs both; attach output exe to the GitHub release). Build on Windows only. |
@@ -23,7 +23,7 @@ target is Windows 10 + NVIDIA RTX 3060.
 | `fetch_plate_models.py` | Alt path to fetch plate models via the open-image-models pip package. |
 | `openscrub_update.py` | `openscrub-update` command + web self-update backend: PyPI version check, sha256-verified sdist download, data-preserving folder update (PRESERVE set), TOFU pin carry-forward. Ships in the wheel. |
 | `openscrub_vault.py` | At-rest encryption for the job store: scrypt keystore, chunked AES-256-GCM files (`.osvault`), lock/unlock tree walkers. NO password reset by design. Ships in the wheel. |
-| `test_openscrub.py` | pytest suite (31 tests). Must stay green. |
+| `test_openscrub.py` | pytest suite (42 tests). Must stay green. |
 | `tools/make_icons.py` | Regenerates every icon/logo asset from `assets/badge_master.png`. |
 | `tools/make_wordmark.py` | Regenerates the typeset Poppins wordmarks (navy + white). |
 | `assets/` | Brand assets. `badge_master.png` (canonical, mosaic+brackets style) and `badge_master_blurbox_alt.png` (alternate) are the sources; everything else is generated. |
@@ -165,6 +165,28 @@ Key classes/functions (locate with grep, line numbers drift):
   offsets otherwise. Trim is SDR-only for now (HDR logs a NOTE and renders full
   length). Category ids are a compat surface but "mrn" DISPLAYS as
   "regex" everywhere (CATDN map in PAGE, DN maps in zones page).
+- Unified Scan Setup editor (`/zones`, zones_ui.py): the full-featured
+  successor to the homepage scope card. One editor: video preview (local
+  file objectURL or `/api/server_video?path=` — Range-aware send_file
+  behind server_path_error), STACKED detection windows each on its OWN
+  timeline lane (windows may overlap: faces 1.2–19.5s AND names 5–7s),
+  and each window carries its OWN categories + zones (drawn on the
+  frame; whole-frame when a checked category has no zones). Copy/paste
+  zones between windows, clip bookends drag window edges inward
+  (`clampWins`; windows <0.2s drop; the last window resets to
+  whole-clip), audio lanes with M mute buttons, iOS prime + seek-queue
+  live scrubbing. Serialization: startScan POSTs the normal /api/jobs
+  FormData with `options.windows` = [{t0,t1 (FRACTIONS of duration),
+  cats:[ids], zones:{cat:[normrects]}}] + `options.ignore_zones`;
+  build_args writes them to `windows.json` in the job dir and passes
+  `--windows`. Engine (`_prep_args` → run_scan): windows_px + `_scope_at(t)`
+  computes the per-category UNION of covering windows — any unzoned
+  covering window ⇒ unrestricted for that category; a category in NO
+  covering window is dropped silently (win_inactive counter); window
+  cats union into the engine load set, and merged window coverage feeds
+  the fast-skip gating. Report provenance records `windows`. The
+  homepage form still exists for one release (validation overlap); its
+  button is "＋ New scan" → /zones.
 - Targeted redaction: `track_manual_region` template-tracks a user-drawn
   box through a chosen time window (both directions from t_ref, adaptive
   template refresh gated on confidence >0.80, stops fail-closed below
@@ -257,10 +279,10 @@ ZONES_PAGE — keep that literal stable; customs land between it and the
 `ignore` pseudo-class).
 
 The zones page also has an `ignore` pseudo-class (never-blur zones,
-color #334155): NOT a detection category. The editor enforces that
-ignore and detection zones never overlap (barrier clipping in JS); the
-engine pops "ignore" from zones_data into args.ignore_regions
-(normalized rects, always applied — independent of use_zones), and
+color #334155): NOT a detection category. Ignore zones are GLOBAL (not
+per-window) and win any overlap with detection zones at the engine
+level: `--windows` JSON carries them in its `ignore` key →
+args.ignore_regions (always applied — independent of use_zones), and
 in_ignore_region also gates dense faces/plates.
 
 ## Verification workflow (do this after every change)
@@ -271,7 +293,7 @@ python -c "import ast; ast.parse(open('openscrub.py').read())"   # each edited .
 # PAGE is a normal (non-raw) Python string, so \n in source JS becomes a real
 # newline when served and can break string literals (the v1.0.6 jobs bug):
 #   python -c "import openscrub_web as w, re; open('/tmp/p.js','w').write(re.search(r'<script>(.*)</script>', w.PAGE, re.S).group(1))" && node --check /tmp/p.js
-python -m pytest test_openscrub.py -q                             # 31 tests, all green
+python -m pytest test_openscrub.py -q                             # 42 tests, all green
 python -m build          # FULL build (sdist->wheel), NEVER just `-w`:
                          # the wheel is built FROM the sdist in CI, so any
                          # file the wheel force-includes must be in the

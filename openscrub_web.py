@@ -350,6 +350,15 @@ def build_args(job, for_render=False):
         argv.append("--dense-faces")
     if o.get("draw_scores"):
         argv.append("--draw-scores")
+    # unified Scan Setup jobs: stacked detection windows (fractions of
+    # duration, resolved server-side by the engine) with per-window
+    # categories + zones travel as a windows.json inside the job dir
+    if o.get("windows"):
+        wpath = os.path.join(jdir, "windows.json")
+        with open(wpath, "w", encoding="utf-8") as f:
+            json.dump({"windows": o["windows"],
+                       "ignore": o.get("ignore_zones") or []}, f)
+        argv += ["--windows", wpath]
     if o.get("use_zones", True) and os.path.exists(ZONES_PATH):
         try:
             with open(ZONES_PATH, encoding="utf-8") as f:
@@ -1263,8 +1272,8 @@ value="" placeholder="e.g. \\b\\d{7}\\b — empty = mrn category off"></div>
 <label>Categories<span class="qm" data-tip="Which PII types the detectors look for. Unchecking a category means it is never blurred.">?</span></label>
 <div class="chk" id="cats"></div>
 <div class="row" style="margin:10px 0 4px">
-<a href="zones"><button type="button" class="sec">⬚ Detection zones…</button></a>
-<span id="zstat" class="badge">none configured</span></div>
+<a href="zones"><button type="button">＋ New scan</button></a>
+<span class="badge">full editor: windows, zones, audio, trim</span></div>
 <div class="grid2">
 <div><label>Allow names (keep visible)<span class="qm" data-tip="Words never treated as PII — company names, app names. One per line. Green chips below are learned automatically from your reviews and always apply too.">?</span></label><textarea id="allow"
 placeholder="e.g. provider or app names to always keep visible&#10;one per line"></textarea>
@@ -2474,9 +2483,11 @@ async function removeCerts(){
  loadCertInfo();
 }
 async function zoneStatus(){
+ const el=document.getElementById("zstat");
+ if(!el)return;   // badge retired with the Scan Setup editor
  const z=await (await fetch("api/zones")).json();
  const n=Object.keys(z).length;
- document.getElementById("zstat").textContent=
+ el.textContent=
   n?(n+" class"+(n>1?"es":"")+" zoned — outside them nothing is blurred"):"none configured (full frame)";
 }
 async function updCheck(){
@@ -3041,6 +3052,19 @@ def zones_page():
     if extra:
         page = page.replace('face:"#ec4899"', 'face:"#ec4899"%s' % extra)
     return page.replace("%%VERSION%%", openscrub.VERSION)
+
+
+@app.route("/api/server_video")
+def server_video():
+    """Stream a server-side video for the Scan Setup preview. The path is
+    request data: the same server_path_error confinement that gates job
+    intake runs BEFORE any filesystem access. conditional=True gives Range
+    support so the <video> element can seek/scrub."""
+    p = os.path.realpath(request.args.get("path", ""))
+    err = server_path_error(p)
+    if err:
+        return jsonify({"error": err}), 400
+    return send_file(p, conditional=True)
 
 
 @app.route("/api/certinfo")
