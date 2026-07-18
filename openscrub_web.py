@@ -2674,6 +2674,15 @@ def server_video():
     err = server_path_error(p)
     if err:
         return jsonify({"error": err}), 400
+    # Containment guard REPEATED inline: server_path_error already enforces
+    # it, but CodeQL's path-injection barrier analysis is function-local —
+    # the sink below must be dominated by the single-startswith shape in
+    # THIS function or the alert re-opens (same lesson as the models route).
+    root = os.environ.get("OPENSCRUB_MEDIA_ROOT")
+    r = os.path.realpath(root) if root else os.path.realpath(
+        os.path.splitdrive(p)[0] + os.sep)
+    if not p.startswith(r.rstrip(os.sep) + os.sep):
+        return jsonify({"error": "server path is outside OPENSCRUB_MEDIA_ROOT"}), 400
     return send_file(p, conditional=True)
 
 
