@@ -35,7 +35,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.41"
+VERSION = "1.0.42"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -2987,6 +2987,21 @@ def load_report(path):
 # Variable frame rate (VFR) handling
 # ----------------------------------------------------------------------------
 
+def _probe_duration(path):
+    """Video duration in seconds via ffprobe (0.0 if unavailable). The
+    authoritative length for resolving fraction-based windows/trim."""
+    if not shutil.which("ffprobe"):
+        return 0.0
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "csv=p=0", path],
+            capture_output=True, text=True, timeout=30).stdout.strip()
+        return float(out) if out else 0.0
+    except Exception:
+        return 0.0
+
+
 def probe_vfr(path):
     """-> (is_vfr, avg_fps). Screen recorders (OBS, Game Bar) often produce
     VFR video; the pipeline's frame->time mapping assumes CFR, so VFR input
@@ -3320,6 +3335,17 @@ def build_parser():
                          "— multiple detection windows; the video between "
                          "them is skipped entirely when possible. Empty = "
                          "whole video (minus --skip-start/--skip-end).")
+    ap.add_argument("--detect-windows-frac", default="",
+                    help="like --detect-windows but FRACTIONS of the video "
+                         "duration (0-1), e.g. '0.25-0.4,0.8-0.9'. The web UI "
+                         "sends these so the browser's reported length can "
+                         "never desync from the server's measurement "
+                         "(iPhone HEVC/VFR reported different durations). "
+                         "Overrides --detect-windows when set.")
+    ap.add_argument("--clip-frac", default="",
+                    help="output trim as FRACTIONS of the duration: 'f0-f1' "
+                         "(0-1). Overrides --clip-start/--clip-end. Same "
+                         "duration-agnostic reason as --detect-windows-frac.")
     ap.add_argument("--mute-audio-tracks", default="",
                     help="audio tracks to remove from the output: comma "
                          "list of 1-based track numbers, or 'all'. "
@@ -3616,14 +3642,28 @@ def run_scan(args, cb=None):
     # web timeline's detection track sends these; --skip-start/--skip-end
     # remain the single-window form. Overlapping/touching ranges merge.
     dwin = []
-    for part in (getattr(args, "detect_windows", "") or "").split(","):
-        part = part.strip()
-        if not part:
-            continue
-        a, _, b = part.partition("-")
-        w0, w1 = max(0.0, float(a)), min(duration, float(b))
-        if w1 > w0:
-            dwin.append((w0, w1))
+    dwf = (getattr(args, "detect_windows_frac", "") or "").strip()
+    if dwf:
+        # fractions of duration (web UI) — resolved against the SERVER's
+        # measured duration, immune to any client/server length mismatch
+        for part in dwf.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            a, _, b = part.partition("-")
+            w0 = max(0.0, min(1.0, float(a))) * duration
+            w1 = max(0.0, min(1.0, float(b))) * duration
+            if w1 > w0:
+                dwin.append((w0, w1))
+    else:
+        for part in (getattr(args, "detect_windows", "") or "").split(","):
+            part = part.strip()
+            if not part:
+                continue
+            a, _, b = part.partition("-")
+            w0, w1 = max(0.0, float(a)), min(duration, float(b))
+            if w1 > w0:
+                dwin.append((w0, w1))
     dwin.sort()
     merged = []
     for w in dwin:
@@ -4320,8 +4360,19 @@ def run_render(args, state, cb=None):
     mt = (getattr(args, "mute_audio_tracks", "") or "").strip()
     mute_tracks = ("all" if mt == "all"
                    else tuple(int(x) for x in mt.split(",") if x.strip()))
-    cs = float(getattr(args, "clip_start", 0) or 0)
-    ce = float(getattr(args, "clip_end", 0) or 0)
+    cf = (getattr(args, "clip_frac", "") or "").strip()
+    if cf:
+        # fractions of duration (web UI) — resolve against the server's own
+        # measurement so an iPhone's reported length can't shift the trim
+        _dur = _probe_duration(args.video) or (
+            len(state.get("cum", [])) / (state.get("fps") or 30.0))
+        a, _, b = cf.partition("-")
+        cs = max(0.0, min(1.0, float(a))) * _dur
+        bf = float(b)
+        ce = (bf * _dur) if bf < 0.999 else 0.0    # ~1.0 == to end
+    else:
+        cs = float(getattr(args, "clip_start", 0) or 0)
+        ce = float(getattr(args, "clip_end", 0) or 0)
     clip = ((cs, ce if ce > 0 else None)
             if (cs > 0 or ce > 0) else None)
     if clip and getattr(args, "hdr_source", None) and not args.preview:

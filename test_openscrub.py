@@ -874,6 +874,41 @@ def test_scan_window_fast_skip_and_output_trim(tmp_path):
     assert rms(a[int(0.2 * sr):int(1.2 * sr)]) > 0.02
 
 
+def test_fraction_windows_resolve_against_server_duration(tmp_path):
+    """The web UI sends detection windows and output trim as FRACTIONS of
+    the duration (not seconds) so an iPhone's browser-reported length can't
+    desync from the server's. The server resolves them against its OWN
+    measured duration."""
+    src = str(tmp_path / "s.mp4")
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error",
+                    "-f", "lavfi", "-i", "testsrc2=s=320x240:d=10:r=30",
+                    "-f", "lavfi", "-i", "sine=frequency=440:duration=10",
+                    "-c:v", "libx264", "-c:a", "aac", src], check=True)
+    assert 9.5 < openscrub._probe_duration(src) < 10.5
+    parser = openscrub.build_parser()
+    args = parser.parse_args(
+        [src, "--categories", "face",
+         "--detect-windows-frac", "0.1-0.2,0.7-0.8",
+         "--clip-frac", "0.25-0.65",
+         "-o", str(tmp_path / "out.mp4"),
+         "--report", str(tmp_path / "r.json")])
+    args = openscrub._prep_args(args, parser)
+    logs = []
+
+    class Q(openscrub.Callbacks):
+        def log(self, m):
+            logs.append(m)
+    openscrub.run_pipeline(args, Q())
+    joined = "\n".join(logs)
+    assert "detection windows: 1.0-2.0s, 7.0-8.0s" in joined, \
+        "0.1-0.2 of a 10s video must resolve to 1-2s"
+    dur = float(subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "csv=p=0", str(tmp_path / "out.mp4")],
+        capture_output=True, text=True).stdout.strip())
+    assert 3.5 < dur < 4.6, "clip 0.25-0.65 of 10s must trim to ~4s"
+
+
 def test_multi_window_scan_and_track_mute(tmp_path):
     """Multiple detection windows scan only their ranges (seeking across the
     gaps), and per-track audio mute removes exactly the chosen track."""

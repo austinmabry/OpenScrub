@@ -148,7 +148,12 @@ Key classes/functions (locate with grep, line numbers drift):
   uploads until Start). Editor-style timeline (DaVinci-inspired): header
   column + canvas rows — ruler with WHITE clip bookends (`--clip-start/
   --clip-end`; dims outside, full height), an orange DETECT track holding
-  MULTIPLE windows (`--detect-windows "a-b,c-d"` — overrides skip fields;
+  MULTIPLE windows. The web sends windows/trim as FRACTIONS of duration
+  (`--detect-windows-frac`, `--clip-frac`; the server resolves them
+  against its OWN ffprobe duration — iPhone HEVC/VFR reported a
+  different length in-browser than the server measured, desyncing
+  absolute seconds). CLI keeps `--detect-windows`/`--clip-start/end`
+  (seconds). Windows still override skip fields;
   windows clamp inside the bookends, and bookends pushed inward DRAG
   window edges with them), and one lane per audio track with an M button
   (`--mute-audio-tracks "1,2"|"all"` — muted tracks are REMOVED from the

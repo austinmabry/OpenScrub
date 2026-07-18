@@ -308,9 +308,8 @@ def build_args(job, for_render=False):
             "--detect-scale", str(o.get("detect_scale", 1.0)),
             "--skip-start", str(o.get("skip_start", 0)),
             "--skip-end", str(o.get("skip_end", 0)),
-            "--clip-start", str(o.get("clip_start", 0) or 0),
-            "--clip-end", str(o.get("clip_end", 0) or 0),
-            "--detect-windows", o.get("detect_windows", "") or "",
+            "--clip-frac", o.get("clip_frac", "") or "",
+            "--detect-windows-frac", o.get("detect_windows_frac", "") or "",
             "--mute-audio-tracks", o.get("mute_tracks", "") or "",
             "--hdr-output", (o.get("hdr_output")
                              if o.get("hdr_output") in ("match", "sdr")
@@ -1463,11 +1462,15 @@ function opts(){return{
  sample_interval:+si.value,scan_trigger:+st.value,pad:+pad.value,bridge_gap:+bg.value,
  mrn_regex:mrnrx.value,face_expand:+fex.value,skip_review:skiprev.checked,use_zones:usezones.checked,
  skip_start:+skipstart.value,skip_end:+skipend.value,out_format:outfmt.value,
- clip_start:(SCOPE.dur&&SCOPE.cin>0.05)?+(SCOPE.cin).toFixed(2):0,
- clip_end:(SCOPE.dur&&SCOPE.cout<SCOPE.dur-0.05)?+(SCOPE.cout).toFixed(2):0,
- detect_windows:(SCOPE.dur&&!(SCOPE.dets.length===1
+ // Windows/trim are sent as FRACTIONS of the (client) duration, not
+ // seconds: iPhone HEVC/VFR files report a slightly different length in
+ // the browser than the server measures, which desynced absolute seconds.
+ // The server resolves these against ITS OWN duration — always in register.
+ clip_frac:(SCOPE.dur&&(SCOPE.cin>0.05||SCOPE.cout<SCOPE.dur-0.05))
+   ?((SCOPE.cin/SCOPE.dur).toFixed(4)+"-"+(SCOPE.cout/SCOPE.dur).toFixed(4)):"",
+ detect_windows_frac:(SCOPE.dur&&!(SCOPE.dets.length===1
    &&SCOPE.dets[0][0]<=SCOPE.cin+0.05&&SCOPE.dets[0][1]>=SCOPE.cout-0.05))
-   ?SCOPE.dets.map(x=>x[0].toFixed(2)+"-"+x[1].toFixed(2)).join(","):"",
+   ?SCOPE.dets.map(x=>(x[0]/SCOPE.dur).toFixed(4)+"-"+(x[1]/SCOPE.dur).toFixed(4)).join(","):"",
  mute_tracks:SCOPE.audio.length===1&&SCOPE.audio[0].muted?"all"
    :SCOPE.audio.map((a,i)=>a.muted?String(i+1):"").filter(Boolean).join(","),
  categories:[...document.querySelectorAll(".cat:checked")].map(e=>e.value).join(","),
