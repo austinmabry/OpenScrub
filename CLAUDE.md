@@ -12,7 +12,7 @@ target is Windows 10 + NVIDIA RTX 3060.
 |---|---|
 | `openscrub.py` | The engine. CLI + all detection/render logic. Single file, ~2400 lines. |
 | `openscrub_web.py` | Flask web app. The entire UI is one embedded `PAGE` string (HTML/CSS/JS). Serves via cheroot (production WSGI, TLS) with Flask-dev fallback. |
-| `zones_ui.py` | The "Scan Setup" editor page (`ZONES_PAGE`), served at `/zones`: load a video, stack detection windows on a timeline (one lane per window, overlap allowed), give each window its own categories + zones, copy/paste zones, mute audio lanes, set clip bookends, Start scan. Replaced the old global zone editor. |
+| `zones_ui.py` | The app SHELL (`ZONES_PAGE`): dark theme, header (gear → settings), and the Scan Setup editor — load a video, stack detection windows on a timeline (one lane per window, overlap allowed), per-window categories + zones, copy/paste zones, audio mute lanes, clip bookends, Start scan. Contains `%%MARKER%%` slots that openscrub_web.py fills at import to build the single-page app. |
 | `openscrub_gui.py` | Legacy Tk GUI. Frozen; ships but is not actively developed. |
 | `openscrub_setup.py` | `openscrub-setup` command: detects/installs Tesseract + FFmpeg (winget/apt), optional spaCy model + plate model, Windows Start Menu shortcuts. Ships in the wheel. |
 | `windows/` | Native Windows packaging: `openscrub.spec` (PyInstaller, two branded exes), `installer.iss` (Inno Setup → Program Files), `build_installer.bat` (runs both; attach output exe to the GitHub release). Build on Windows only. |
@@ -164,9 +164,10 @@ Key classes/functions (locate with grep, line numbers drift):
   length). Category ids are a compat surface but "mrn" DISPLAYS as
   "regex" everywhere (CATDN map in PAGE, DN maps in zones page).
 - Unified Scan Setup editor (`/zones`, zones_ui.py): the ONLY intake
-  path — the homepage is a jobs dashboard (New scan card → /zones, Jobs
-  list, review/detail, settings incl. the Learned safe words card); it
-  has NO upload form. One editor: video preview (local
+  path — and the editor IS the homepage: one page with the editor on
+  top, Jobs + job detail/review below it (`#appzone`), settings behind
+  the header gear (`#settings` hash; incl. the Learned safe words
+  card). One editor: video preview (local
   file objectURL or `/api/server_video?path=` — Range-aware send_file
   behind server_path_error), STACKED detection windows each on its OWN
   timeline lane (windows may overlap: faces 1.2–19.5s AND names 5–7s),
@@ -238,9 +239,20 @@ defined — there was a real UnboundLocalError from ordering once.
 
 ## Web app (openscrub_web.py)
 
-- `PAGE` is the whole UI. The header logo and favicon are **base64-embedded**
-  in the HTML (constants inlined into the source) so they can never 404.
-  `assets/` still ships for GitHub/social use.
+- ONE page: `PAGE` is COMPOSED at import time — `zones_ui.ZONES_PAGE` is
+  the shell (Scan Setup editor on top) and openscrub_web.py fills its
+  `%%MARKER%%` slots: `APP_CSS` (dark restyle of the app sections),
+  `JOBS_HTML` (jobs list + `#detail`), `SETTINGS_HTML` (settings view,
+  shown via `#settings` hash + header gear), `FOOT_HTML`, and `APP_JS`
+  (jobs/review/settings JS as a SECOND `<script>` — both scripts share
+  the global lexical scope, so top-level `const` names must be unique
+  across the two; the box editor's timeline painter is `beTLDraw`
+  because the editor owns `tlDraw`). `/zones` redirects to `/`. The
+  header logo/favicon are **base64-embedded** (`LOGO_URI`/`WORDMARK_URI`/
+  `FAVICON_URI` constants) so they can never 404. `assets/` still ships
+  for GitHub/social use. The app sections are wrapped in `#appzone`/
+  `#settingsview` — APP_CSS scopes its button/input/h2 overrides to
+  those ids so editor styling stays untouched.
 - `ASSET_DIR` = `<script dir>/assets`; `SCRIPT_DIR` = script dir (LICENSE
   lives there).
 - Jobs live in `openscrub_jobs/` next to the script. On startup there is a
@@ -263,14 +275,15 @@ defined — there was a real UnboundLocalError from ordering once.
 
 ## The 12-category alignment rule (easy to break!)
 
-The category list exists in THREE places that must stay identical:
+The category list exists in TWO places that must stay identical:
 1. `openscrub.py` — argparse default `"name,dob,phone,ssn,mrn,email,address,card,apikey,ipaddr,plate,face"`
-2. `openscrub_web.py` — `const CATS=[...]` in PAGE's JS
-3. `zones_ui.py` — `const CATS={...}` color map in ZONES_PAGE
+2. `zones_ui.py` — `const CATS={...}` color map in ZONES_PAGE (the app's
+   only JS category list since the homepage checkbox grid was retired;
+   `CATDN` in APP_JS keeps display names for review headings)
 
-When adding a category, update all three + the `IMMEDIATE` set if it needs
+When adding a category, update both + the `IMMEDIATE` set if it needs
 no confirmation delay. Verify alignment:
-`grep -o 'name,dob[^"]*' openscrub.py` vs the two JS lists.
+`grep -o 'name,dob[^"]*' openscrub.py` vs the CATS map keys.
 
 USER-DEFINED categories (custom_categories.json in the data root) are
 separate from this rule: managed on the Scan Setup page (add/remove via
@@ -294,7 +307,9 @@ python -c "import ast; ast.parse(open('openscrub.py').read())"   # each edited .
 # JS check: extract the <script> from the EVALUATED page, not the file text —
 # PAGE is a normal (non-raw) Python string, so \n in source JS becomes a real
 # newline when served and can break string literals (the v1.0.6 jobs bug):
-#   python -c "import openscrub_web as w, re; open('/tmp/p.js','w').write(re.search(r'<script>(.*)</script>', w.PAGE, re.S).group(1))" && node --check /tmp/p.js
+#   PAGE now holds TWO <script> blocks (editor + app) sharing one global
+#   scope — join them so duplicate top-level declarations are caught too:
+#   python -c "import openscrub_web as w, re; open('/tmp/p.js','w').write('\n'.join(re.findall(r'<script>(.*?)</script>', w.PAGE, re.S)))" && node --check /tmp/p.js
 python -m pytest test_openscrub.py -q                             # 42 tests, all green
 python -m build          # FULL build (sdist->wheel), NEVER just `-w`:
                          # the wheel is built FROM the sdist in CI, so any

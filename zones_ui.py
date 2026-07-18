@@ -18,8 +18,8 @@ literal `face:"#ec4899"` — keep that literal stable.
 ZONES_PAGE = r"""<!doctype html>
 <html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>OpenScrub — Scan Setup</title>
-<link rel="icon" href="favicon.ico"><style>
+<title>OpenScrub</title>
+<link rel="icon" href="%%FAVICON%%"><style>
 :root{--bg:#0b1120;--panel:#0f172a;--card:#1e293b;--mut:#94a3b8;--txt:#e2e8f0;
  --acc:#3b82f6;--org:#f59e0b}
 *{box-sizing:border-box}
@@ -98,12 +98,17 @@ details .inner .full{grid-column:1/-1}
 .tlfoot{display:flex;gap:8px;margin-top:7px;font-size:12px;color:var(--mut);
  flex-wrap:wrap}
 #empty{padding:44px 20px;text-align:center;color:var(--mut)}
+%%APP_CSS%%
 </style></head><body>
 <header>
- <img src="logo_dark.png" alt="">
- <h1>Scan Setup</h1><span class="meta" id="vmeta"></span>
- <a href="/">&larr; back to jobs</a>
+ <img src="%%LOGO%%" alt="OpenScrub">
+ <img src="%%WORDMARK%%" alt="" style="height:19px">
+ <span class="meta hdrtag">local video redaction &mdash; review before you trust</span>
+ <span class="meta" id="vmeta" style="margin-left:auto"></span>
+ <a href="#settings" title="Server settings" aria-label="Server settings"
+  style="margin-left:14px;font-size:17px">&#9881;&#65039;</a>
 </header>
+<div id="mainview">
 <main>
 <div id="left">
  <div class="card"><h2>Video</h2>
@@ -206,6 +211,12 @@ details .inner .full{grid-column:1/-1}
  </div>
 </div>
 </main>
+<div id="appzone">
+%%JOBS_HTML%%
+</div>
+</div>
+%%SETTINGS_HTML%%
+%%FOOT_HTML%%
 <script>
 // keep the face literal exactly as-is: the server injects custom category
 // colors anchored on it
@@ -656,11 +667,23 @@ async function startScan(){
  xhr.onload=()=>{
   let j={};try{j=JSON.parse(xhr.responseText);}catch(e){}
   if(xhr.status>=400||j.error)fail(j.error||("HTTP "+xhr.status));
-  else location.href="/";
+  else{
+   // queued — jobs live on this same page now: refresh the list, jump to
+   // it, and free the editor for the next clip
+   btns.forEach(b=>b.disabled=false);
+   sum.textContent="job queued ✓ — progress in Jobs below";
+   if(typeof loadJobs==="function"){loadJobs();
+    if(j.jobs&&j.jobs.length&&typeof openJob==="function")openJob(j.jobs[0]);}
+   const jl=document.getElementById("jobs");
+   if(jl)jl.scrollIntoView({behavior:"smooth"});
+  }
  };
  sum.textContent=S.file?"uploading… 0%":"submitting…";
  xhr.send(fd);
 }
 setMode("draw");loadCustomList();
+</script>
+<script>
+%%APP_JS%%
 </script></body></html>
 """
