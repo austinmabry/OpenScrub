@@ -1327,3 +1327,45 @@ def test_person_seg_forward_crash_degrades_to_boxes():
     assert det.seg is False, "must drop out of seg mode after the failure"
     assert len(rows) == 1 and len(rows[0]) == 5, \
         "box fallback must still return detections"
+
+
+def test_dense_tracks_never_merge_cotemporal_objects():
+    """Track association hardening (the boat-video bug): three people side
+    by side collapsed into one track — enabling one review card blurred
+    everyone. Two detections in the SAME frame are different physical
+    objects and must NEVER share a track, and person-sized boxes need a
+    tighter association radius than faces (1.6x a full-body box spans most
+    of the frame)."""
+    dets = []
+    for f in range(10):
+        t = f / 30.0
+        for p in range(3):                    # 3 people, 220px apart
+            x = 100 + p * 220 + f * 2
+            dets.append(openscrub.Detection(t, t + 0.01,
+                                            (x, 100, x + 200, 500),
+                                            "person", "person", 0.9, (0, 0),
+                                            dense=True))
+    n = openscrub.assign_dense_tracks(dets)
+    assert n == 3, "3 co-visible people must yield 3 tracks, got %d" % n
+    per_track = {}
+    for d in dets:
+        per_track.setdefault(d.track, []).append(d)
+    for samples in per_track.values():
+        ts = [round(x.t_start, 3) for x in samples]
+        assert len(set(ts)) == len(ts), \
+            "a track absorbed two samples from the same frame"
+        xs = {x.cbox[0] - i * 2 for i, x in
+              enumerate(sorted(samples, key=lambda z: z.t_start))}
+        assert len(xs) == 1, "a track jumped between different people"
+
+    # faces benefit from the same cannot-link: two adjacent faces in the
+    # same frame stay separate tracks
+    fd = []
+    for f in range(6):
+        t = f / 30.0
+        for p in range(2):
+            x = 100 + p * 90
+            fd.append(openscrub.Detection(t, t + 0.01, (x, 100, x + 60, 160),
+                                          "face", "face", 0.9, (0, 0),
+                                          dense=True))
+    assert openscrub.assign_dense_tracks(fd) == 2

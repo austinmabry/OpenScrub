@@ -35,7 +35,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.44"
+VERSION = "1.0.45"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -963,7 +963,19 @@ def assign_dense_tracks(dets, max_gap=0.6, reach=1.6):
     """Group dense per-frame detections into tracks: consecutive samples of
     the same physical object (a face crossing the frame) get one track id.
     Purely additive metadata — rendering still uses each per-frame box; the
-    review UI collapses a track into a single keep/blur decision."""
+    review UI collapses a track into a single keep/blur decision.
+
+    Two association defenses (the same hardening face identity-grouping
+    needed on crowd footage):
+    - TEMPORAL CANNOT-LINK: a track can absorb at most one sample per
+      timestamp — two detections in the SAME frame are different physical
+      objects by definition. Without this, three people on a boat merged
+      into one review card, and enabling it blurred all of them.
+    - Category-scaled reach: 1.6x box size is calibrated for FACES.
+      A full-body person box is most of the frame tall, so 1.6x its size
+      let different people chain together; person tracks associate within
+      0.5x instead (still generous across detector-flicker gaps —
+      smooth_dense_tracks bridges those explicitly)."""
     tracks = []          # [id, category, last_t, last_box]
     next_id = 0
     for d in sorted((x for x in dets if getattr(x, "dense", False)),
@@ -972,15 +984,18 @@ def assign_dense_tracks(dets, max_gap=0.6, reach=1.6):
         cx0 = (bx[0] + bx[2]) / 2
         cy0 = (bx[1] + bx[3]) / 2
         size = max(bx[2] - bx[0], bx[3] - bx[1], 1)
+        r = 0.5 if d.category == "person" else reach
         best = None
         for tr in tracks:
             if tr[1] != d.category or d.t_start - tr[2] > max_gap:
                 continue
+            if d.t_start - tr[2] < 1e-6:
+                continue         # co-temporal: already holds a sample here
             lb = tr[3]
             lcx = (lb[0] + lb[2]) / 2
             lcy = (lb[1] + lb[3]) / 2
             dist = ((cx0 - lcx) ** 2 + (cy0 - lcy) ** 2) ** 0.5
-            if dist <= reach * size and (best is None or dist < best[0]):
+            if dist <= r * size and (best is None or dist < best[0]):
                 best = (dist, tr)
         if best is None:
             tracks.append([next_id, d.category, d.t_start, bx])
