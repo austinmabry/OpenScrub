@@ -874,6 +874,52 @@ def test_scan_window_fast_skip_and_output_trim(tmp_path):
     assert rms(a[int(0.2 * sr):int(1.2 * sr)]) > 0.02
 
 
+def test_per_window_zones(tmp_path):
+    """Window-specific zones: the same spatial location is gated differently
+    depending on which detection window (and its zones) covers that time.
+    The whole-clip default (no windows) keeps today's global-zone behavior,
+    verified by the existing zone tests."""
+    v = str(tmp_path / "z.mp4")
+    w = cv2.VideoWriter(v, cv2.VideoWriter_fourcc(*"mp4v"), 10, (640, 480))
+    for i in range(100):
+        fr = np.full((480, 640, 3), 255, np.uint8)
+        pos = (20, 60) if i < 50 else (380, 440)   # top-left then bottom-right
+        cv2.putText(fr, "CLM-1234567", pos, cv2.FONT_HERSHEY_SIMPLEX,
+                    1.2, (0, 0, 0), 3)
+        w.write(fr)
+    w.release()
+    wf = str(tmp_path / "w.json")
+    # both windows zoned to the BOTTOM-RIGHT quadrant. In 0-5s the token is
+    # top-left (outside the zone -> dropped); in 5-10s it's bottom-right
+    # (inside -> kept). Proves the zone gate is applied per window/time.
+    json.dump({"windows": [
+        {"t0": 0.0, "t1": 0.5, "zones": {"mrn": [[0.5, 0.5, 1.0, 1.0]]}},
+        {"t0": 0.5, "t1": 1.0, "zones": {"mrn": [[0.5, 0.5, 1.0, 1.0]]}}]},
+        open(wf, "w"))
+    parser = openscrub.build_parser()
+    args = parser.parse_args(
+        [v, "--categories", "mrn", "--mrn-regex", r"CLM-\d{7}",
+         "--engine", "tesseract", "--windows", wf,
+         "-o", str(tmp_path / "o.mp4"), "--report", str(tmp_path / "r.json")])
+    args = openscrub._prep_args(args, parser)
+
+    class Q(openscrub.Callbacks):
+        def log(self, m):
+            pass
+    openscrub.run_pipeline(args, Q())
+    doc = json.load(open(str(tmp_path / "r.json")))
+
+    def enabled(rng):
+        return [x for x in doc["detections"]
+                if rng(x["t_start"]) and x.get("enabled", True)
+                and not x.get("zone_dropped")]
+    assert len(enabled(lambda t: t < 5)) == 0, \
+        "top-left token is outside window A's bottom-right zone -> dropped"
+    assert len(enabled(lambda t: t >= 5)) > 0, \
+        "bottom-right token is inside window B's zone -> kept"
+    assert doc["provenance"].get("windows"), "windows recorded in report"
+
+
 def test_fraction_windows_resolve_against_server_duration(tmp_path):
     """The web UI sends detection windows and output trim as FRACTIONS of
     the duration (not seconds) so an iPhone's browser-reported length can't

@@ -2922,6 +2922,7 @@ def write_report(path, args, state, output_path=None):
         "hdr_tonemapped": bool(getattr(args, "hdr_tonemapped", False)),
         "hdr_output": bool(getattr(args, "hdr_source", None)),
         "zones": getattr(args, "zones_data", None),
+        "windows": getattr(args, "windows_data", None),
         "settings": _settings_dict(args),
     }
     if output_path and os.path.exists(output_path):
@@ -3387,6 +3388,14 @@ def build_parser():
                     "are ONLY detected inside them — detections outside are "
                     "dropped and counted as a warning. Categories without "
                     "zones remain full-frame.")
+    ap.add_argument("--windows", help="JSON file describing per-time-window "
+                    "detection scope from the unified editor: a list of "
+                    "{\"t0\",\"t1\" (FRACTIONS 0-1 of duration), \"zones\": "
+                    "{cat: [normrects]}}. Each window scans ONLY its time "
+                    "range, and ONLY inside its own zones (a window with no "
+                    "zones scans its whole frame). Supersedes --zones / "
+                    "--detect-windows when present. The whole-clip default "
+                    "is one window covering the video.")
     ap.add_argument("--ignore-region", action="append", default=[], metavar="X1,Y1,X2,Y2",
                     help="screen region to never blur (repeatable), e.g. taskbar clock")
     ap.add_argument("--ocr-upscale", choices=["auto", "on", "off"], default="auto",
@@ -3426,6 +3435,15 @@ def _prep_args(args, parser):
     args.zones_data = None
     if getattr(args, "zones", None):
         args.zones_data = load_zones(args.zones)
+    args.windows_data = None
+    if getattr(args, "windows", None):
+        with open(args.windows, encoding="utf-8") as f:
+            wd = json.load(f)
+        # accept {"windows":[...], "ignore":[...]} or a bare list
+        args.windows_data = wd.get("windows", wd) if isinstance(wd, dict) else wd
+        if isinstance(wd, dict) and wd.get("ignore"):
+            args.ignore_regions = list(args.ignore_regions or []) + [
+                tuple(float(v) for v in r) for r in wd["ignore"]]
     if getattr(args, "paranoid", False):
         args.sample_interval = min(args.sample_interval, 0.25)
         args.scan_trigger = min(args.scan_trigger, 30)
@@ -3633,8 +3651,8 @@ def run_scan(args, cb=None):
             (r[0] * vw, r[1] * vh, r[2] * vw, r[3] * vh)
             if max(r) <= 1.0 else tuple(r)
             for r in args.ignore_regions]
-    zones_px = (zones_to_pixels(args.zones_data, vw, vh)
-                if getattr(args, "zones_data", None) else None)
+    global_zones_px = (zones_to_pixels(args.zones_data, vw, vh)
+                       if getattr(args, "zones_data", None) else None)
     duration = total / fps if fps else 0
     win_start = max(0.0, float(getattr(args, "skip_start", 0) or 0))
     win_end = duration - max(0.0, float(getattr(args, "skip_end", 0) or 0))
@@ -3672,22 +3690,58 @@ def run_scan(args, cb=None):
         else:
             merged.append(w)
     dwin = merged
-    if dwin:
-        win_start, win_end = dwin[0][0], dwin[-1][1]
+
+    # Unified windows model: each detection window carries its OWN zones
+    # (window-specific zones from the editor). windows_px = [(t0, t1,
+    # zones_px_dict_or_None)]. Three sources, in priority order:
+    #   1. args.windows_data (new editor): explicit windows, each with zones.
+    #   2. legacy detect_windows time ranges: each gets the GLOBAL zones.
+    #   3. no windows: one whole-clip window with the global zones (today's
+    #      behavior — the whole clip is the default window).
+    # A window whose zones dict is None/empty scans its whole frame.
+    windows_px = []
+    uwin = getattr(args, "windows_data", None)
+    if uwin:
+        for w in uwin:
+            t0 = max(0.0, min(1.0, float(w.get("t0", 0.0)))) * duration
+            t1 = max(0.0, min(1.0, float(w.get("t1", 1.0)))) * duration
+            if t1 <= t0:
+                continue
+            wz = w.get("zones") or {}
+            wz = {c: rs for c, rs in wz.items() if c != "ignore" and rs}
+            zp = zones_to_pixels(wz, vw, vh) if wz else None
+            windows_px.append((t0, t1, zp))
+        windows_px.sort()
+    if windows_px:
+        dwin = [(t0, t1) for t0, t1, _ in windows_px]
+    elif dwin:
+        windows_px = [(t0, t1, global_zones_px) for t0, t1 in dwin]
+    else:
+        dwin = [(win_start, win_end)]
+        windows_px = [(win_start, win_end, global_zones_px)]
+    win_start, win_end = dwin[0][0], dwin[-1][1]
+    if len(dwin) > 1 or win_start > 0 or win_end < duration:
         cb.log("      detection windows: "
                + ", ".join(f"{a:.1f}-{b:.1f}s" for a, b in dwin)
                + f" (of {duration:.1f}s) — nothing outside them is "
                  "detected or blurred")
-    else:
-        dwin = [(win_start, win_end)]
-        if win_start > 0 or win_end < duration:
-            cb.log(f"      detection window: {win_start:.1f}s to {win_end:.1f}s "
-                   f"(of {duration:.1f}s) — nothing outside it is detected or blurred")
+
+    def _zones_at(t):
+        """Zone rects dict for the window containing time t (None = the
+        window has no zones -> whole-frame; also None if t is in no window)."""
+        for t0, t1, zp in windows_px:
+            if t0 <= t <= t1:
+                return zp
+        return None
+
+    any_zones = any(zp for _, _, zp in windows_px)
     zone_dropped = {}
     zdrop_raw = []
-    if zones_px:
-        cb.log("      detection zones active: "
-               + ", ".join(f"{c} ({len(r)})" for c, r in zones_px.items()))
+    if any_zones:
+        per_win = [f"[{a:.0f}-{b:.0f}s: " + ", ".join(
+            f"{c}({len(r)})" for c, r in zp.items()) + "]"
+            for a, b, zp in windows_px if zp]
+        cb.log("      detection zones active: " + " ".join(per_win))
 
     scroll_mode = getattr(args, "scroll_track", "auto")
     track_on = scroll_mode != "off"
@@ -3746,15 +3800,14 @@ def run_scan(args, cb=None):
     dense_faces = "face" in cats or bool(getattr(args, "dense_faces", False))
     args.dense_faces = dense_faces   # keep camera-mode/report paths in sync
     dense_stride = max(1, int(getattr(args, "dense_face_stride", 1) or 1))
-    plate_zone_px = (zones_px.get("plate") if zones_px else None)
-    plate_zone_rects = plate_zone_px if plate_zone_px else None
-    face_zone_px = (zones_px.get("face") if zones_px else None)
-    face_zone_rects = face_zone_px if face_zone_px else None
+    # per-window zones: face/plate gating rects are looked up by time in the
+    # frame loop via _zones_at(t_now), not fixed once here.
+    any_face_zone = any(zp and zp.get("face") for _, _, zp in windows_px)
     if dense_faces:
         cb.log("      dense faces: detecting "
                + (f"every {dense_stride} frames" if dense_stride > 1
                   else "every frame")
-               + (" inside face zone(s)" if face_zone_rects
+               + (" inside face zone(s)" if any_face_zone
                   else " (whole frame — set a face zone to speed this up)"))
     idx = 0
     dense_now = []
@@ -3820,11 +3873,11 @@ def run_scan(args, cb=None):
         if (dense_faces and facer is not None and "face" in cats
                 and idx % dense_stride == 0):
             dense_hold = 0.3 * dense_stride / fps
+            _fzr = (_zones_at(t_now) or {}).get("face")
             for (fx1, fy1, fx2, fy2, conf) in facer.find(frame, detect_scale):
                 # zone-filter by the face's screen center, exactly like every
                 # other category (robust; no cropped-background detector quirks)
-                if face_zone_rects is not None and not in_any_zone(
-                        (fx1, fy1, fx2, fy2), face_zone_rects):
+                if _fzr and not in_any_zone((fx1, fy1, fx2, fy2), _fzr):
                     continue
                 if in_ignore_region((fx1, fy1, fx2, fy2),
                                     args.ignore_regions):
@@ -3842,9 +3895,9 @@ def run_scan(args, cb=None):
         if (plater is not None and plater.available() and "plate" in cats
                 and idx % max(1, dense_stride) == 0):
             phold = 0.3 * max(1, dense_stride) / fps
+            _pzr = (_zones_at(t_now) or {}).get("plate")
             for (px1, py1, px2, py2, pconf) in plater.find(frame, detect_scale):
-                if plate_zone_rects is not None and not in_any_zone(
-                        (px1, py1, px2, py2), plate_zone_rects):
+                if _pzr and not in_any_zone((px1, py1, px2, py2), _pzr):
                     continue
                 if in_ignore_region((px1, py1, px2, py2),
                                     args.ignore_regions):
@@ -3927,10 +3980,11 @@ def run_scan(args, cb=None):
                     (d.cbox[0] + cx, d.cbox[1] + cy,
                      d.cbox[2] + cx, d.cbox[3] + cy), args.ignore_regions)]
 
-            if zones_px:
+            if any_zones:
+                _zt = _zones_at(t) or {}
                 kept = []
                 for d in found:
-                    rects = zones_px.get(d.category)
+                    rects = _zt.get(d.category)
                     sb = (d.cbox[0] + cx, d.cbox[1] + cy,
                           d.cbox[2] + cx, d.cbox[3] + cy)
                     if getattr(d, "dense", False):
@@ -4137,10 +4191,10 @@ def run_scan(args, cb=None):
                 (d.cbox[0] + d.aoff[0], d.cbox[1] + d.aoff[1],
                  d.cbox[2] + d.aoff[0], d.cbox[3] + d.aoff[1]),
                 args.ignore_regions)]
-        if zones_px:
+        if any_zones:
             kept = []
             for d in extra:
-                rects = zones_px.get(d.category)
+                rects = (_zones_at(d.t_start) or {}).get(d.category)
                 sb = (d.cbox[0] + d.aoff[0], d.cbox[1] + d.aoff[1],
                       d.cbox[2] + d.aoff[0], d.cbox[3] + d.aoff[1])
                 if rects and not in_any_zone(sb, rects):
