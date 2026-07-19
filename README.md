@@ -335,7 +335,11 @@ right below it, and server settings behind the gear icon in the header.
    categories and its own zones (click a category's color square, then
    draw on the frame; Copy/Paste moves zones between windows). White
    clip bookends trim the output; audio lanes each have an M button to
-   remove that track. A **zoom bar** (−/slider/+, with a pan control)
+   remove that track. Need to blur something the detectors don't know —
+   a tattoo, a badge, a specific person or object? Pick **track object**,
+   scrub to a frame where it's clear, and draw ON it: the scan
+   template-tracks it through the window and blurs it wherever it goes.
+   A **zoom bar** (−/slider/+, with a pan control)
    magnifies the timeline up to 40× for sub-second placement, and
    dragging any handle scrubs the preview live — including on
    iPhone/iPad.

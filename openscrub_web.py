@@ -1315,7 +1315,7 @@ FOOT_HTML = """<footer style="text-align:center;color:#9ca3af;font-size:12px;pad
 OpenScrub v%%VERSION%% <span id="upd"></span>· <a href="license" style="color:#94a3b8">Apache-2.0 license</a>
 · best-effort redaction — always review output before sharing PII</footer>"""
 
-APP_JS = """const CATDN={mrn:"regex",person:"person (full body)"};   // display names — ids are a compat surface
+APP_JS = """const CATDN={mrn:"regex",person:"person (full body)",manual:"tracked object"};   // display names — ids are a compat surface
 async function refreshModelPanel(){
  // always visible: model choice lives on the settings page now, so users
  // can set up face/plate models before ticking the categories on a job

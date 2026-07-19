@@ -1369,3 +1369,60 @@ def test_dense_tracks_never_merge_cotemporal_objects():
                                           "face", "face", 0.9, (0, 0),
                                           dense=True))
     assert openscrub.assign_dense_tracks(fd) == 2
+
+
+def test_prescan_tracked_object(tmp_path):
+    """Scan Setup pre-scan object tracking: a box drawn ON an object (with
+    the frame time it was drawn at) rides the --windows JSON as
+    track:[[nx1,ny1,nx2,ny2,tref_frac]], and the scan template-tracks it
+    through the window — dense "manual" samples on one track, following
+    the object, blurred at render."""
+    import numpy as _np
+    src = str(tmp_path / "mv.mp4")
+    W, H, fps = 320, 240, 30
+    vw = cv2.VideoWriter(src, cv2.VideoWriter_fourcc(*"mp4v"), fps, (W, H))
+    rng = _np.random.RandomState(7)
+    patch = rng.randint(0, 255, (48, 48, 3), _np.uint8)   # high-texture object
+    for i in range(90):                                    # 3 s
+        fr = _np.full((H, W, 3), 30, _np.uint8)
+        x = 20 + i * 2                                     # slides right
+        fr[96:144, x:x + 48] = patch
+        vw.write(fr)
+    vw.release()
+
+    # box drawn on the object at t=1.5s (fraction 0.5): x = 20+45*2 = 110
+    wj = str(tmp_path / "w.json")
+    with open(wj, "w", encoding="utf-8") as f:
+        json.dump({"windows": [{
+            "t0": 0.0, "t1": 1.0, "cats": [],
+            "track": [[110 / W, 96 / H, 158 / W, 144 / H, 0.5]]}]}, f)
+    parser = openscrub.build_parser()
+    args = parser.parse_args(
+        [src, "--categories", "none", "--windows", wj,
+         "-o", str(tmp_path / "out.mp4"),
+         "--report", str(tmp_path / "r.json")])
+    args = openscrub._prep_args(args, parser)
+    openscrub.run_pipeline(args, openscrub.Callbacks())
+
+    doc = json.load(open(str(tmp_path / "r.json")))
+    man = [d for d in doc["detections"] if d["category"] == "manual"]
+    assert man, "tracked object must produce manual detections"
+    assert {d["track"] for d in man} == {man[0]["track"]}, "one track id"
+    assert len(man) > 20, "should follow the object across most frames"
+    # the track must FOLLOW the moving object: early samples left of late
+    man.sort(key=lambda d: d["t_start"])
+    assert man[-1]["cbox"][0] - man[0]["cbox"][0] > 60, \
+        "track must move with the object"
+    # spot-check the render at t=2s: the object region must be SMOOTHED
+    # (blur kills the random patch's local variance) and the background
+    # stays untouched
+    cap = cv2.VideoCapture(str(tmp_path / "out.mp4"))
+    cap.set(cv2.CAP_PROP_POS_MSEC, 2000)
+    ok, fr = cap.read()
+    cap.release()
+    assert ok
+    x = 20 + 60 * 2                       # object x at frame 60 (t=2s)
+    obj = fr[100:140, x + 6:x + 42]
+    assert float(obj.std()) < float(patch.std()) * 0.6, \
+        "tracked object region must be blurred at render time"
+    assert fr[10, 10].astype(int).sum() < 120, "background stays untouched"

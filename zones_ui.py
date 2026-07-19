@@ -232,8 +232,9 @@ const CATS={name:"#3b82f6",dob:"#22c55e",phone:"#f59e0b",ssn:"#ef4444",
             email:"#14b8a6",address:"#f97316",card:"#db2777",
             apikey:"#0891b2",ipaddr:"#65a30d",plate:"#7c3aed",
             person:"#0ea5e9",face:"#ec4899",
-            ignore:"#334155"};
-const DN={person:"person (full body)",ignore:"ignore (never blur)"};
+            ignore:"#334155",trackobj:"#eab308"};
+const DN={person:"person (full body)",ignore:"ignore (never blur)",
+          trackobj:"track object (blur it)"};
 const RULER=24,WROW=20,AROW=16;
 
 let S={file:null,dur:0,vw:0,vh:0,cin:0,cout:0,wins:[],sel:0,ignore:[],
@@ -245,7 +246,7 @@ function $(id){return document.getElementById(id);}
 function fmt(t){const d=new Date(Math.max(0,t)*1000).toISOString();
  return t>=3600?d.substr(11,8):d.substr(14,5);}
 function newWin(t0,t1,cats){return {t0:t0,t1:t1,
- cats:Object.assign({},cats),zones:{}};}
+ cats:Object.assign({},cats),zones:{},track:[]};}
 function selWin(){return S.wins[S.sel];}
 
 // ---------- load ----------
@@ -306,7 +307,7 @@ function renderCats(){
  $("cattitle").textContent="Categories — Window "+(S.sel+1);
  let h="";
  for(const c of Object.keys(CATS)){
-  if(c==="ignore")continue;
+  if(c==="ignore"||c==="trackobj")continue;   // pseudo-classes: own rows below
   const on=!!w.cats[c], nz=(w.zones[c]||[]).length,
         act=S.cls===c?"active":"";
   h+='<div class="catrow '+act+'">'
@@ -322,6 +323,13 @@ function renderCats(){
    +'<option '+(S.mm[c]==="mosaic"?"selected":"")+'>mosaic</option></select>'
    +'</div>';
  }
+ const nTrk=(w.track||[]).length;
+ const tact=S.cls==="trackobj"?"active":"";
+ h+='<div class="catrow '+tact+'" style="border-top:1px solid #0f172a;margin-top:5px;padding-top:6px">'
+  +'<span style="width:13px"></span>'
+  +'<span class="sw" style="background:'+CATS.trackobj+'" onclick="setCls(\'trackobj\')"></span>'
+  +'<span class="nm" onclick="setCls(\'trackobj\')">'+DN.trackobj+'</span>'
+  +'<span class="cnt">'+(nTrk?nTrk+"&#9679;":"")+'</span></div>';
  const iact=S.cls==="ignore"?"active":"";
  h+='<div class="catrow '+iact+'" style="border-top:1px solid #0f172a;margin-top:5px;padding-top:6px">'
   +'<span style="width:13px"></span>'
@@ -335,6 +343,12 @@ function togCat(c,on){const w=selWin();if(on)w.cats[c]=true;else delete w.cats[c
  renderCats();summary();}
 function setCls(c){S.cls=c;S.selZone=null;renderCats();draw();}
 function hint(){
+ if(S.mode==="draw"&&S.cls==="trackobj"){
+  $("hint").innerHTML='&#127919; scrub to a frame where the object is '
+   +'clear, then draw ON it — the scan tracks and blurs it through '
+   +'<b style="color:#fbbf24">Window '+(S.sel+1)+'</b>';
+  return;
+ }
  $("hint").innerHTML=S.mode==="draw"
   ?('✏️ drawing <b style="color:'+CATS[S.cls]+'">'+(DN[S.cls]||S.cls)
     +'</b> zones for <b style="color:#fbbf24">Window '+(S.sel+1)+'</b>')
@@ -342,8 +356,12 @@ function hint(){
 }
 
 // ---------- zone drawing on the frame ----------
-function zoneList(){return S.cls==="ignore"?S.ignore:
- (selWin().zones[S.cls]=selWin().zones[S.cls]||[]);}
+function listFor(cat){
+ if(cat==="ignore")return S.ignore;
+ if(cat==="trackobj")return (selWin().track=selWin().track||[]);
+ return (selWin().zones[cat]=selWin().zones[cat]||[]);
+}
+function zoneList(){return listFor(S.cls);}
 function pushUndo(){S.undo.push(JSON.stringify({w:S.wins,i:S.ignore}));
  if(S.undo.length>40)S.undo.shift();}
 function undoZone(){
@@ -367,7 +385,8 @@ function hookZC(){
   }
   S.selZone=null;
   const w=selWin();
-  const all=[["ignore",S.ignore]].concat(Object.entries(w.zones));
+  const all=[["ignore",S.ignore],["trackobj",w.track||[]]]
+   .concat(Object.entries(w.zones));
   outer:
   for(const [cat,rs] of all)
    for(let i=rs.length-1;i>=0;i--){const r=rs[i];
@@ -379,11 +398,11 @@ function hookZC(){
   const p=pt(e);
   if(S.mode==="draw"&&S.anchor){S.fl=p;draw();return;}
   if(S.mode==="select"&&S.selZone&&S.drag){
-   const rs=S.selZone.cat==="ignore"?S.ignore:selWin().zones[S.selZone.cat];
+   const rs=listFor(S.selZone.cat);
    const r=rs[S.selZone.i],w=r[2]-r[0],h=r[3]-r[1];
    const x=Math.max(0,Math.min(1-w,p[0]-S.drag.off[0])),
          y=Math.max(0,Math.min(1-h,p[1]-S.drag.off[1]));
-   rs[S.selZone.i]=[x,y,x+w,y+h];draw();
+   rs[S.selZone.i]=[x,y,x+w,y+h].concat(r.slice(4));draw();
   }
  });
  c.addEventListener("pointerup",e=>{
@@ -400,7 +419,7 @@ function hookZC(){
      &&document.activeElement.tagName!=="INPUT"
      &&document.activeElement.tagName!=="TEXTAREA"){
    pushUndo();
-   const rs=S.selZone.cat==="ignore"?S.ignore:selWin().zones[S.selZone.cat];
+   const rs=listFor(S.selZone.cat);
    rs.splice(S.selZone.i,1);S.selZone=null;renderCats();draw();
   }
  });
@@ -410,8 +429,17 @@ function finishRect(a,b){
           Math.max(a[0],b[0]),Math.max(a[1],b[1])];
  if(r[2]-r[0]<0.01||r[3]-r[1]<0.01)return;
  pushUndo();
- zoneList().push(r.map(v=>+v.toFixed(4)));
- if(S.cls!=="ignore")selWin().cats[S.cls]=true;   // drawing switches it on
+ const rr=r.map(v=>+v.toFixed(4));
+ if(S.cls==="trackobj"){
+  // a tracked object is drawn ON the object at THIS frame: remember the
+  // reference time so the scan can template-track it both ways from here
+  const v=$("vd");
+  rr.push(+((v.currentTime||0)/Math.max(0.1,S.dur)).toFixed(4));
+  listFor("trackobj").push(rr);
+ }else{
+  zoneList().push(rr);
+  if(S.cls!=="ignore")selWin().cats[S.cls]=true;   // drawing switches it on
+ }
  renderCats();summary();
 }
 function draw(){
@@ -432,6 +460,9 @@ function draw(){
    S.selZone&&S.selZone.cat===cat&&S.selZone.i===i));
  S.ignore.forEach((r,i)=>rect(r,CATS.ignore,"ignore",
    S.selZone&&S.selZone.cat==="ignore"&&S.selZone.i===i));
+ (w.track||[]).forEach((r,i)=>rect(r,CATS.trackobj,
+   "track @"+fmt((r[4]||0)*S.dur),
+   S.selZone&&S.selZone.cat==="trackobj"&&S.selZone.i===i));
  if(S.anchor&&S.fl){
   const a=S.anchor,b=S.fl;
   g.setLineDash([5,4]);g.strokeStyle=CATS[S.cls];g.lineWidth=2;
@@ -453,7 +484,9 @@ function winBar(){
  $("wtime").textContent=fmt(w.t0)+" – "+fmt(w.t1);
  const zs=Object.entries(w.zones).filter(([c,r])=>r.length)
    .map(([c,r])=>(DN[c]||c)+" ×"+r.length).join(", ");
- $("wzsum").textContent=zs?("zones: "+zs):"no zones (whole frame)";
+ const nt=(w.track||[]).length;
+ $("wzsum").textContent=(zs?("zones: "+zs):"no zones (whole frame)")
+   +(nt?(" · tracked objects: "+nt):"");
  $("pastebtn").disabled=!S.paste;
  summary();
 }
@@ -620,7 +653,8 @@ function summary(){
  const full=S.cin<0.05&&S.cout>S.dur-0.05;
  // categories start ALL OFF — flag the nothing-selected state loudly so an
  // empty scan is always a deliberate choice, never a surprise
- if(!unionCats().length){
+ const nTrkAll=S.wins.reduce((a,w)=>a+((w.track||[]).length),0);
+ if(!unionCats().length&&!nTrkAll){
   el.innerHTML='<span style="color:#fbbf24">&#9888; no categories selected '
    +'&mdash; nothing will be detected (check categories or draw a zone)</span>';
   return;
@@ -665,8 +699,10 @@ async function startScan(){
  if(!S.dur){alert("Load a video first.");return;}
  if(!S.file&&!$("spath").value.trim()){alert("Choose a file or server path.");return;}
  const cats=unionCats();
- if(!cats.length&&!confirm("No categories are enabled in any window — "
-   +"run a manual-only job (you add tracked objects in review)?"))return;
+ const nTrk=S.wins.reduce((a,w)=>a+((w.track||[]).length),0);
+ if(!cats.length&&!nTrk
+   &&!confirm("No categories are enabled and no objects are marked for "
+   +"tracking — nothing will be detected. Start anyway?"))return;
  const o={
   engine:$("engine").value,device:$("device").value,encoder:$("encoder").value,
   mode:$("mode").value,sample_interval:+$("si").value,scan_trigger:+$("st").value,
@@ -688,7 +724,8 @@ async function startScan(){
   mute_tracks:S.audio.length===1&&S.audio[0].muted?"all"
     :S.audio.map((a,i)=>a.muted?String(i+1):"").filter(Boolean).join(","),
   windows:S.wins.map(w=>({t0:+(w.t0/S.dur).toFixed(4),
-    t1:+(w.t1/S.dur).toFixed(4),cats:Object.keys(w.cats),zones:w.zones})),
+    t1:+(w.t1/S.dur).toFixed(4),cats:Object.keys(w.cats),zones:w.zones,
+    track:w.track||[]})),
   ignore_zones:S.ignore,
  };
  const fd=new FormData();

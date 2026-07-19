@@ -24,7 +24,7 @@ target is Windows 10 + NVIDIA RTX 3060.
 | `fetch_plate_models.py` | Alt path to fetch plate models via the open-image-models pip package. |
 | `openscrub_update.py` | `openscrub-update` command + web self-update backend: PyPI version check, sha256-verified sdist download, data-preserving folder update (PRESERVE set), TOFU pin carry-forward. Ships in the wheel. |
 | `openscrub_vault.py` | At-rest encryption for the job store: scrypt keystore, chunked AES-256-GCM files (`.osvault`), lock/unlock tree walkers. NO password reset by design. Ships in the wheel. Lock-on-shutdown lives in openscrub_web: a SIGTERM handler (docker stop; locks then os._exit — sys.exit is swallowed by cheroot) + an atexit hook (Ctrl+C; uses the import-time `_HERE` constant because `__file__` is gone during interpreter teardown — both failure modes were real and verified). Encryption must finish inside the container stop grace period (`docker stop -t 120`). |
-| `test_openscrub.py` | pytest suite (46 tests). Must stay green. |
+| `test_openscrub.py` | pytest suite (47 tests). Must stay green. |
 | `tools/make_icons.py` | Regenerates every icon/logo asset from `assets/badge_master.png`. |
 | `tools/make_wordmark.py` | Regenerates the typeset Poppins wordmarks (navy + white). |
 | `assets/` | Brand assets. `badge_master.png` (canonical, mosaic+brackets style) and `badge_master_blurbox_alt.png` (alternate) are the sources; everything else is generated. |
@@ -237,7 +237,15 @@ Key classes/functions (locate with grep, line numbers drift):
 - Targeted redaction: `track_manual_region` template-tracks a user-drawn
   box through a chosen time window (both directions from t_ref, adaptive
   template refresh gated on confidence >0.80, stops fail-closed below
-  thr). The web review's box editor has a TIMELINE (canvas `beTL`):
+  thr). TWO entry points share it: PRE-SCAN — the editor's `trackobj`
+  pseudo-class (yellow; own rail row like ignore; skip both in the
+  renderCats loop) stores [nx1,ny1,nx2,ny2,tref_frac] per window
+  (`finishRect` captures vd.currentTime as tref; select/move preserves
+  the 5th element via `listFor`+slice(4)), rides `--windows` JSON as the
+  window's `track` key, and run_scan's tail runs the tracker per box
+  after assign/smooth (fresh track ids past n_tracks, dense "manual"
+  samples, 0.25s grace pads — same recipe as the review endpoint).
+  POST-SCAN — review's "Track object" (below). The web review's box editor has a TIMELINE (canvas `beTL`):
   detection lanes, draggable orange window handles (BE.win), playhead,
   and an audio lane. "Track object" POSTs /api/jobs/<id>/track_object
   (background thread, poll /track_status) which appends dense samples on
@@ -361,7 +369,7 @@ python -c "import ast; ast.parse(open('openscrub.py').read())"   # each edited .
 #   PAGE now holds TWO <script> blocks (editor + app) sharing one global
 #   scope — join them so duplicate top-level declarations are caught too:
 #   python -c "import openscrub_web as w, re; open('/tmp/p.js','w').write('\n'.join(re.findall(r'<script>(.*?)</script>', w.PAGE, re.S)))" && node --check /tmp/p.js
-python -m pytest test_openscrub.py -q                             # 46 tests, all green
+python -m pytest test_openscrub.py -q                             # 47 tests, all green
 python -m build          # FULL build (sdist->wheel), NEVER just `-w`:
                          # the wheel is built FROM the sdist in CI, so any
                          # file the wheel force-includes must be in the

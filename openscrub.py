@@ -4014,6 +4014,7 @@ def run_scan(args, cb=None):
     #   2. legacy detect_windows time ranges: global cats + global zones.
     #   3. no windows: one whole-clip window (today's exact behavior).
     windows_px = []
+    track_jobs = []          # (t0, t1, box_px, t_ref) from the editor
     uwin = getattr(args, "windows_data", None)
     if uwin:
         for w in uwin:
@@ -4027,6 +4028,20 @@ def run_scan(args, cb=None):
             wz = {c: rs for c, rs in wz.items() if c != "ignore" and rs}
             zp = zones_to_pixels(wz, vw, vh) if wz else None
             windows_px.append((t0, t1, wc, zp))
+            # pre-scan tracked objects: [nx1,ny1,nx2,ny2,tref_frac] boxes
+            # drawn ON an object in the editor — template-tracked through
+            # this window after the scan pass and blurred wherever they go
+            for tb in (w.get("track") or []):
+                try:
+                    bx = (float(tb[0]) * vw, float(tb[1]) * vh,
+                          float(tb[2]) * vw, float(tb[3]) * vh)
+                    tref = (float(tb[4]) * duration if len(tb) > 4
+                            else (t0 + t1) / 2)
+                    track_jobs.append((t0, t1,
+                                       [max(0.0, v) for v in bx],
+                                       min(max(tref, t0), t1)))
+                except (TypeError, ValueError, IndexError):
+                    continue
         windows_px.sort(key=lambda w: (w[0], w[1]))
     if windows_px:
         ivals = sorted((t0, t1) for t0, t1, _, _ in windows_px)
@@ -4756,6 +4771,42 @@ def run_scan(args, cb=None):
         except Exception as e:
             cb.log(f"      person grouping unavailable ({e}) — review "
                    "shows per-track cards instead")
+    if track_jobs:
+        # user-marked objects from the Scan Setup editor: template-track
+        # each drawn box through its window (both directions from the frame
+        # it was drawn on) and add the path as a dense manual track — one
+        # review card per object, blurred wherever it went. Same recipe as
+        # the review-stage "Track object" tool.
+        cb.log(f"      tracked objects: following {len(track_jobs)} "
+               "user-drawn box(es) through their window(s)…")
+        tid = max([d.track for d in detections] + [n_tracks - 1]) + 1
+        step_t = 2.0 / max(fps, 1.0)
+        for (tt0, tt1, tbox, tref) in track_jobs:
+            samples = track_manual_region(args.video, tbox, tref, tt0, tt1,
+                                          cb=cb)
+            if not samples:
+                cb.log("      tracked object: could not lock onto the "
+                       f"region at {tref:.1f}s — draw a larger box or pick "
+                       "a frame where the object is clearer")
+                continue
+            new = []
+            for t, b, score in samples:
+                fidx = min(int(t * fps), len(cum) - 1) if cum else 0
+                ox, oy = cum[fidx] if cum else (0.0, 0.0)
+                new.append(Detection(
+                    t, t + step_t * 1.2,
+                    (int(b[0] - ox), int(b[1] - oy),
+                     int(b[2] - ox), int(b[3] - oy)),
+                    "manual", "tracked object", round(float(score), 3),
+                    (ox, oy), last_seen=t, dense=True, track=tid))
+            # grace pads: cover the sub-sample sliver at both ends
+            new[0].t_start = max(0.0, new[0].t_start - 0.25)
+            new[-1].t_end += 0.25
+            detections.extend(new)
+            cb.log(f"      tracked object: {len(new)} position(s), "
+                   f"{new[0].t_start:.1f}-{new[-1].t_end:.1f}s "
+                   "(one review card)")
+            tid += 1
     if _gap_stats["checked"]:
         cb.log(f"      gap verification: {_gap_stats['checked']} long gap(s) "
                f"checked against the file, {_gap_stats['bridged']} verified "
