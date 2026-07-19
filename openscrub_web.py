@@ -2706,6 +2706,45 @@ def server_video():
     return send_file(p, conditional=True)
 
 
+@app.route("/api/waveform")
+def waveform():
+    """Audio peak envelope for a server-side video's track — powers the
+    editor's waveform lanes. Same confinement as every server-path route:
+    server_path_error runs first, and the containment guard is repeated
+    inline in the CodeQL-recognized shape before any use."""
+    p = os.path.realpath(request.args.get("path", ""))
+    err = server_path_error(p)
+    if err:
+        return jsonify({"error": err}), 400
+    root = os.environ.get("OPENSCRUB_MEDIA_ROOT")
+    r = os.path.realpath(root) if root else os.path.realpath(
+        os.path.splitdrive(p)[0] + os.sep)
+    if not p.startswith(r.rstrip(os.sep) + os.sep):
+        return jsonify({"error": "server path is outside OPENSCRUB_MEDIA_ROOT"}), 400
+    try:
+        track = max(0, min(15, int(request.args.get("track", 0) or 0)))
+    except ValueError:
+        track = 0
+    import subprocess
+    import numpy as np
+    try:
+        raw = subprocess.run(
+            ["ffmpeg", "-v", "error", "-i", p, "-map", "a:%d" % track,
+             "-ac", "1", "-ar", "1000", "-f", "s16le", "-"],
+            capture_output=True, timeout=180).stdout
+    except Exception:
+        raw = b""
+    if len(raw) < 4:
+        return jsonify({"peaks": []})
+    a = np.abs(np.frombuffer(raw[:len(raw) // 2 * 2], dtype=np.int16)
+               .astype(np.int32))
+    N = 2000
+    per = max(1, len(a) // N)
+    a = a[:(len(a) // per) * per].reshape(-1, per).max(axis=1)
+    mx = int(a.max()) or 1
+    return jsonify({"peaks": [round(float(v) / mx, 3) for v in a[:N]]})
+
+
 @app.route("/api/certinfo")
 def certinfo():
     cert_path, _, mode = active_cert_pair()

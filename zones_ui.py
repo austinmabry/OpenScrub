@@ -235,7 +235,7 @@ const CATS={name:"#3b82f6",dob:"#22c55e",phone:"#f59e0b",ssn:"#ef4444",
             ignore:"#334155",trackobj:"#eab308"};
 const DN={person:"person (full body)",ignore:"ignore (never blur)",
           trackobj:"track object (blur it)"};
-const RULER=24,WROW=20,AROW=16;
+const RULER=24,WROW=20,AROW=34;
 
 let S={file:null,dur:0,vw:0,vh:0,cin:0,cout:0,wins:[],sel:0,ignore:[],
  zoom:1,view0:0,
@@ -276,12 +276,52 @@ function openEditor(url,label){
   $("empty").style.display="none";$("editor").style.display="block";
   fitCanvas();renderCats();tlHdr();draw();
   S.zoom=1;S.view0=0;setZoom(1);
+  buildWave();
  };
  v.addEventListener("seeked",()=>{S.seeking=false;pump();tlDraw();});
  v.addEventListener("timeupdate",tlDraw);
  v.addEventListener("loadeddata",prime,{once:true});
  window.addEventListener("resize",()=>{fitCanvas();draw();tlDraw();});
  hookZC();hookTL();
+}
+async function buildWave(){
+ const tok=(S.waveTok=(S.waveTok||0)+1);
+ S.wave=[];
+ try{
+  if(S.file){
+   if(S.file.size>600*1024*1024)return;   // too large to decode in-browser
+   const buf=await S.file.arrayBuffer();
+   if(tok!==S.waveTok)return;
+   const ctx=new OfflineAudioContext(1,8000,8000);
+   const ab=await ctx.decodeAudioData(buf);
+   if(tok!==S.waveTok)return;
+   // browsers demux only the DEFAULT audio track from a video container —
+   // extra lanes stay flat for local files (server paths get all tracks)
+   S.wave[0]=peaksFrom(ab);
+  }else{
+   const path=$("spath").value.trim();
+   for(let i=0;i<S.audio.length;i++){
+    const r=await fetch("/api/waveform?path="+encodeURIComponent(path)
+                        +"&track="+i);
+    if(tok!==S.waveTok)return;
+    if(r.ok){const d=await r.json();
+     if(d.peaks&&d.peaks.length)S.wave[i]=d.peaks;}
+   }
+  }
+ }catch(e){}
+ if(tok===S.waveTok)tlDraw();
+}
+function peaksFrom(ab){
+ const ch=ab.getChannelData(0),N=2000,
+       per=Math.max(1,Math.floor(ch.length/N));
+ const out=new Array(N).fill(0);let mx=0;
+ for(let b=0;b<N;b++){
+  let m=0;const s0=b*per,e0=Math.min(ch.length,s0+per);
+  for(let j=s0;j<e0;j+=2){const v=Math.abs(ch[j]);if(v>m)m=v;}
+  out[b]=m;if(m>mx)mx=m;
+ }
+ if(mx>0)for(let b=0;b<N;b++)out[b]=+(out[b]/mx).toFixed(3);
+ return out;
 }
 function prime(){
  if(S.primed)return;S.primed=true;
@@ -583,11 +623,28 @@ function tlDraw(){
  });
  S.audio.forEach((a,i)=>{
   const y=RULER+WROW*S.wins.length+AROW*i;
-  g.fillStyle=a.muted?"#111827":"#0e2217";g.fillRect(0,y,w,AROW);
-  g.fillStyle=a.muted?"#374151":"#22c55e";
-  g.fillRect(tx(S.cin,w),y+6,Math.max(2,tx(S.cout,w)-tx(S.cin,w)),AROW-12);
-  if(a.muted){g.fillStyle="#6b7280";g.font="8.5px sans-serif";
-   g.fillText("muted — removed from output",tx(S.cin,w)+6,y+11);}
+  g.fillStyle=a.muted?"#111827":"#0a1428";g.fillRect(0,y,w,AROW);
+  const ax0=tx(S.cin,w),ax1=tx(S.cout,w);
+  g.fillStyle=a.muted?"#374151":"#1d4ed8";
+  g.fillRect(ax0,y+3,Math.max(2,ax1-ax0),AROW-6);
+  const wv=S.wave&&S.wave[i];
+  if(wv&&wv.length){
+   // per-pixel peak columns THROUGH the bar: scrub straight to a loud
+   // noise or the first spoken words
+   g.fillStyle=a.muted?"#6b7280":"#93c5fd";
+   const span=S.dur/S.zoom,mid=y+AROW/2,hh=(AROW-10)/2;
+   const px0=Math.max(0,Math.ceil(ax0)),px1=Math.min(w,Math.floor(ax1));
+   for(let x=px0;x<px1;x++){
+    const t=S.view0+x/w*span;
+    if(t<S.cin||t>S.cout)continue;
+    const pk=wv[Math.min(wv.length-1,
+                         Math.max(0,Math.floor(t/S.dur*wv.length)))]||0;
+    const hgt=Math.max(1,pk*hh);
+    g.fillRect(x,mid-hgt,1,hgt*2);
+   }
+  }
+  if(a.muted){g.fillStyle="#9ca3af";g.font="8.5px sans-serif";
+   g.fillText("muted — removed from output",ax0+6,y+11);}
  });
  g.fillStyle="rgba(2,6,23,0.68)";
  g.fillRect(0,0,tx(S.cin,w),H);g.fillRect(tx(S.cout,w),0,w-tx(S.cout,w),H);

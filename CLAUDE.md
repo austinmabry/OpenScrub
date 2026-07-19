@@ -211,7 +211,12 @@ Key classes/functions (locate with grep, line numbers drift):
   frame; whole-frame when a checked category has no zones). Copy/paste
   zones between windows, clip bookends drag window edges inward
   (`clampWins`; windows <0.2s drop; the last window resets to
-  whole-clip), audio lanes with M mute buttons, a timeline ZOOM bar
+  whole-clip), audio lanes with M mute buttons — thick blue bars with a
+  WAVEFORM through them (local files: in-browser WebAudio decode at 8kHz
+  mono, 600MB size cap, fail-soft to a flat bar; browsers demux only the
+  default track, extra local lanes stay flat. Server paths: per-track
+  /api/waveform, ffmpeg s16le 1kHz → 2000 normalized peaks, same inline
+  containment guard as server_video) — a timeline ZOOM bar
   (−/slider/+ to 40×, log scale, plus a pan slider; `tx` clamps for
   drawing while `txr` is the raw mapping used for handle hit tests so an
   off-view handle can't be grabbed at the clamped edge; ruler ticks

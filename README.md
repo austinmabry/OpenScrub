@@ -334,8 +334,9 @@ right below it, and server settings behind the gear icon in the header.
    from 5:00–7:00 by stacking two windows. Each window carries its own
    categories and its own zones (click a category's color square, then
    draw on the frame; Copy/Paste moves zones between windows). White
-   clip bookends trim the output; audio lanes each have an M button to
-   remove that track. Need to blur something the detectors don't know —
+   clip bookends trim the output; audio lanes show a **waveform** so you
+   can scrub straight to a loud noise or the moment someone starts
+   talking, and each lane has an M button to remove that track. Need to blur something the detectors don't know —
    a tattoo, a badge, a specific person or object? Pick **track object**,
    scrub to a frame where it's clear, and draw ON it: the scan
    template-tracks it through the window and blurs it wherever it goes.
