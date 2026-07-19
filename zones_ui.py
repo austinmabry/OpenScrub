@@ -284,16 +284,6 @@ function openEditor(url,label){
  window.addEventListener("resize",()=>{fitCanvas();draw();tlDraw();});
  hookZC();hookTL();
 }
-function makeOffCtx(){
- const OC=window.OfflineAudioContext||window.webkitOfflineAudioContext;
- if(!OC)return null;
- // iOS Safari rejects LOW sample rates (NotSupportedError below 22050 on
- // pre-2024 WebKit; trunk accepts 8k) — walk up until one constructs.
- for(const sr of [8000,16000,22050,44100,48000]){
-  try{return new OC(1,sr,sr);}catch(e){}
- }
- return null;
-}
 function decodeBuf(ctx,buf){
  // Safari's decodeAudioData was callback-only for years; the modern form
  // returns a promise. Feed both shapes — first settle wins.
@@ -303,21 +293,40 @@ function decodeBuf(ctx,buf){
   if(p&&p.then)p.then(res,rej);
  });
 }
+function errName(e){
+ if(e==null)return "unknown error";      // old Safari passes null to the
+ return e.name||e.message||String(e);    // decode error callback
+}
 async function buildWave(){
  const tok=(S.waveTok=(S.waveTok||0)+1);
- S.wave=[];
+ S.wave=[];S.waveErr=null;S.waveBusy=true;tlDraw();
  try{
   if(S.file){
-   if(S.file.size>600*1024*1024)return;   // too large to decode in-browser
+   if(S.file.size>600*1024*1024){        // too large to decode in-browser
+    S.waveErr="file too large";return;}
    const buf=await S.file.arrayBuffer();
    if(tok!==S.waveTok)return;
-   const ctx=makeOffCtx();
-   if(!ctx)return;
-   const ab=await decodeBuf(ctx,buf);
-   if(tok!==S.waveTok)return;
-   // browsers demux only the DEFAULT audio track from a video container —
-   // extra lanes stay flat for local files (server paths get all tracks)
-   S.wave[0]=peaksFrom(ab);
+   const OC=window.OfflineAudioContext||window.webkitOfflineAudioContext;
+   if(!OC){S.waveErr="WebAudio unavailable";return;}
+   // iOS Safari quirks, both real: pre-2024 WebKit THROWS constructing a
+   // context below 22050; newer WebKit constructs an 8k context fine but
+   // can still FAIL the AAC decode into it. So retry the WHOLE decode at
+   // each rate, low (cheap) to high, and only give up when every rate
+   // fails. decodeAudioData detaches its buffer — slice a copy per try.
+   let lastErr=null;
+   for(const sr of [8000,16000,22050,44100,48000]){
+    let ctx=null;
+    try{ctx=new OC(1,sr,sr);}catch(e){lastErr=e;continue;}
+    try{
+     const ab=await decodeBuf(ctx,buf.slice(0));
+     if(tok!==S.waveTok)return;
+     // browsers demux only the DEFAULT audio track from a video container —
+     // extra lanes stay flat for local files (server paths get all tracks)
+     S.wave[0]=peaksFrom(ab);
+     return;
+    }catch(e){lastErr=e;if(tok!==S.waveTok)return;}
+   }
+   S.waveErr="decode failed ("+errName(lastErr)+")";
   }else{
    const path=$("spath").value.trim();
    for(let i=0;i<S.audio.length;i++){
@@ -328,8 +337,14 @@ async function buildWave(){
      if(d.peaks&&d.peaks.length)S.wave[i]=d.peaks;}
    }
   }
- }catch(e){}
- if(tok===S.waveTok)tlDraw();
+ }catch(e){S.waveErr="waveform failed ("+errName(e)+")";}
+ finally{
+  if(tok===S.waveTok){
+   S.waveBusy=false;
+   if(S.waveErr)console.warn("[openscrub] "+S.waveErr);
+   tlDraw();
+  }
+ }
 }
 function peaksFrom(ab){
  const ch=ab.getChannelData(0),N=2000,
@@ -665,6 +680,13 @@ function tlDraw(){
   }
   if(a.muted){g.fillStyle="#9ca3af";g.font="8.5px sans-serif";
    g.fillText("muted — removed from output",ax0+6,y+11);}
+  else if(!(wv&&wv.length)&&i===0){
+   // honest lane status instead of a silently flat bar: while decoding
+   // show progress; on failure show the error so a report can name it
+   const msg=S.waveBusy?"analyzing audio…":(S.waveErr||null);
+   if(msg){g.fillStyle="#dbeafe";g.font="8.5px sans-serif";
+    g.fillText(msg,ax0+6,y+AROW/2+3);}
+  }
  });
  g.fillStyle="rgba(2,6,23,0.68)";
  g.fillRect(0,0,tx(S.cin,w),H);g.fillRect(tx(S.cout,w),0,w-tx(S.cout,w),H);

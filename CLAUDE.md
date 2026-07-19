@@ -213,9 +213,15 @@ Key classes/functions (locate with grep, line numbers drift):
   (`clampWins`; windows <0.2s drop; the last window resets to
   whole-clip), audio lanes with M mute buttons — thick blue bars with a
   WAVEFORM through them (local files: in-browser WebAudio decode, 600MB size
-  cap, fail-soft to a flat bar; `makeOffCtx` walks a sample-rate
-  ladder 8k→48k because pre-2024 iOS Safari throws below 22050, and
-  `decodeBuf` feeds both callback and promise decodeAudioData forms; browsers demux only the
+  cap; `buildWave` retries the WHOLE construct+decode at each rate of an
+  8k→48k ladder — pre-2024 iOS Safari throws CONSTRUCTING below 22050,
+  newer WebKit constructs 8k fine but can fail the DECODE into it, and
+  decodeAudioData detaches its buffer so each try gets a `buf.slice(0)`;
+  `decodeBuf` feeds both callback and promise decodeAudioData forms
+  (old-Safari error callback may pass null). Failures are NOT silent:
+  `S.waveBusy`/`S.waveErr` render "analyzing audio…" / the error name on
+  the lane (light text, vertically centered) + console.warn — a flat bar
+  with no message means genuinely silent audio; browsers demux only the
   default track, extra local lanes stay flat. Server paths: per-track
   /api/waveform, ffmpeg s16le 1kHz → 2000 normalized peaks, same inline
   containment guard as server_video) — a timeline ZOOM bar
