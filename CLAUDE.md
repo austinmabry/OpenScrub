@@ -218,7 +218,17 @@ Key classes/functions (locate with grep, line numbers drift):
   newer WebKit constructs 8k fine but can fail the DECODE into it, and
   decodeAudioData detaches its buffer so each try gets a `buf.slice(0)`;
   `decodeBuf` feeds both callback and promise decodeAudioData forms
-  (old-Safari error callback may pass null). Failures are NOT silent:
+  (old-Safari error callback may pass null). iOS Safari refuses to demux
+  VIDEO containers in decodeAudioData entirely (audio files only — every
+  ladder rate fails on an iPhone .mov even though `<video>` plays it), so
+  Plan B kicks in: `demuxMp4Aac` walks the MP4/QuickTime boxes in JS
+  (moov→trak soun→stsd mp4a, esds byte-scan for the ASC, stsz/stsc/stco+
+  co64/stts sample table walk — byte-exact vs ffprobe on moov-at-end AND
+  faststart layouts) and `waveViaWebCodecs` decodes the AAC samples with
+  WebCodecs AudioDecoder (iOS 16.4+; per-chunk peaks binned to 2000).
+  Non-AAC audio tracks are skipped (spatial-audio APAC first track on
+  newer iPhones) and fail with a loud "unsupported audio codec (xxxx)"
+  if no AAC track exists. Failures are NOT silent:
   `S.waveBusy`/`S.waveErr` render "analyzing audio…" / the error name on
   the lane (light text, vertically centered) + console.warn — a flat bar
   with no message means genuinely silent audio; browsers demux only the

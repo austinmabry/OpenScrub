@@ -297,6 +297,157 @@ function errName(e){
  if(e==null)return "unknown error";      // old Safari passes null to the
  return e.name||e.message||String(e);    // decode error callback
 }
+// ---- Plan B for iOS: Safari's decodeAudioData only accepts pure AUDIO
+// files — it refuses to demux a video container (.mov/.mp4) at ANY sample
+// rate, even though the <video> element plays it fine. So walk the MP4/
+// QuickTime boxes ourselves, pull the AAC track's raw samples, and decode
+// them with WebCodecs AudioDecoder (iOS 16.4+). Everything stays local.
+function demuxMp4Aac(ab){
+ const dv=new DataView(ab),u8=new Uint8Array(ab),N=ab.byteLength;
+ const fcc=o=>String.fromCharCode(u8[o],u8[o+1],u8[o+2],u8[o+3]);
+ function* boxes(o,end){
+  while(o+8<=end){
+   let sz=dv.getUint32(o),hd=8;
+   const typ=fcc(o+4);
+   if(sz===1){sz=Number(dv.getBigUint64(o+8));hd=16;}
+   else if(sz===0)sz=end-o;
+   if(sz<hd||o+sz>end)break;
+   yield {typ:typ,body:o+hd,end:o+sz};
+   o+=sz;
+  }
+ }
+ const find=(o,end,t)=>{for(const b of boxes(o,end))if(b.typ===t)return b;
+                       return null;};
+ const moov=find(0,N,"moov");
+ if(!moov)throw new Error("not an MP4/QuickTime file");
+ let badCodec=null;
+ for(const trak of boxes(moov.body,moov.end)){
+  if(trak.typ!=="trak")continue;
+  const mdia=find(trak.body,trak.end,"mdia");if(!mdia)continue;
+  const hdlr=find(mdia.body,mdia.end,"hdlr");
+  if(!hdlr||fcc(hdlr.body+8)!=="soun")continue;
+  const mdhd=find(mdia.body,mdia.end,"mdhd");
+  const tscale=mdhd?(u8[mdhd.body]===1?dv.getUint32(mdhd.body+20)
+                                      :dv.getUint32(mdhd.body+12)):44100;
+  const minf=find(mdia.body,mdia.end,"minf");if(!minf)continue;
+  const stbl=minf?find(minf.body,minf.end,"stbl"):null;if(!stbl)continue;
+  const stsd=find(stbl.body,stbl.end,"stsd");if(!stsd)continue;
+  // first sample entry: [size][format] at stsd.body+8 (8 = ver/flags+count)
+  const ebody=stsd.body+8,eend=Math.min(ebody+dv.getUint32(ebody),stsd.end);
+  const efmt=fcc(ebody+4);
+  if(efmt!=="mp4a"){badCodec=efmt;continue;}   // e.g. spatial-audio track;
+  // AudioSampleEntry fixed fields; v2 entries lie here, fall back to mdhd
+  const ch=dv.getUint16(ebody+24)||2;
+  const sr=(dv.getUint32(ebody+32)>>>16)||tscale;
+  // esds may sit directly in the entry or inside a QT 'wave' wrapper —
+  // byte-scan for it, then walk the descriptors (tag + varint length)
+  let asc=null;
+  for(let o=ebody+36;o+8<=eend;o++){
+   if(u8[o]===0x65&&u8[o+1]===0x73&&u8[o+2]===0x64&&u8[o+3]===0x73){
+    let p=o+8;                             // skip 4cc + ver/flags
+    const rdlen=()=>{let l=0,b;do{b=u8[p++];l=(l<<7)|(b&127);}while(b&128);
+                     return l;};
+    if(u8[p]===3){p++;rdlen();p+=3;        // ES descr: ES_ID + flags
+     if(u8[p]===4){p++;rdlen();p+=13;      // DecoderConfig: oti..bitrates
+      if(u8[p]===5){p++;const l=rdlen();asc=u8.slice(p,p+l);}}}
+    break;
+   }
+  }
+  if(!asc||!asc.length)throw new Error("AAC config not found");
+  const g32=(b,o)=>dv.getUint32(b.body+o);
+  const stsz=find(stbl.body,stbl.end,"stsz"),
+        stsc=find(stbl.body,stbl.end,"stsc"),
+        stts=find(stbl.body,stbl.end,"stts");
+  let stco=find(stbl.body,stbl.end,"stco"),co64=false;
+  if(!stco){stco=find(stbl.body,stbl.end,"co64");co64=true;}
+  if(!stsz||!stsc||!stco)throw new Error("incomplete sample tables");
+  const fixed=g32(stsz,4),cnt=g32(stsz,8);
+  const sz=i=>fixed||g32(stsz,12+4*i);
+  const nch=g32(stco,4),nsc=g32(stsc,4);
+  const coff=i=>co64?Number(dv.getBigUint64(stco.body+8+8*i))
+                    :g32(stco,8+4*i);
+  const durs=[];
+  if(stts){const n=g32(stts,4);
+   for(let i=0;i<n;i++)durs.push([g32(stts,8+8*i),g32(stts,12+8*i)]);}
+  const samples=[];
+  let si=0,t=0,di=0,dleft=durs.length?durs[0][0]:Infinity;
+  for(let ci=0,sci=0;ci<nch&&si<cnt;ci++){
+   while(sci+1<nsc&&g32(stsc,8+12*(sci+1))<=ci+1)sci++;
+   let off=coff(ci);
+   const per=g32(stsc,12+12*sci);
+   for(let k=0;k<per&&si<cnt;k++,si++){
+    const s=sz(si);
+    samples.push({off:off,size:s,ts:Math.round(t/tscale*1e6)});
+    off+=s;
+    t+=durs.length?durs[di][1]:1024;
+    if(durs.length&&--dleft<=0&&di+1<durs.length){
+     di++;dleft=durs[di][0];}
+   }
+  }
+  if(!samples.length)throw new Error("empty audio track");
+  return {ch:ch,sr:sr,asc:asc,samples:samples};
+ }
+ throw new Error(badCodec?"unsupported audio codec ("+badCodec+")"
+                         :"no audio track found");
+}
+async function waveViaWebCodecs(buf){
+ if(typeof AudioDecoder==="undefined")
+  throw new Error("WebCodecs unavailable");
+ const m=demuxMp4Aac(buf);
+ const cfg={codec:"mp4a.40."+((m.asc[0]>>3)||2),sampleRate:m.sr,
+            numberOfChannels:m.ch,description:m.asc};
+ const sup=await AudioDecoder.isConfigSupported(cfg).catch(()=>null);
+ if(sup&&sup.supported===false)throw new Error("AAC decode unsupported");
+ const spans=[];                        // [t0_us,t1_us,peak]
+ let derr=null;
+ const dec=new AudioDecoder({
+  output:ad=>{
+   try{
+    const n=ad.numberOfFrames,f=new Float32Array(n);
+    ad.copyTo(f,{planeIndex:0,format:"f32-planar"});
+    let m0=0;for(let i=0;i<n;i+=2){const v=Math.abs(f[i]);if(v>m0)m0=v;}
+    spans.push([ad.timestamp,
+                ad.timestamp+Math.round(n/ad.sampleRate*1e6),m0]);
+   }catch(e){
+    try{                                // build without f32 conversion
+     const n2=ad.numberOfFrames*ad.numberOfChannels,
+           s16=new Int16Array(n2);
+     ad.copyTo(s16,{planeIndex:0});
+     let m1=0;for(let i=0;i<n2;i+=2){const v=Math.abs(s16[i]);if(v>m1)m1=v;}
+     spans.push([ad.timestamp,ad.timestamp+
+      Math.round(ad.numberOfFrames/ad.sampleRate*1e6),m1/32768]);
+    }catch(e2){}
+   }
+   ad.close();
+  },
+  error:e=>{derr=e;}
+ });
+ const u8=new Uint8Array(buf);
+ try{
+  dec.configure(cfg);
+  for(const s of m.samples){
+   if(derr)break;
+   dec.decode(new EncodedAudioChunk({type:"key",timestamp:s.ts,
+    data:u8.subarray(s.off,s.off+s.size)}));
+  }
+  await dec.flush();
+ }catch(e){if(!derr)derr=e;}
+ try{dec.close();}catch(e){}
+ if(!spans.length)
+  throw new Error("WebCodecs decode failed"
+                  +(derr?" ("+errName(derr)+")":""));
+ const dur=spans.reduce((a,s)=>Math.max(a,s[1]),0)||1,NB=2000,
+       out=new Array(NB).fill(0);
+ let mx=0;
+ for(const s of spans){
+  const b0=Math.max(0,Math.floor(s[0]/dur*NB)),
+        b1=Math.min(NB-1,Math.floor(s[1]/dur*NB));
+  for(let b=b0;b<=b1;b++)if(s[2]>out[b])out[b]=s[2];
+  if(s[2]>mx)mx=s[2];
+ }
+ if(mx>0)for(let b=0;b<NB;b++)out[b]=+(out[b]/mx).toFixed(3);
+ return out;
+}
 async function buildWave(){
  const tok=(S.waveTok=(S.waveTok||0)+1);
  S.wave=[];S.waveErr=null;S.waveBusy=true;tlDraw();
@@ -326,7 +477,16 @@ async function buildWave(){
      return;
     }catch(e){lastErr=e;if(tok!==S.waveTok)return;}
    }
-   S.waveErr="decode failed ("+errName(lastErr)+")";
+   try{                                  // Plan B: demux + WebCodecs
+    const pk=await waveViaWebCodecs(buf);
+    if(tok!==S.waveTok)return;
+    S.wave[0]=pk;
+    return;
+   }catch(e2){
+    if(tok!==S.waveTok)return;
+    S.waveErr="decode failed ("+errName(lastErr)+"; "
+              +(e2&&e2.message?e2.message:errName(e2))+")";
+   }
   }else{
    const path=$("spath").value.trim();
    for(let i=0;i<S.audio.length;i++){
