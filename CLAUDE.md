@@ -224,8 +224,12 @@ Key classes/functions (locate with grep, line numbers drift):
   Plan B kicks in: `demuxMp4Aac` walks the MP4/QuickTime boxes in JS
   (moov→trak soun→stsd mp4a, esds byte-scan for the ASC, stsz/stsc/stco+
   co64/stts sample table walk — byte-exact vs ffprobe on moov-at-end AND
-  faststart layouts) and `waveViaWebCodecs` decodes the AAC samples with
-  WebCodecs AudioDecoder (iOS 16.4+; per-chunk peaks binned to 2000).
+  faststart layouts), then `wavePlanB` tries `waveViaWebCodecs` (WebCodecs
+  AudioDecoder, per-chunk peaks binned to 2000) and, because real iPhones
+  ship WITHOUT AudioDecoder, falls back to `adtsFromAac`: rewrap the raw
+  AAC frames as an ADTS stream (7-byte headers from the ASC) — a pure
+  AUDIO payload decodeAudioData DOES accept — and run the rate ladder on
+  that (ffmpeg round-trip-validated; WebKit e2e with iPhone-exact mocks).
   Non-AAC audio tracks are skipped (spatial-audio APAC first track on
   newer iPhones) and fail with a loud "unsupported audio codec (xxxx)"
   if no AAC track exists. Failures are NOT silent:
@@ -314,6 +318,13 @@ defined — there was a real UnboundLocalError from ordering once.
 
 ## Web app (openscrub_web.py)
 
+- Mobile fit rule: the page must NEVER scroll horizontally. Every CSS
+  grid track is `minmax(0,1fr)` (never bare `1fr` — the implicit `auto`
+  minimum lets one wide child, e.g. a `white-space:pre` select in the
+  Advanced grid, blow the track past a phone viewport; this was a real
+  56px overflow on iPhone), `select{max-width:100%}`, and
+  `html,body{overflow-x:clip}` as the regression guard. Verified at
+  320/375/390/430px across editor + advanced + settings views.
 - ONE page: `PAGE` is COMPOSED at import time — `zones_ui.ZONES_PAGE` is
   the shell (Scan Setup editor on top) and openscrub_web.py fills its
   `%%MARKER%%` slots: `APP_CSS` (dark restyle of the app sections),

@@ -1186,7 +1186,7 @@ input[type=password]{background:var(--panel);border:1px solid #334155;
  color:var(--txt);border-radius:6px;padding:5px 8px;font-size:12.5px;
  font-family:inherit}
 textarea{height:64px}
-.grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.grid2{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px}
 .grid3{display:grid;grid-template-columns:repeat(auto-fill,minmax(175px,1fr));gap:9px}
 .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 #appzone button,#settingsview button{background:var(--acc);color:#fff;
@@ -1247,7 +1247,7 @@ progress{width:100%;height:12px;accent-color:var(--acc)}
 footer{text-align:center;color:#64748b;font-size:12px;padding:18px 12px 26px}
 .hdrtag{display:none}
 @media(min-width:900px){.hdrtag{display:inline}}
-@media(max-width:640px){.grid2{grid-template-columns:1fr}}
+@media(max-width:640px){.grid2{grid-template-columns:minmax(0,1fr)}}
 """
 
 JOBS_HTML = """<div class="card"><h2>Jobs</h2><div class="joblist" id="jobs">loading…</div></div>

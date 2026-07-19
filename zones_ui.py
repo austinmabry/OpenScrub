@@ -23,8 +23,12 @@ ZONES_PAGE = r"""<!doctype html>
 :root{--bg:#0b1120;--panel:#0f172a;--card:#1e293b;--mut:#94a3b8;--txt:#e2e8f0;
  --acc:#3b82f6;--org:#f59e0b}
 *{box-sizing:border-box}
+/* no page-level horizontal scroll, ever: wide children must shrink (grid
+   tracks are minmax(0,..) below) and this clips any future regression */
+html,body{overflow-x:clip}
 body{margin:0;background:var(--bg);color:var(--txt);
  font:14px system-ui,-apple-system,"Segoe UI",sans-serif}
+select{max-width:100%}
 header{display:flex;align-items:center;gap:12px;padding:9px 16px;
  background:var(--panel);border-bottom:1px solid var(--card)}
 header img{height:30px;display:block}
@@ -33,7 +37,7 @@ header .meta{color:var(--mut);font-size:12.5px}
 header a{margin-left:auto;color:#93c5fd;text-decoration:none;font-size:13px}
 main{display:grid;grid-template-columns:302px minmax(0,1fr);gap:13px;
  max-width:1560px;margin:0 auto;padding:13px 16px}
-@media(max-width:980px){main{grid-template-columns:1fr}}
+@media(max-width:980px){main{grid-template-columns:minmax(0,1fr)}}
 .card{background:var(--card);border-radius:10px;padding:11px 13px;margin-bottom:11px}
 .card h2{font-size:12.5px;margin:0 0 8px;color:#cbd5e1;text-transform:uppercase;
  letter-spacing:.04em;font-weight:600}
@@ -70,10 +74,12 @@ details summary{cursor:pointer;background:var(--card);border-radius:10px;
  padding:10px 13px;font-size:12.5px;color:var(--mut);list-style:none}
 details[open] summary{border-radius:10px 10px 0 0}
 details .inner{background:var(--card);border-radius:0 0 10px 10px;
- padding:4px 13px 11px;display:grid;grid-template-columns:1fr 1fr;gap:7px 10px;
+ padding:4px 13px 11px;display:grid;
+ grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:7px 10px;
  font-size:12px}
 details .inner label{display:block;color:var(--mut);font-size:11px;margin-bottom:2px}
-details .inner input,details .inner select,details .inner textarea{width:100%}
+details .inner input,details .inner select,details .inner textarea{
+ width:100%;min-width:0}
 details .inner .full{grid-column:1/-1}
 .prevwrap{position:relative;background:#000;border-radius:10px;overflow:hidden;
  display:flex;justify-content:center}
@@ -390,10 +396,53 @@ function demuxMp4Aac(ab){
  throw new Error(badCodec?"unsupported audio codec ("+badCodec+")"
                          :"no audio track found");
 }
-async function waveViaWebCodecs(buf){
+function adtsFromAac(m,u8){
+ // Rewrap the raw AAC frames as an ADTS stream — a pure AUDIO payload
+ // that Safari's decodeAudioData accepts even though it refuses the
+ // video container the frames came from. 7-byte header per frame;
+ // profile/rate/channels come from the AudioSpecificConfig.
+ const aot=(m.asc[0]>>3)||2,
+       fi=((m.asc[0]&7)<<1)|(m.asc[1]>>7),
+       cc=(m.asc[1]>>3)&15;
+ if(fi>=15||aot>4)throw new Error("unsupported AAC config");
+ let total=0;
+ for(const s of m.samples)total+=s.size+7;
+ const out=new Uint8Array(total);
+ let o=0;
+ for(const s of m.samples){
+  const fl=s.size+7;
+  out[o]=0xFF;out[o+1]=0xF1;                 // sync, MPEG-4, no CRC
+  out[o+2]=((aot-1)<<6)|(fi<<2)|(cc>>2);
+  out[o+3]=((cc&3)<<6)|((fl>>11)&3);
+  out[o+4]=(fl>>3)&255;
+  out[o+5]=((fl&7)<<5)|0x1F;                 // buffer fullness = all ones
+  out[o+6]=0xFC;                             // (VBR), 1 AAC frame
+  out.set(u8.subarray(s.off,s.off+s.size),o+7);
+  o+=fl;
+ }
+ return out.buffer;
+}
+async function wavePlanB(buf){
+ const m=demuxMp4Aac(buf);
+ try{return await waveViaWebCodecs(buf,m);}
+ catch(e){
+  // no AudioDecoder on this iOS (or it balked) — ADTS + decodeAudioData
+  const adts=adtsFromAac(m,new Uint8Array(buf));
+  const OC=window.OfflineAudioContext||window.webkitOfflineAudioContext;
+  if(!OC)throw e;
+  let lastErr=e;
+  for(const sr of [8000,16000,22050,44100,48000]){
+   let ctx=null;
+   try{ctx=new OC(1,sr,sr);}catch(e2){lastErr=e2;continue;}
+   try{return peaksFrom(await decodeBuf(ctx,adts.slice(0)));}
+   catch(e2){lastErr=e2;}
+  }
+  throw new Error("AAC decode failed ("+errName(lastErr)+")");
+ }
+}
+async function waveViaWebCodecs(buf,m){
  if(typeof AudioDecoder==="undefined")
   throw new Error("WebCodecs unavailable");
- const m=demuxMp4Aac(buf);
  const cfg={codec:"mp4a.40."+((m.asc[0]>>3)||2),sampleRate:m.sr,
             numberOfChannels:m.ch,description:m.asc};
  const sup=await AudioDecoder.isConfigSupported(cfg).catch(()=>null);
@@ -477,8 +526,8 @@ async function buildWave(){
      return;
     }catch(e){lastErr=e;if(tok!==S.waveTok)return;}
    }
-   try{                                  // Plan B: demux + WebCodecs
-    const pk=await waveViaWebCodecs(buf);
+   try{                                  // Plan B: demux the container
+    const pk=await wavePlanB(buf);
     if(tok!==S.waveTok)return;
     S.wave[0]=pk;
     return;
