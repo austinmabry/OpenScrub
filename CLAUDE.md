@@ -326,6 +326,15 @@ defined — there was a real UnboundLocalError from ordering once.
   are picked up on the next job (detector instantiated per run).
 - Server: cheroot with `BuiltinSSLAdapter` (self-signed or user cert), Flask
   dev server fallback if cheroot missing. `ssl_ctx` is a `(cert, key)` tuple.
+  `RedirectingTLS` peeks the first byte to 301 plain-HTTP → https, but the
+  peek MUST be non-blocking (`select` 0.1s) and the handshake bounded
+  (`settimeout(4)`): cheroot calls `ssl_adapter.wrap` on its SINGLE accept
+  thread, so a blocking peek there wedges ALL new connections — normal
+  Safari's speculative preconnects starved the pool and the page reload-
+  looped (Private mode has no preconnect, so it worked). numthreads=64 for
+  headroom past one browser's ~6 connections. HTML is served `no-store`
+  (not just `no-cache`) so iOS Safari can't run stale inlined JS after an
+  update — a fix that only worked in Private mode was the tell.
 - Self-update: `/api/update_check` (6h-cached PyPI poll, offline-silent),
   `/api/update_run` (409 while any job is queued/running), `/api/update_status`.
   Footer shows the version via the `%%VERSION%%` placeholder replaced at

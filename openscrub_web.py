@@ -549,13 +549,19 @@ def set_cookie(resp):
     if TOKEN is not None and request.args.get("token") == TOKEN:
         resp.set_cookie("phiblur_token", TOKEN, max_age=90 * 86400,
                         samesite="Lax")
-    # the UI is a single served page: without this, browsers (iOS Safari
-    # especially) keep showing a STALE cached copy after the server is
-    # updated — new panels invisibly missing until the cache expires
-    # minutes later. HTML and JSON must always revalidate; images
-    # (thumbnails, frames) keep their own caching.
-    if resp.mimetype in ("text/html", "application/json"):
-        resp.headers["Cache-Control"] = "no-cache"
+    # the UI is a single served page whose JS/CSS is inlined: without this,
+    # browsers (iOS Safari especially) keep showing a STALE cached copy
+    # after the server is updated — new panels/fixes invisibly missing (a
+    # user's waveform fix ran only in Private mode because the normal tab
+    # served old cached JS). `no-cache` still lets Safari store and serve
+    # the page; `no-store` forbids storing it at all, so the app is never
+    # stale. Images (thumbnails, frames) keep their own caching.
+    if resp.mimetype == "text/html":
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        resp.headers["Pragma"] = "no-cache"          # HTTP/1.0 caches
+        resp.headers["Expires"] = "0"
+    elif resp.mimetype == "application/json":
+        resp.headers["Cache-Control"] = "no-store"
     return resp
 
 
@@ -2997,8 +3003,14 @@ def _serve(host, port, ssl_ctx):
         print("     to switch to a production server and silence its warning)")
         app.run(host=host, port=port, threaded=True, ssl_context=ssl_ctx)
         return
+    # A browser opens several connections per host (Safari preconnects up to
+    # ~6), and each idle keep-alive connection holds a cheroot worker until
+    # it times out — so the pool needs headroom well past one browser's
+    # connection count or real requests queue behind idle sockets. 16 was
+    # tight enough that a phone plus a laptop could stall; 64 is ample and
+    # cheroot worker threads are cheap.
     server = Server((host, port), app, server_name="openscrub",
-                    numthreads=16)
+                    numthreads=64)
     # Browsers probing/rejecting the self-signed certificate abort mid-
     # handshake on every new socket, and cheroot logs each one. Harmless
     # noise (install a trusted cert to stop the aborts themselves) —
@@ -3024,10 +3036,29 @@ def _serve(host, port, ssl_ctx):
 
             def wrap(self, sock):
                 # peek the first byte before TLS: a real TLS ClientHello
-                # starts with 0x16; anything else is plaintext HTTP.
+                # starts with 0x16; anything else is plaintext HTTP (user
+                # typed http://) and gets a redirect to the https URL.
+                #
+                # The peek MUST NOT block. cheroot runs this on a worker
+                # thread, and a blocking recv() parks that thread until the
+                # client sends data. Normal Safari (unlike Private mode)
+                # opens speculative *preconnect* sockets that finish the TCP
+                # handshake but delay their first byte — each blocking peek
+                # would wedge a worker, and enough of them starve the whole
+                # 16-thread pool so real requests never get served (the
+                # "loads over and over, never finishes" bug; Private mode has
+                # no preconnect so it's unaffected). A plaintext HTTP client
+                # sends "GET ..." immediately, so its bytes are already in
+                # the buffer here; a near-instant select catches that. If no
+                # byte is ready yet we assume TLS and hand straight to
+                # cheroot's normal handshake path — exactly how preconnects
+                # behaved before this adapter existed, so there's no
+                # starvation and no regression.
                 from cheroot import errors as _cherr
+                import select as _select
                 try:
-                    first = sock.recv(1, socket.MSG_PEEK)
+                    ready = _select.select([sock], [], [], 0.1)[0]
+                    first = sock.recv(1, socket.MSG_PEEK) if ready else b""
                 except OSError:
                     first = b""
                 if first and first[0] != 0x16:
@@ -3042,6 +3073,18 @@ def _serve(host, port, ssl_ctx):
                         pass
                     raise _cherr.FatalSSLAlert(
                         "plain HTTP redirected to %s" % self.redirect_url)
+                # Bound the TLS handshake itself. A bare TCP preconnect that
+                # completes the socket connect but never sends a ClientHello
+                # would otherwise park this worker thread in the handshake
+                # read forever — just six of them (a normal Safari per-host
+                # count) starve the 16-thread pool and real requests never
+                # get served. A short timeout frees the thread; a genuine
+                # handshake finishes in well under a second even on mobile.
+                # cheroot resets the socket timeout for request handling.
+                try:
+                    sock.settimeout(4.0)
+                except OSError:
+                    pass
                 return super().wrap(sock)
 
         server.ssl_adapter = RedirectingTLS(ssl_ctx[0], ssl_ctx[1])
