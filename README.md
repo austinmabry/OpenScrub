@@ -12,10 +12,11 @@
 
 # OpenScrub — local video & screen-recording redaction
 
-**A local, GPU-accelerated tool that blurs faces and any on-screen text —
-names, phone numbers, SSNs, emails, dates, ID numbers, or anything you can
-express as a regex — in videos and screen recordings, with a human review
-step before anything is published.**
+**A local, GPU-accelerated tool that blurs faces, whole people
+(silhouette-precise body masking), license plates, and any on-screen text —
+names, phone numbers, SSNs, emails, dates, or anything you can express as
+a regex — in videos and screen recordings, with a human review step before
+anything is published.**
 
 Runs entirely on your own machine (no cloud, no upload of sensitive
 footage). OCR-driven, so it catches text anywhere on screen; face-tracked,
@@ -26,9 +27,10 @@ rather than a half-second late. Defaults are tuned for the hardest case —
 dense, scrolling records screens (medical, financial, CRM, support
 consoles) — but the engine is general-purpose.
 
-> Keywords: video redaction · blur faces in video · redact screen recording ·
-> PII redaction · anonymize video · blur license plates · GDPR / CCPA /
-> FERPA / PCI / HIPAA · OCR text redaction · face blur · privacy tool
+> Keywords: video redaction · blur faces in video · blur a person in video ·
+> body blur / silhouette masking · redact screen recording · PII redaction ·
+> anonymize video · blur license plates · GDPR / CCPA / FERPA / PCI / HIPAA ·
+> OCR text redaction · face blur · privacy tool
 
 ## What it does
 
@@ -37,28 +39,41 @@ consoles) — but the engine is general-purpose.
   be missed. Works out of the box; optional higher-accuracy models
   (CenterFace, SCRFD) can be downloaded and selected in the web UI's
   Detection models panel — every download is hash-verified.
+- **Blur whole people — silhouette-precise** — the `person` category
+  detects full bodies and masks each person's **exact body outline**
+  (blur, black fill, or mosaic follows the silhouette; the background
+  around them stays sharp). A face blur hides a face, but clothing,
+  build, and gait still identify someone — this hides the person.
+  Enabled by downloading a segmentation model in the web UI's Person
+  model panel (hash-verified, ~11 MB); each tracked person gets their
+  own review card.
 - **Blur license plates** — via an optional ONNX detector model
   (see [PLATES.md](PLATES.md)); plates re-detect every frame, so a plate
   crossing the frame stays covered.
-- **Redact text by pattern** — bring your own regex for account numbers,
-  case numbers, employee IDs, order numbers; built-in
-  patterns for SSNs, phone numbers, emails, dates, addresses (including
-  multi-line street/city/state/ZIP blocks), credit/debit card numbers (Luhn-validated), API keys/tokens, and IP addresses,
-  plus an ID-number category you point at your own identifier format
-  (record numbers, claim numbers, account numbers — set its regex in the
-  web UI or with `--mrn-regex`).
+- **Redact text by pattern** — built-in patterns for SSNs, phone
+  numbers, emails, dates, addresses (including multi-line
+  street/city/state/ZIP blocks), credit/debit card numbers
+  (Luhn-validated), API keys/tokens, and IP addresses — plus **custom
+  regex categories**: add your own (claim numbers, case IDs, employee
+  IDs, account formats) in the web UI and each one becomes a first-class
+  category with its own color, zones, and review section.
 - **Redact names** — via named-entity recognition plus heuristics, with no
   list required (though you can supply an allowlist to *keep* specific names
   visible and a blocklist to *always* remove others).
-- **Detection zones** — restrict redaction to a region, or invert it: keep a
-  central subject sharp and blur everyone/everything around them, or vice versa.
+- **Detection windows & zones** — scope the scan in time AND space
+  before it runs: stack detection windows on a timeline (faces for the
+  whole clip *and* names only from 5:00–7:00), draw per-window zones on
+  the frame, and mark never-blur ignore zones. Clip bookends trim the
+  output; audio tracks can be muted per-track.
 - **Redaction styles** — blur, solid black box (irreversible), or mosaic
   pixelation, choosable per category (black-box the SSNs, blur the faces).
   Faces are masked with a tight **ellipse** by default — no smeared
   rectangle corners — and mosaic tiles scale with the face size.
-- **Human review** — every detection is shown as a thumbnail you can keep or
-  blur, with an interactive box editor to resize, move, add, or time-bound
-  any blur before rendering.
+- **Human review** — every detection is shown as a thumbnail you can
+  keep or blur — one card per tracked face/person/plate, one decision for
+  all its appearances — with an interactive box editor to resize, move,
+  add, time-bound, or **template-track a manually drawn box** through a
+  chosen time range, and audio mute/bleep spans for spoken PII.
 - **HDR in, HDR out** — iPhone (Dolby Vision/HLG) and HDR10 footage keeps
   its 10-bit HDR signal through redaction: output is 10-bit HEVC with the
   original color primaries and transfer preserved, and the blur is applied
@@ -123,19 +138,19 @@ review the output before publishing.**
 
 The most complete OpenScrub install: Tesseract, FFmpeg, spaCy NER, and
 the face model are all preinstalled — nothing to set up, and updates are
-a `docker pull` away. Every release publishes a CPU server image to
-GitHub Container Registry:
+a `docker pull` away. Every release publishes identical images to
+**Docker Hub** ([`pharmhero/openscrub`](https://hub.docker.com/r/pharmhero/openscrub))
+and GitHub Container Registry (`ghcr.io/austinmabry/openscrub`):
 
 ```
 docker run -d -p 8384:8384 \
   -v openscrub_data:/root/.local/share/OpenScrub \
-  ghcr.io/austinmabry/openscrub:latest
+  pharmhero/openscrub:latest
 ```
 
-The same images are also published to **Docker Hub** as
-[`pharmhero/openscrub`](https://hub.docker.com/r/pharmhero/openscrub)
-(`pharmhero/openscrub:latest`, `:cuda`, and versioned tags) — use
-whichever registry pulls faster for you; the images are identical.
+(or `ghcr.io/austinmabry/openscrub:latest` — use whichever registry
+pulls faster for you). Published tags are refreshed **weekly** with the
+latest OS security patches, not just at releases.
 
 Tesseract, FFmpeg, and the face model are baked in; jobs, certificates,
 zones, and downloaded plate models live in the mounted volume, so the
@@ -147,7 +162,9 @@ var) to confine it to one directory tree — recommended whenever the web
 UI is reachable by anyone but you. To update, pull the new tag and recreate the container — the
 in-app updater doesn't apply inside Docker. Both images include
 spaCy NER (name detection) out of the box; the default image is
-CPU-only.
+CPU-only. If you use **Encryption at rest**, stop the container with a
+generous grace period (`docker stop -t 120`) so the shutdown lock has
+time to encrypt large job stores.
 
 **NVIDIA GPU build** (`:cuda` / `:<version>-cuda`) — CUDA-accelerated
 PaddleOCR and NVENC hardware encoding:
@@ -155,11 +172,11 @@ PaddleOCR and NVENC hardware encoding:
 ```
 docker run -d --gpus all -p 8384:8384 \
   -v openscrub_data:/root/.local/share/OpenScrub \
-  ghcr.io/austinmabry/openscrub:cuda
+  pharmhero/openscrub:cuda
 ```
 
 On **Unraid**: install the Nvidia Driver plugin, add a container with
-repository `ghcr.io/austinmabry/openscrub:cuda`, extra parameter
+repository `pharmhero/openscrub:cuda`, extra parameter
 `--runtime=nvidia`, port 8384, and map
 `/root/.local/share/OpenScrub` to `/mnt/user/appdata/openscrub`.
 GPU features engage automatically (the OCR engine picks the CUDA build,
@@ -295,19 +312,53 @@ the footer shows an update link — one click runs the same updater (only
 while no job is running), then asks you to restart the server. Restart
 after any update to run the new version.
 
-## Web interface (LAN)
+## Web interface (LAN) — one page, editor to review
 
-Run `python openscrub_web.py` on an always-on machine and open the printed
-URL from any device on your network —
-laptop or phone. Workflow: upload a recording (or point at a server-side
-path) → scan runs on the server with a live preview and log → **review
-page**: every detection shown as a thumbnail grouped by category, uncheck
-false positives, per-category all-on/all-off, draw missed regions directly
-on any frame (works with touch) → render → download the redacted video and
-the audit report. Jobs queue one at a time so they don't fight over the GPU.
+Run `openscrub-web` (or `python openscrub_web.py`) on an always-on
+machine and open the printed URL from any device on your network —
+laptop, phone, or tablet. The whole app is **one dark, video-editor-style
+page**: the Scan Setup editor on top, your jobs and the review workflow
+right below it, and server settings behind the gear icon in the header.
+
+**Scan Setup editor** (the top of the page):
+
+1. **Load a video** — pick a local file or enter a path already on the
+   server. Nothing uploads until you press Start scan; the preview runs
+   in your browser.
+2. **Pick categories** — everything starts OFF, so nothing is detected
+   until you say so (the summary line warns you while nothing is
+   selected). Check what you want; drawing a zone auto-checks its
+   category.
+3. **Scope the scan** — detection windows live on the timeline, one lane
+   each, and may overlap: blur faces for the whole clip AND names only
+   from 5:00–7:00 by stacking two windows. Each window carries its own
+   categories and its own zones (click a category's color square, then
+   draw on the frame; Copy/Paste moves zones between windows). White
+   clip bookends trim the output; audio lanes each have an M button to
+   remove that track. A **zoom bar** (−/slider/+, with a pan control)
+   magnifies the timeline up to 40× for sub-second placement, and
+   dragging any handle scrubs the preview live — including on
+   iPhone/iPad.
+4. **Start scan** — the job queues instantly and its progress card opens
+   right below with a live log and ETA. Jobs queue one at a time so they
+   don't fight over the GPU.
+
+**Review** (below the editor): every detection appears as a thumbnail
+you keep or blur — one card per tracked face, person, or plate, one
+decision for all of its appearances — with per-category all-on/all-off,
+a before/after box editor to resize, move, add, or time-bound any blur,
+"Track object" to template-track a manually drawn box through a time
+range, and audio mute/bleep spans. Then render and download the redacted
+video plus the audit report.
+
+**Settings** (gear icon): detection model pickers for **Face**,
+**License-plate**, and **Person (full-body blur)** — optional models are
+downloaded on demand with SHA-256 verification and license badges —
+plus optional engines, Encryption at rest, HTTPS certificates, and the
+learned safe-words list.
 
 Security: HTTPS by default (self-signed certificate — your browser warns
-once; or install your own cert from the main page). Access is open to
+once; or install your own cert in the settings view). Access is open to
 everyone on your network unless you start with `--token <secret>`, which
 then gates every request (recommended). Either way this is LAN-grade
 protection — never expose the port to the internet. The jobs folder on
@@ -434,13 +485,22 @@ so the suite must stay green on every change.
   (set `"enabled": false`, or append boxes), then
   `openscrub.py video.mp4 --from-report audit.json` re-renders in seconds
   without re-scanning.
-- **Face detection** — the `face` category (on by default) blurs faces in
+- **Face detection** — the `face` category blurs faces in
   photos, people on camera, and webcam bubbles, which OCR is blind to. Uses the
   YuNet DNN detector (auto-downloaded, ~230 KB) with a Haar-cascade
-  fallback. Faces re-detect on every scan; boxes are expanded 15%.
+  fallback. Faces re-detect on every frame; boxes are expanded 15%; face
+  tracks are grouped by facial identity (SFace embeddings) so review
+  shows one card per person.
+- **Person (full-body) detection** — the `person` category masks whole
+  bodies with **silhouette precision**: a segmentation model traces each
+  person's outline every frame and only the pixels inside it are
+  redacted. Download a model (YOLO11n-seg recommended) in the settings
+  Person panel; without one the category is inactive and says so. Tuning:
+  `--person-threshold` (default 0.5). Tracks are positional — someone
+  who leaves frame and returns gets a second review card.
 - **Config profiles** — `--config profile.yaml` loads per-environment
-  settings (engine, MRN regex, categories, ignore regions…). CLI flags
-  override the file.
+  settings (engine, categories, custom regexes, ignore regions…). CLI
+  flags override the file.
 - **Ignore regions** — `--ignore-region X1,Y1,X2,Y2` (repeatable, or in
   config) excludes screen areas like the taskbar clock from all blurring.
 - **Batch mode** — `--batch folder` processes every video, writing
@@ -461,7 +521,7 @@ CLI does (legacy: it still works, but new features land in the web app):
 - GPU/CPU toggle for OCR, NVENC/x264 toggle for encoding
 - Category checkboxes, blur vs box, preview mode, memory on/off
 - Allow-names and always-blur name lists (type directly or load a file)
-- Sample interval / scan trigger / padding / bridge gap / MRN regex fields
+- Sample interval / scan trigger / padding / bridge gap / regex fields
 - Live preview showing each frame as it's analyzed with detection boxes
 - Progress bar, log pane, and a Cancel button that cleans up partial output
 
@@ -551,11 +611,11 @@ Two reasoning layers prevent "flash of PII" from intermittent OCR misses:
   static) is tracked as whichever motion dominates. If a recording is
   mostly panel-scrolling, use --preview to check coverage and consider
   --sample-interval 0.25.
-- **The `mrn` ID-number category is bring-your-own-pattern**: it stays
-  inactive until you give it a regex for your identifier format (web
-  Regex field or `--mrn-regex`, e.g. `\b\d{7}\b` for exactly 7 digits).
-  A match still needs 7+ digits or a nearby id-ish label (mrn/record/
-  acct/chart) before it's flagged, keeping false positives down.
+- **Identifier formats are bring-your-own-pattern**: record numbers,
+  claim numbers, and account numbers only get caught if you add a custom
+  regex category for your format in the web UI (e.g. `\b\d{7}\b` for
+  exactly 7 digits). From the CLI, the legacy `mrn` category still works
+  via `--categories ...,mrn --mrn-regex PATTERN`.
 - **The --report JSON contains PII in plaintext.** Handle it like any
   PII file.
 
@@ -575,7 +635,9 @@ Two reasoning layers prevent "flash of PII" from intermittent OCR misses:
 | A name slips through | add to --extra-names; install spaCy if not present |
 | Random capitalized words blurred | install spaCy so the pair heuristic turns off, or --heuristic-names off |
 | Text slips through during very fast scrolling | --scan-trigger 40 and/or --sample-interval 0.25 |
-| Benign numbers blurred by the ID category | tighten your --mrn-regex |
+| Benign numbers blurred by a custom regex category | tighten its pattern |
+| A person isn't detected (small/distant) | lower --person-threshold to 0.35, or pick the larger seg model |
+| Non-people masked by the person category | raise --person-threshold to 0.6 |
 | Blur box clips edges of text | --pad 12 |
 | Small text missed entirely | install paddleocr; record at native resolution |
 
