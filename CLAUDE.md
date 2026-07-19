@@ -212,8 +212,10 @@ Key classes/functions (locate with grep, line numbers drift):
   zones between windows, clip bookends drag window edges inward
   (`clampWins`; windows <0.2s drop; the last window resets to
   whole-clip), audio lanes with M mute buttons — thick blue bars with a
-  WAVEFORM through them (local files: in-browser WebAudio decode at 8kHz
-  mono, 600MB size cap, fail-soft to a flat bar; browsers demux only the
+  WAVEFORM through them (local files: in-browser WebAudio decode, 600MB size
+  cap, fail-soft to a flat bar; `makeOffCtx` walks a sample-rate
+  ladder 8k→48k because pre-2024 iOS Safari throws below 22050, and
+  `decodeBuf` feeds both callback and promise decodeAudioData forms; browsers demux only the
   default track, extra local lanes stay flat. Server paths: per-track
   /api/waveform, ffmpeg s16le 1kHz → 2000 normalized peaks, same inline
   containment guard as server_video) — a timeline ZOOM bar

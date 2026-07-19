@@ -284,6 +284,25 @@ function openEditor(url,label){
  window.addEventListener("resize",()=>{fitCanvas();draw();tlDraw();});
  hookZC();hookTL();
 }
+function makeOffCtx(){
+ const OC=window.OfflineAudioContext||window.webkitOfflineAudioContext;
+ if(!OC)return null;
+ // iOS Safari rejects LOW sample rates (NotSupportedError below 22050 on
+ // pre-2024 WebKit; trunk accepts 8k) — walk up until one constructs.
+ for(const sr of [8000,16000,22050,44100,48000]){
+  try{return new OC(1,sr,sr);}catch(e){}
+ }
+ return null;
+}
+function decodeBuf(ctx,buf){
+ // Safari's decodeAudioData was callback-only for years; the modern form
+ // returns a promise. Feed both shapes — first settle wins.
+ return new Promise((res,rej)=>{
+  let p=null;
+  try{p=ctx.decodeAudioData(buf,res,rej);}catch(e){rej(e);return;}
+  if(p&&p.then)p.then(res,rej);
+ });
+}
 async function buildWave(){
  const tok=(S.waveTok=(S.waveTok||0)+1);
  S.wave=[];
@@ -292,8 +311,9 @@ async function buildWave(){
    if(S.file.size>600*1024*1024)return;   // too large to decode in-browser
    const buf=await S.file.arrayBuffer();
    if(tok!==S.waveTok)return;
-   const ctx=new OfflineAudioContext(1,8000,8000);
-   const ab=await ctx.decodeAudioData(buf);
+   const ctx=makeOffCtx();
+   if(!ctx)return;
+   const ab=await decodeBuf(ctx,buf);
    if(tok!==S.waveTok)return;
    // browsers demux only the DEFAULT audio track from a video container —
    // extra lanes stay flat for local files (server paths get all tracks)
