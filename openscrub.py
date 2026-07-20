@@ -35,7 +35,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.51"
+VERSION = "1.0.52"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -1171,23 +1171,66 @@ def smooth_dense_tracks(dets, fps, video, cum=None, win_start=0.0, cb=None):
     return (n_gaps, n_lead, lead_s)
 
 
+VITTRACK_URL = ("https://media.githubusercontent.com/media/opencv/opencv_zoo/"
+                "main/models/object_tracking_vittrack/"
+                "object_tracking_vittrack_2023sep.onnx")
+VITTRACK_SHA256 = ("2990f0b7cd44d92afa48cd97db6de7be113fc1d9594fddb74e2"
+                   "725c10478e91d")
+
+
+def _vittrack_factory(log):
+    """cv2.TrackerVit (OpenCV >= 4.9) + the opencv_zoo vittrack model:
+    Apache-2.0, ~0.7 MB, auto-downloaded once and sha256-pinned exactly
+    like YuNet. Returns a tracker factory, or None -> template fallback
+    (older OpenCV builds, offline installs with no cached model)."""
+    if not hasattr(cv2, "TrackerVit_create"):
+        return None
+    model = os.path.join(_model_dir(),
+                         "object_tracking_vittrack_2023sep.onnx")
+    if not os.path.exists(model) or os.path.getsize(model) < 10000:
+        try:
+            log("      downloading VitTrack model (~0.7 MB, one time)…")
+            _fetch_model(VITTRACK_URL, model, sha256=VITTRACK_SHA256,
+                         log_fn=log)
+        except Exception as e:
+            log("      VitTrack download failed (%s) — using template "
+                "tracker" % e)
+            return None
+
+    def make():
+        p = cv2.TrackerVit_Params()
+        p.net = model
+        return cv2.TrackerVit_create(p)
+    try:
+        make()          # a broken model/build must fail loudly HERE,
+    except Exception as e:  # not silently mid-scan
+        log("      VitTrack unavailable (%s) — using template tracker" % e)
+        return None
+    return make
+
+
 def track_manual_region(video, box, t_ref, t0, t1, cb=None,
                         step_frames=2, thr=0.55, scale=0.5):
-    """Track a user-drawn screen-space box through [t0, t1] by template
-    matching, starting from its appearance at t_ref and walking both
-    directions. This powers targeted redaction: circle anything the
-    detectors don't know (a tattoo, a badge, a specific person) on one
-    frame, pick the time window, and the blur follows it.
+    """Track a user-drawn screen-space box through [t0, t1], starting
+    from its appearance at t_ref and walking both directions. This powers
+    targeted redaction: circle anything the detectors don't know (a
+    tattoo, a badge, a specific person) on one frame, pick the time
+    window, and the blur follows it.
 
-    Same matching recipe smooth_dense_tracks validated on real footage:
-    half-scale grayscale + 3x3 smoothing (sub-pixel motion decorrelates
-    raw fine texture), TM_CCOEFF_NORMED with a local search window around
-    the last position. The template REFRESHES on confident matches
-    (>0.80) so gradual appearance change — turning heads, lighting —
-    doesn't break the lock; refresh is gated on confidence so drift can't
-    walk the box onto the background. Tracking STOPS (fail closed: the
-    span just ends, coverage never guesses) when the match drops below
-    `thr`, the region leaves the frame, or the window edge is reached.
+    Primary engine: cv2.TrackerVit (learned tracker, auto-downloaded
+    pinned model) — survives scale change, turning, and appearance drift
+    that plain template matching cannot (a subject walking toward the
+    camera killed the old matcher in ~1s; VitTrack held the full clip).
+    Fallback engine: multi-scale template matching (NCC on half-scale
+    smoothed grayscale, template refresh gated on confidence >0.80).
+
+    FAIL CLOSED on loss: when the engine loses the object mid-frame, the
+    box FREEZES in place and coverage continues to the window edge — the
+    blur may go stale but it never silently vanishes (the old behaviour
+    ended the span, un-blurring the subject; a real user hit this).
+    Coverage only ENDS early when the object visibly leaves the frame
+    (frozen box touching the frame edge). Held samples carry score 0.0
+    so review can show where the lock was lost.
 
     Returns [(t, (x1, y1, x2, y2), score), ...] sorted by t — screen-space
     boxes, one per step_frames. Empty if the video/box is unusable."""
@@ -1198,11 +1241,131 @@ def track_manual_region(video, box, t_ref, t0, t1, cb=None,
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     step = max(1, int(step_frames)) / fps
     t_ref = min(max(t_ref, t0), t1)
+    W = cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0
+    H = cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0
 
-    def _gray(t):
+    def _frame(t):
         cap.set(cv2.CAP_PROP_POS_MSEC, max(t, 0.0) * 1000)
         ok, fr = cap.read()
-        if not ok:
+        return fr if ok else None
+
+    def _left_frame(b):
+        # the object is gone only when the box CENTER walks off-screen —
+        # a box mid-dip can balloon to touch every edge while the object
+        # is still dead centre (seen on real footage)
+        cx, cy = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
+        return not (0.02 * W < cx < 0.98 * W and 0.02 * H < cy < 0.98 * H)
+
+    if (box[2] - box[0]) * scale < 8 or (box[3] - box[1]) * scale < 8:
+        cap.release()
+        log("      track: region too small to track reliably")
+        return []
+
+    samples = [(t_ref, (float(box[0]), float(box[1]),
+                        float(box[2]), float(box[3])), 1.0)]
+    _last_log = time.time()
+
+    def _hold_rest(t, cur, direction, out):
+        """Fail-closed coverage: freeze the box and emit it to the window
+        edge (unless the object left the frame — nothing to protect)."""
+        if _left_frame(cur):
+            log("      track: object left the frame at t=%.1fs — "
+                "coverage ends there" % t)
+            return
+        log("      track: LOST the object at t=%.1fs — holding the last "
+            "box to the window edge (review and trim if needed)" % t)
+        t2 = t + direction * step
+        while t0 - 1e-6 <= t2 <= t1 + 1e-6:
+            out.append((t2, (cur[0], cur[1], cur[2], cur[3]), 0.0))
+            t2 += direction * step
+
+    vit = _vittrack_factory(log)
+    if vit is not None:
+        fr0 = _frame(t_ref)
+        if fr0 is None:
+            cap.release()
+            return []
+        sm0 = cv2.resize(fr0, None, fx=scale, fy=scale)
+        for direction in (1, -1):
+            trk = vit()
+            trk.init(sm0, (int(box[0] * scale), int(box[1] * scale),
+                           max(8, int((box[2] - box[0]) * scale)),
+                           max(8, int((box[3] - box[1]) * scale))))
+            cur = [float(v) for v in box]
+            held = False
+            t = t_ref
+            if direction == 1:  # forward: sequential reads, no re-seeking
+                cap.set(cv2.CAP_PROP_POS_MSEC, max(t_ref, 0.0) * 1000)
+                cap.read()
+            while True:
+                t2 = t + direction * step
+                if t2 < t0 - 1e-6 or t2 > t1 + 1e-6:
+                    break
+                if direction == 1:
+                    fr = None
+                    for _ in range(max(1, int(step_frames))):
+                        ok0, fr0_ = cap.read()
+                        if not ok0:
+                            fr = None
+                            break
+                        fr = fr0_
+                else:
+                    fr = _frame(t2)
+                if fr is None:
+                    break
+                ok, bb = trk.update(cv2.resize(fr, None,
+                                               fx=scale, fy=scale))
+                score = float(trk.getTrackingScore())
+                nb = None
+                if ok:
+                    x, y, w, h = bb
+                    nb = [x / scale, y / scale,
+                          (x + w) / scale, (y + h) / scale]
+                if nb is not None and score >= 0.30:
+                    cur = nb
+                    held = False
+                    if _left_frame(cur):
+                        log("      track: object left the frame at "
+                            "t=%.1fs — coverage ends there" % t2)
+                        break
+                    samples.append((t2, tuple(cur), score))
+                elif nb is not None and score >= 0.15:
+                    # uncertain: the box may be loose OR drifting. Blur
+                    # the UNION of it and the last confident box — covers
+                    # either way (over-blur beats under-blur) — and keep
+                    # following so a re-lock resumes cleanly.
+                    if not held:
+                        held = True
+                        log("      track: weak lock at t=%.1fs — blur "
+                            "widens to cover the uncertainty until the "
+                            "tracker re-locks" % t2)
+                    u = (min(cur[0], nb[0]), min(cur[1], nb[1]),
+                         max(cur[2], nb[2]), max(cur[3], nb[3]))
+                    samples.append((t2, u, 0.0))
+                else:
+                    # truly lost: do NOT move the blur on a guess —
+                    # freeze it; the tracker keeps looking each frame and
+                    # resumes the moment it re-locks (score recovers)
+                    if not held:
+                        held = True
+                        log("      track: LOST the object at t=%.1fs — "
+                            "blur holds its last position until the "
+                            "tracker re-acquires" % t2)
+                    samples.append((t2, tuple(cur), 0.0))
+                if time.time() - _last_log >= 3.0:
+                    _last_log = time.time()
+                    log("        …tracking %s to t=%.1fs (%d samples)"
+                        % ("forward" if direction > 0 else "backward",
+                           t2, len(samples)))
+                t = t2
+        cap.release()
+        samples.sort(key=lambda s: s[0])
+        return samples
+
+    # ---- template fallback (no TrackerVit / no model) ----------------
+    def _gray(t):
+        fr = _frame(t)
+        if fr is None:
             return None
         g = cv2.resize(cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY), None,
                        fx=scale, fy=scale)
@@ -1224,13 +1387,10 @@ def track_manual_region(video, box, t_ref, t0, t1, cb=None,
         log("      track: NOTE — region has very little texture; the match "
             "may lose it quickly. Consider a slightly larger box.")
 
-    samples = [(t_ref, (float(box[0]), float(box[1]),
-                        float(box[2]), float(box[3])), 1.0)]
-    bw, bh = box[2] - box[0], box[3] - box[1]
-    _last_log = time.time()
     for direction in (1, -1):
         cur = list(box)
         tmpl = tmpl0.copy()
+        s_cum = 1.0                 # cumulative scale vs the drawn box
         t = t_ref
         while True:
             t2 = t + direction * step
@@ -1240,26 +1400,37 @@ def track_manual_region(video, box, t_ref, t0, t1, cb=None,
             if g is None:
                 break
             th_, tw_ = tmpl.shape
-            m = int(max(12, 0.8 * max(tw_, th_)))
+            m = int(max(16, 1.5 * max(tw_, th_)))
             rx1 = max(0, int(cur[0] * scale) - m)
             ry1 = max(0, int(cur[1] * scale) - m)
             rx2 = min(g.shape[1], int(cur[2] * scale) + m)
             ry2 = min(g.shape[0], int(cur[3] * scale) + m)
-            if rx2 - rx1 < tw_ or ry2 - ry1 < th_:
-                break               # leaving the frame
-            res = cv2.matchTemplate(g[ry1:ry2, rx1:rx2], tmpl,
-                                    cv2.TM_CCOEFF_NORMED)
-            _, mx, _, loc = cv2.minMaxLoc(res)
-            if mx < thr:
-                break               # lost it: end the span, never guess
-            nx = (rx1 + loc[0]) / scale
-            ny = (ry1 + loc[1]) / scale
-            cur = [nx, ny, nx + bw, ny + bh]
-            samples.append((t2, (cur[0], cur[1], cur[2], cur[3]), float(mx)))
+            best = None             # (score, gx, gy, f, tw2, th2)
+            for f in (0.93, 1.0, 1.075):
+                if not 0.4 <= s_cum * f <= 3.0:
+                    continue        # runaway scale = drift, not zoom
+                tw2, th2 = int(tw_ * f), int(th_ * f)
+                if (tw2 < 8 or th2 < 8 or rx2 - rx1 < tw2
+                        or ry2 - ry1 < th2):
+                    continue
+                tm = tmpl if f == 1.0 else cv2.resize(tmpl, (tw2, th2))
+                res = cv2.matchTemplate(g[ry1:ry2, rx1:rx2], tm,
+                                        cv2.TM_CCOEFF_NORMED)
+                _, mx, _, loc = cv2.minMaxLoc(res)
+                if best is None or mx > best[0]:
+                    best = (mx, rx1 + loc[0], ry1 + loc[1], f, tw2, th2)
+            if best is None or best[0] < thr:
+                _hold_rest(t, cur, direction, samples)
+                break
+            mx, gx, gy, f, tw2, th2 = best
+            s_cum *= f
+            nx, ny = gx / scale, gy / scale
+            cur = [nx, ny, nx + tw2 / scale, ny + th2 / scale]
+            samples.append((t2, (cur[0], cur[1], cur[2], cur[3]),
+                            float(mx)))
             if mx > 0.80:           # confident: adopt current appearance
-                cx1, cy1 = int(nx * scale), int(ny * scale)
-                cand = g[cy1:cy1 + th_, cx1:cx1 + tw_]
-                if cand.shape == tmpl.shape:
+                cand = g[gy:gy + th2, gx:gx + tw2]
+                if cand.shape == (th2, tw2):
                     tmpl = cand.copy()
             if time.time() - _last_log >= 3.0:
                 _last_log = time.time()

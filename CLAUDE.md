@@ -24,7 +24,7 @@ target is Windows 10 + NVIDIA RTX 3060.
 | `fetch_plate_models.py` | Alt path to fetch plate models via the open-image-models pip package. |
 | `openscrub_update.py` | `openscrub-update` command + web self-update backend: PyPI version check, sha256-verified sdist download, data-preserving folder update (PRESERVE set), TOFU pin carry-forward. Ships in the wheel. |
 | `openscrub_vault.py` | At-rest encryption for the job store: scrypt keystore, chunked AES-256-GCM files (`.osvault`), lock/unlock tree walkers. NO password reset by design. Ships in the wheel. Lock-on-shutdown lives in openscrub_web: a SIGTERM handler (docker stop; locks then os._exit — sys.exit is swallowed by cheroot) + an atexit hook (Ctrl+C; uses the import-time `_HERE` constant because `__file__` is gone during interpreter teardown — both failure modes were real and verified). Encryption must finish inside the container stop grace period (`docker stop -t 120`). |
-| `test_openscrub.py` | pytest suite (48 tests). Must stay green. |
+| `test_openscrub.py` | pytest suite (49 tests). Must stay green. |
 | `tools/make_icons.py` | Regenerates every icon/logo asset from `assets/badge_master.png`. |
 | `tools/make_wordmark.py` | Regenerates the typeset Poppins wordmarks (navy + white). |
 | `assets/` | Brand assets. `badge_master.png` (canonical, mosaic+brackets style) and `badge_master_blurbox_alt.png` (alternate) are the sources; everything else is generated. |
@@ -261,10 +261,26 @@ Key classes/functions (locate with grep, line numbers drift):
   form carried lives in the editor's Advanced accordion. PAGE keeps
   `const CATS`/`CATDN` (review rendering + the alignment rule) even
   though the homepage checkbox grid is gone.
-- Targeted redaction: `track_manual_region` template-tracks a user-drawn
-  box through a chosen time window (both directions from t_ref, adaptive
-  template refresh gated on confidence >0.80, stops fail-closed below
-  thr). TWO entry points share it: PRE-SCAN — the editor's `trackobj`
+- Targeted redaction: `track_manual_region` tracks a user-drawn box
+  through a chosen time window (both directions from t_ref). PRIMARY
+  engine: cv2.TrackerVit (OpenCV >= 4.9) + the opencv_zoo vittrack model
+  (~0.7MB, Apache-2.0, auto-downloaded via `_fetch_model` with pinned
+  VITTRACK_SHA256, baked into both Docker images) — survives scale
+  change/turning/appearance drift that killed the old template matcher
+  in ~1s on real footage (subject walking toward the camera; VitTrack
+  held the full 26s clip). Forward direction reads frames SEQUENTIALLY
+  (no per-step seeks; 33s→5s on that clip). Score gates: >=0.30 accept;
+  0.15-0.30 emit the UNION of tracker box and last confident box (loose
+  OR drifting — cover both); <0.15 FREEZE the box. Coverage ends early
+  only when the box CENTER leaves the frame (a mid-dip box can balloon
+  to touch every edge while the object is still centered — real
+  footage). FALLBACK engine (old OpenCV/offline): multi-scale template
+  matching (0.93/1.0/1.075 per step, cumulative scale clamped 0.4-3.0x,
+  1.5x search margin, refresh gated >0.80). BOTH engines FAIL CLOSED on
+  loss: the box freezes and coverage continues to the window edge with
+  score 0.0 (the old stop-on-loss silently UN-blurred the subject
+  mid-clip — a real user hit this); regression test
+  test_track_fail_closed_hold. TWO entry points share it: PRE-SCAN — the editor's `trackobj`
   pseudo-class (yellow; own rail row like ignore; skip both in the
   renderCats loop) stores [nx1,ny1,nx2,ny2,tref_frac] per window
   (`finishRect` captures vd.currentTime as tref; select/move preserves
@@ -412,7 +428,7 @@ python -c "import ast; ast.parse(open('openscrub.py').read())"   # each edited .
 #   PAGE now holds TWO <script> blocks (editor + app) sharing one global
 #   scope — join them so duplicate top-level declarations are caught too:
 #   python -c "import openscrub_web as w, re; open('/tmp/p.js','w').write('\n'.join(re.findall(r'<script>(.*?)</script>', w.PAGE, re.S)))" && node --check /tmp/p.js
-python -m pytest test_openscrub.py -q                             # 48 tests, all green
+python -m pytest test_openscrub.py -q                             # 49 tests, all green
 python -m build          # FULL build (sdist->wheel), NEVER just `-w`:
                          # the wheel is built FROM the sdist in CI, so any
                          # file the wheel force-includes must be in the

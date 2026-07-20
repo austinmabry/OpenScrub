@@ -122,7 +122,10 @@ openscrub._fetch_model(openscrub.YUNET_URL, \
 sha256=openscrub.YUNET_SHA256, tries=8, delay=15, log_fn=print); \
 openscrub._fetch_model(openscrub.SFACE_URL, \
 '/root/.openscrub/models/face_recognition_sface_2021dec.onnx', \
-sha256=openscrub.SFACE_SHA256, tries=8, delay=15, log_fn=print)"
+sha256=openscrub.SFACE_SHA256, tries=8, delay=15, log_fn=print); \
+openscrub._fetch_model(openscrub.VITTRACK_URL, \
+'/root/.openscrub/models/object_tracking_vittrack_2023sep.onnx', \
+sha256=openscrub.VITTRACK_SHA256, tries=8, delay=15, log_fn=print)"
 
 EXPOSE 8384
 VOLUME ["/root/.local/share/OpenScrub"]

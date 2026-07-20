@@ -1455,3 +1455,31 @@ def test_fetch_model_verifies_and_fails_closed(tmp_path):
         openscrub._fetch_model("file://" + str(good), dest3,
                                sha256="0" * 64, tries=1, delay=0)
     assert not os.path.exists(dest3) and not os.path.exists(dest3 + ".part")
+
+
+def test_track_fail_closed_hold(tmp_path, monkeypatch):
+    """When the tracker loses an object mid-frame, coverage FREEZES in
+    place and continues to the window edge instead of silently
+    un-blurring the subject (real-footage regression: the blur followed
+    a person for a while, then vanished entirely)."""
+    path = str(tmp_path / "vanish.mp4")
+    rng = np.random.default_rng(7)
+    patch = rng.integers(0, 255, (60, 60, 3)).astype(np.uint8)
+    out = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), 30,
+                          (640, 360))
+    for i in range(180):                 # 6s: visible 3s, then GONE
+        fr = np.full((360, 640, 3), 60, np.uint8)
+        if i < 90:
+            fr[150:210, 290:350] = patch
+        out.write(fr)
+    out.release()
+    monkeypatch.setattr(openscrub, "_vittrack_factory", lambda log: None)
+    s = openscrub.track_manual_region(path, (290, 150, 350, 210),
+                                      1.0, 0.0, 6.0)
+    assert s and max(x[0] for x in s) > 5.5, \
+        "coverage must reach the window edge, not end at the loss"
+    late = [x for x in s if x[0] > 4.0]
+    assert late and all(x[2] == 0.0 for x in late), \
+        "held samples must carry score 0 (visible in review)"
+    for _, b, _ in late:                 # frozen where it last saw it
+        assert abs(b[0] - 290) < 40 and abs(b[1] - 150) < 40
