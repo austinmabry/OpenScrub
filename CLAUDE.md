@@ -287,18 +287,24 @@ Key classes/functions (locate with grep, line numbers drift):
   a kicked ball crosses several box-widths per step), sliver overlaps
   <0.10 rejected (neighbour brushing past); a miss FREEZES the box
   (score 0, NO stale poly — full-box blur) until re-detection or window
-  edge; ends early only when the box center leaves the frame. OCCLUSION
-  hardening (dog-behind-person, real footage): a mid-frame detection
-  that COLLAPSES below half the reference body size (slow-adapt EMA) is
-  partial occlusion — emit the union of the sliver and a body-sized box
-  at the predicted position, never shrink coverage (at the frame edge
-  shrinking is a legitimate exit); the nearest-reach EXPANDS with hold
-  time (×(1+0.4·steps), cap 4×) because the object keeps moving while
-  unseen; re-acquisition bridges old→new with one union sample; and a
-  retroactive pass stretches every UNCERTAIN run (holds/slivers/bridges
-  = samples without a poly when the track has polys) to the union of
-  its confident neighbours +15% margin — validated frame-by-frame on
-  the dog footage. Seeding survives bad frames: detection is retried at
+  edge; ends early only when the box center leaves the frame.
+  Association: best-IoU same-class detection vs the CURRENT box (>=0.10);
+  else nearest same-class center within reach = 1.2×max(box dim) — reach
+  scales to the current box, so a subject GROWING as it approaches the
+  camera (IoU with the old small box stays high enough) or jumping is
+  still followed, WITHOUT velocity prediction (predicting a position
+  floated the blur onto empty ground — a real regression). On a live hit
+  emit the detector-tight box + poly EXACTLY as detected (blur only what
+  is visible; what's behind an occluder isn't visible, so there is
+  nothing to over-cover — an earlier "union of sliver + predicted
+  body-box" produced giant frame-spanning boxes and floating ghosts).
+  On a MISS: if the last box's center was at the frame edge, end (it
+  left); else FREEZE the last box CLAMPED to the frame (plain rectangle,
+  never off-screen) for a 0.8s grace, then end if it never re-appears —
+  no ballooning, no floating. Two near-identical subjects: association
+  stays on the SEEDED one by IoU; an unselected look-alike is never
+  grabbed (validated frame-by-frame on two-street-dog footage). Seeding
+  survives bad frames: detection is retried at
   t_ref±(0.33..1.0)s inside the window, and ALL tracker frame fetches go
   through `_grab_frame` (module-level): fast POS_MSEC seek, else fall
   back to POS_FRAMES + SEQUENTIAL decode from an earlier point
