@@ -1426,3 +1426,32 @@ def test_prescan_tracked_object(tmp_path):
     assert float(obj.std()) < float(patch.std()) * 0.6, \
         "tracked object region must be blurred at render time"
     assert fr[10, 10].astype(int).sum() < 120, "background stays untouched"
+
+
+def test_fetch_model_verifies_and_fails_closed(tmp_path):
+    """_fetch_model must reject pointer-sized files and hash mismatches
+    (never trusting them as models), succeed on the authentic bytes, and
+    leave no .part debris behind on failure."""
+    good = tmp_path / "good.onnx"
+    good.write_bytes(b"\x08\x01" * 10000)          # 20 KB "model"
+    dest = str(tmp_path / "out.onnx")
+    sha = openscrub._sha256_file(str(good))
+    openscrub._fetch_model("file://" + str(good), dest, sha256=sha,
+                           tries=1, delay=0)
+    assert os.path.getsize(dest) == 20000
+
+    # a Git-LFS pointer (~131 bytes) must never masquerade as a model
+    ptr = tmp_path / "pointer.onnx"
+    ptr.write_bytes(b"version https://git-lfs.github.com/spec/v1\n"
+                    b"oid sha256:deadbeef\nsize 38696353\n")
+    dest2 = str(tmp_path / "out2.onnx")
+    with pytest.raises(Exception):
+        openscrub._fetch_model("file://" + str(ptr), dest2, tries=2, delay=0)
+    assert not os.path.exists(dest2) and not os.path.exists(dest2 + ".part")
+
+    # wrong hash: rejected loudly even though the size looks plausible
+    dest3 = str(tmp_path / "out3.onnx")
+    with pytest.raises(Exception):
+        openscrub._fetch_model("file://" + str(good), dest3,
+                               sha256="0" * 64, tries=1, delay=0)
+    assert not os.path.exists(dest3) and not os.path.exists(dest3 + ".part")

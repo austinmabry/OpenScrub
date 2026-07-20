@@ -1322,12 +1322,11 @@ def group_persons(dets, video, cb=None):
     mdir = _model_dir()
     sface = os.path.join(mdir, "face_recognition_sface_2021dec.onnx")
     yunet = os.path.join(mdir, "face_detection_yunet_2023mar.onnx")
-    import urllib.request
     if not os.path.exists(sface) or os.path.getsize(sface) < 10000:
         cb.log("      downloading SFace identity model (~38 MB, one time)…")
-        urllib.request.urlretrieve(SFACE_URL, sface)
+        _fetch_model(SFACE_URL, sface, sha256=SFACE_SHA256, log_fn=cb.log)
     if not os.path.exists(yunet) or os.path.getsize(yunet) < 10000:
-        urllib.request.urlretrieve(YUNET_URL, yunet)
+        _fetch_model(YUNET_URL, yunet, sha256=YUNET_SHA256, log_fn=cb.log)
     rec = _make_sface(sface)
     det = _make_yunet(yunet, (320, 320), 0.5)
     cap = cv2.VideoCapture(video)
@@ -2210,6 +2209,93 @@ YUNET_URL = ("https://media.githubusercontent.com/media/opencv/opencv_zoo/"
 SFACE_URL = ("https://media.githubusercontent.com/media/opencv/opencv_zoo/"
              "main/models/face_recognition_sface/"
              "face_recognition_sface_2021dec.onnx")
+# sha256 of the authentic files, matching the upstream Git-LFS object ids —
+# every download is verified against these before it is trusted (fail closed)
+YUNET_SHA256 = "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4"
+SFACE_SHA256 = "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79"
+
+
+def _sha256_file(path):
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _lfs_fallback_url(url):
+    """media.githubusercontent.com is GitHub's Git-LFS media host and serves
+    transient 404/500s when the upstream repo's LFS bandwidth quota runs out
+    (this broke a release build once). The LFS batch API is the canonical
+    channel git-lfs itself uses: read the object id from the tiny, reliable
+    raw pointer file, then ask the batch endpoint for a fresh download href."""
+    import json as _json
+    import urllib.request
+    pre = "https://media.githubusercontent.com/media/"
+    if not url.startswith(pre):
+        return None
+    owner, repo, rest = url[len(pre):].split("/", 2)
+    ptr = urllib.request.urlopen(
+        "https://raw.githubusercontent.com/%s/%s/%s" % (owner, repo, rest),
+        timeout=30).read(4096).decode("utf-8", "replace")
+    oid = size = None
+    for ln in ptr.splitlines():
+        if ln.startswith("oid sha256:"):
+            oid = ln.split(":", 1)[1].strip()
+        elif ln.startswith("size "):
+            size = int(ln.split()[1])
+    if not oid or not size:
+        return None
+    req = urllib.request.Request(
+        "https://github.com/%s/%s.git/info/lfs/objects/batch" % (owner, repo),
+        data=_json.dumps({"operation": "download", "transfers": ["basic"],
+                          "objects": [{"oid": oid, "size": size}]}).encode(),
+        headers={"Accept": "application/vnd.git-lfs+json",
+                 "Content-Type": "application/vnd.git-lfs+json"})
+    resp = _json.loads(urllib.request.urlopen(req, timeout=30).read())
+    return resp["objects"][0]["actions"]["download"]["href"]
+
+
+def _fetch_model(url, dest, sha256=None, tries=4, delay=3.0, log_fn=None):
+    """Download url -> dest, fail closed. Retries transient upstream errors
+    with backoff, switches to the Git-LFS batch channel from the third try,
+    rejects anything pointer-sized, verifies the pinned sha256, and only
+    moves the file into place once it checks out. Raises on final failure —
+    callers keep their existing fallbacks (Haar cascade, skip grouping)."""
+    import urllib.request
+    part = dest + ".part"
+    last = None
+    for i in range(tries):
+        if i:
+            time.sleep(delay * (2 ** min(i - 1, 3)))
+        src = url
+        if i >= 2:
+            try:
+                src = _lfs_fallback_url(url) or url
+            except Exception:
+                src = url
+        try:
+            urllib.request.urlretrieve(src, part)
+            size = os.path.getsize(part)
+            if size < 10000:      # a Git-LFS pointer is ~131 bytes — never
+                raise IOError(    # let one masquerade as a model
+                    "downloaded file too small (%d bytes)" % size)
+            if sha256 and _sha256_file(part) != sha256:
+                raise IOError("sha256 mismatch — rejecting download")
+            os.replace(part, dest)
+            return dest
+        except Exception as e:
+            last = e
+            if log_fn:
+                log_fn("      model download failed (%s)%s"
+                       % (e, " — retrying…" if i < tries - 1 else ""))
+    try:
+        if os.path.exists(part):
+            os.remove(part)
+    except OSError:
+        pass
+    raise last
 
 
 # --- OpenCV DNN device selection -------------------------------------------
@@ -2992,9 +3078,8 @@ class FaceDetector:
         model = os.path.join(_model_dir(), "face_detection_yunet_2023mar.onnx")
         if not os.path.exists(model) or os.path.getsize(model) < 10000:
             try:
-                import urllib.request
                 log("      downloading YuNet face model (~230 KB, one time)…")
-                urllib.request.urlretrieve(YUNET_URL, model)
+                _fetch_model(YUNET_URL, model, sha256=YUNET_SHA256, log_fn=log)
             except Exception as e:
                 log(f"      YuNet download failed ({e}) — using Haar cascade fallback")
         if (os.path.exists(model) and os.path.getsize(model) > 10000

@@ -62,4 +62,13 @@ jobs:
         run: |
           $exe = (Get-ChildItem windows/output/OpenScrub-Setup-*.exe).FullName
           $tag = "${{ github.event.inputs.tag || github.event.release.tag_name }}"
-          gh release upload "$tag" "$exe" --clobber
+          # uploads.github.com throws transient 5xx ("Error creating policy",
+          # HTTP 502 — it failed a release once); --clobber makes retries safe
+          $ok = $false
+          foreach ($i in 1..6) {
+            gh release upload "$tag" "$exe" --clobber
+            if ($LASTEXITCODE -eq 0) { $ok = $true; break }
+            Write-Host "upload attempt $i failed (exit $LASTEXITCODE) - retrying in 20s"
+            Start-Sleep -Seconds 20
+          }
+          if (-not $ok) { Write-Error "release upload failed after 6 attempts"; exit 1 }

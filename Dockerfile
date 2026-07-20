@@ -47,13 +47,17 @@ COPY openscrub.py openscrub_web.py openscrub_setup.py openscrub_update.py \
      openscrub_vault.py zones_ui.py install.py test_openscrub.py ./
 COPY assets/openscrub.ico assets/
 RUN pip install --no-cache-dir --no-deps . \
- # pre-fetch the YuNet face model so first run works offline
+ # pre-fetch the face models so first run works offline; _fetch_model
+ # retries the flaky LFS media host (quota 404s broke a release build)
+ # and verifies the pinned sha256 before trusting anything
  && mkdir -p /root/.openscrub/models \
- && python -c "import urllib.request, openscrub; \
-urllib.request.urlretrieve(openscrub.YUNET_URL, \
-'/root/.openscrub/models/face_detection_yunet_2023mar.onnx'); \
-urllib.request.urlretrieve(openscrub.SFACE_URL, \
-'/root/.openscrub/models/face_recognition_sface_2021dec.onnx')"
+ && python -c "import openscrub; \
+openscrub._fetch_model(openscrub.YUNET_URL, \
+'/root/.openscrub/models/face_detection_yunet_2023mar.onnx', \
+sha256=openscrub.YUNET_SHA256, tries=8, delay=15, log_fn=print); \
+openscrub._fetch_model(openscrub.SFACE_URL, \
+'/root/.openscrub/models/face_recognition_sface_2021dec.onnx', \
+sha256=openscrub.SFACE_SHA256, tries=8, delay=15, log_fn=print)"
 
 EXPOSE 8384
 VOLUME ["/root/.local/share/OpenScrub"]
