@@ -35,7 +35,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.57"
+VERSION = "1.0.58"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -1326,6 +1326,7 @@ def _track_person_dense(video, box, t_ref, t0, t1, det, log,
                     best, bsc = d, sc
             if best is not None and bsc >= 0.15:
                 seed_t = ts
+                seed_frame = fr0
                 if dt:
                     log("      track: seeded %.2fs away from the marked "
                         "frame (the marked frame had no clear detection)"
@@ -1345,10 +1346,41 @@ def _track_person_dense(video, box, t_ref, t0, t1, det, log,
         seed = tuple(float(v) for v in best[:4])
         samples = [(t_ref, seed, float(best[4]), _poly(best), tcls)]
         _last_log = time.time()
+        # PROPAGATION ANCHOR (the MaskAnyone principle, sized to our
+        # stack): identity is carried by a propagation tracker following
+        # THE object's pixels frame to frame — like their SAM2
+        # propagate_in_video — while per-frame detections only REFINE the
+        # position with tight silhouettes. Detections never establish
+        # identity, so a same-class look-alike elsewhere in the frame can
+        # never be grabbed, and a detector blink leaves a LIVE moving box
+        # (the anchor) instead of a frozen one.
+        vit = _vittrack_factory(log)
+        sc2 = 0.5               # anchor runs at half-scale like the
+                                # generic path
+
+        def _anchor_init(frame, b):
+            if vit is None:
+                return None
+            try:
+                tk = vit()
+                sm = cv2.resize(frame, None, fx=sc2, fy=sc2)
+                tk.init(sm, (int(b[0] * sc2), int(b[1] * sc2),
+                             max(8, int((b[2] - b[0]) * sc2)),
+                             max(8, int((b[3] - b[1]) * sc2))))
+                return tk
+            except Exception:
+                return None
         for direction in (1, -1):
             cur = list(seed)
             held = False
-            hold_t = 0.0        # seconds since the last live detection
+            hold_t = 0.0        # seconds spent frozen (grace timer)
+            det_gap = 0.0       # seconds since the last DETECTOR hit
+            trk = _anchor_init(seed_frame, seed)
+            # reference size for the size-flip guard: grows fast, shrinks
+            # SLOWLY — an occlusion sliver must not drag it down, or the
+            # full-size re-appearance gets rejected as a "different"
+            # object (ended a real track mid-window)
+            ref_a = max((seed[2] - seed[0]) * (seed[3] - seed[1]), 1e-9)
             t = t_ref
             if direction == 1:  # forward: sequential reads, no re-seeking
                 # robust prime: positions the decoder just past t_ref's
@@ -1370,43 +1402,105 @@ def _track_person_dense(video, box, t_ref, t0, t1, det, log,
                     fr = _frame(t2)
                 if fr is None:
                     break
-                # associate: the same-class detection with the best IoU
-                # against the CURRENT box wins. If overlap broke (fast
-                # motion, or a big scale jump as the subject approaches the
-                # camera), fall back to the nearest same-class detection
-                # within a reach scaled to the current box size. No
-                # velocity guessing — predicting a position floated the
-                # blur onto empty ground when the guess was wrong.
+                # 1. PROPAGATE the pixel anchor (MaskAnyone principle:
+                # a propagation tracker carries the object between
+                # detector hits). VitTrack is weaker than their SAM2 — it
+                # can drift onto an occluder — so it NEVER decides
+                # identity; it only bridges detector blinks below, and
+                # only while it still AGREES with the last detection.
+                vbox, vscore = None, 0.0
+                if trk is not None:
+                    try:
+                        sm = cv2.resize(fr, None, fx=sc2, fy=sc2)
+                        okv, bb = trk.update(sm)
+                        vscore = float(trk.getTrackingScore())
+                        if okv and vscore >= 0.20:
+                            vbox = [bb[0] / sc2, bb[1] / sc2,
+                                    (bb[0] + bb[2]) / sc2,
+                                    (bb[1] + bb[3]) / sc2]
+                    except Exception:
+                        vbox = None
+                if vbox is not None:
+                    # an anchor box that ballooned (or collapsed) past the
+                    # detection size band has DRIFTED off the object — on
+                    # real footage it exploded to a near-frame box over a
+                    # look-alike after the subject left, then "confirmed"
+                    # the wrong handoff. A drifted anchor is no anchor.
+                    va = (vbox[2] - vbox[0]) * (vbox[3] - vbox[1])
+                    if not 0.33 <= va / ref_a <= 3.0:
+                        vbox = None
+                # 2. IDENTITY: chain to the LAST CONFIDENT position.
+                # Same-class detections must overlap it (per-frame steps
+                # mean genuine motion always overlaps) and must not be a
+                # sudden size flip (>3x either way = a different animal —
+                # a look-alike's close-up head box, on real footage).
+                # No nearest-distance fallback, ever.
                 dets = [d for d in det.find(fr) if _cls(d) == tcls]
                 pick, bi = None, 0.0
                 for d in dets:
-                    i2 = _iou(cur, [float(v) for v in d[:4]])
+                    db = [float(v) for v in d[:4]]
+                    ar = (db[2] - db[0]) * (db[3] - db[1]) / ref_a
+                    if not 0.33 <= ar <= 3.0:
+                        continue
+                    i2 = _iou(cur, db)
                     if i2 > bi:
                         pick, bi = d, i2
-                if pick is not None and bi < 0.10:
-                    pick = None     # sliver overlap = a different object
-                if pick is None:
-                    reach = 1.2 * max(cur[2] - cur[0], cur[3] - cur[1])
-                    ccx, ccy = (cur[0] + cur[2]) / 2, (cur[1] + cur[3]) / 2
-                    nearest = None
-                    for d in dets:
-                        db = [float(v) for v in d[:4]]
-                        dx = (db[0] + db[2]) / 2 - ccx
-                        dy = (db[1] + db[3]) / 2 - ccy
-                        dist = (dx * dx + dy * dy) ** 0.5
-                        if dist <= reach and (nearest is None
-                                              or dist < nearest[0]):
-                            nearest = (dist, d)
-                    if nearest is not None:
-                        pick = nearest[1]
-                if pick is None:
-                    # lost this frame. If the object was last seen with its
-                    # center at the frame edge, it has left — end. Otherwise
-                    # FREEZE the last good box (tight, CLAMPED to the frame
-                    # so nothing floats off-screen, no poly = a plain
-                    # rectangle) for a short grace, then end if it never
-                    # comes back. What is hidden behind an occluder is not
-                    # visible, so there is nothing to over-cover.
+                if bi < 0.10:
+                    pick = None
+                if pick is not None and bi < 0.30:
+                    # suspicious handoff: weak overlap AND a much larger
+                    # same-class object — the classic way a track jumps to
+                    # a look-alike sliding past (seen at a frame exit on
+                    # real footage). Only the anchor can confirm it.
+                    pb = [float(v) for v in pick[:4]]
+                    par = (pb[2] - pb[0]) * (pb[3] - pb[1]) / ref_a
+                    if par > 1.8 and not (vbox is not None
+                                          and vscore >= 0.35
+                                          and _iou(pb, vbox) >= 0.25):
+                        pick = None
+                if pick is not None:
+                    held = False
+                    hold_t = 0.0
+                    det_gap = 0.0
+                    cur = [float(v) for v in pick[:4]]
+                    na = (cur[2] - cur[0]) * (cur[3] - cur[1])
+                    ref_a += (0.5 if na > ref_a else 0.05) * (na - ref_a)
+                    samples.append((t2, tuple(cur), float(pick[4]),
+                                    _poly(pick), tcls))
+                    # re-anchor EVERY confident hit: drift can never
+                    # accumulate past one blink (their SAM2 refreshes its
+                    # memory each frame; this is our equivalent)
+                    trk = _anchor_init(fr, cur) or trk
+                    if _center_off(cur):
+                        log("      track: %s leaving the frame at t=%.1fs"
+                            % (tname, t2))
+                        break
+                elif (vbox is not None and vscore >= 0.35
+                        and _iou(vbox, cur) >= 0.20
+                        and det_gap + step <= 0.8):
+                    # detector blinked and the anchor still agrees with
+                    # the last detection: ride it — coverage moves WITH
+                    # the object instead of freezing (no lag, no float).
+                    # A drifted anchor fails the agreement test and is
+                    # ignored. Rides bridge BLINKS only (<=0.8s without a
+                    # detection): an unbounded ride let the anchor carry a
+                    # box around the frame long after the subject left —
+                    # the floating-blur failure — so past a blink's length
+                    # the track freezes and ends like any other loss.
+                    held = False
+                    hold_t = 0.0
+                    det_gap += step
+                    cur = vbox
+                    samples.append((t2, tuple(cur),
+                                    round(0.1 * vscore, 3), (), tcls))
+                    if _center_off(cur):
+                        log("      track: %s leaving the frame at t=%.1fs"
+                            % (tname, t2))
+                        break
+                else:
+                    # both the detector and the anchor are blind: freeze
+                    # the last box CLAMPED to the frame for a short grace,
+                    # then end. Never guess a position.
                     if not held:
                         held = True
                         hold_t = 0.0
@@ -1414,10 +1508,10 @@ def _track_person_dense(video, box, t_ref, t0, t1, det, log,
                             log("      track: %s left the frame at t=%.1fs "
                                 "— coverage ends there" % (tname, t2))
                             break
-                        log("      track: %s not detected at t=%.1fs — "
-                            "holding its last box until it re-appears"
-                            % (tname, t2))
+                        log("      track: %s lost at t=%.1fs — holding "
+                            "its last box briefly" % (tname, t2))
                     hold_t += step
+                    det_gap += step
                     if hold_t > 0.8:
                         log("      track: %s not seen for >0.8s at t=%.1fs "
                             "— ending coverage (draw another box if it "
@@ -1426,20 +1520,6 @@ def _track_person_dense(video, box, t_ref, t0, t1, det, log,
                     clamp = (max(0.0, cur[0]), max(0.0, cur[1]),
                              min(float(W), cur[2]), min(float(H), cur[3]))
                     samples.append((t2, clamp, 0.0, (), tcls))
-                else:
-                    held = False
-                    hold_t = 0.0
-                    cur = [float(v) for v in pick[:4]]
-                    # emit the detector-tight box + silhouette exactly as
-                    # detected (blur only what is visible); the renderer
-                    # clips any part past the frame edge, and the poly stays
-                    # aligned because it is normalized to THIS box.
-                    samples.append((t2, tuple(cur), float(pick[4]),
-                                    _poly(pick), tcls))
-                    if _center_off(cur):
-                        log("      track: %s leaving the frame at t=%.1fs"
-                            % (tname, t2))
-                        break
                 if time.time() - _last_log >= 3.0:
                     _last_log = time.time()
                     log("        …tracking %s to t=%.1fs (%d samples)"

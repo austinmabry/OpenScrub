@@ -282,28 +282,41 @@ Key classes/functions (locate with grep, line numbers drift):
   samples (t,box,score,poly,cls) vs the generic 3-tuples; review text
   "tracked <classname>"; Detection.poly → blur_silhouette — validated
   frame-by-frame on real footage where it never jumped to an adjacent
-  person). Association is VELOCITY-PREDICTED (match against the box
-  shifted by the last step's motion; reach = 0.5×box-size + 1.5×|v| —
-  a kicked ball crosses several box-widths per step), sliver overlaps
-  <0.10 rejected (neighbour brushing past); a miss FREEZES the box
-  (score 0, NO stale poly — full-box blur) until re-detection or window
-  edge; ends early only when the box center leaves the frame.
-  Association: best-IoU same-class detection vs the CURRENT box (>=0.10);
-  else nearest same-class center within reach = 1.2×max(box dim) — reach
-  scales to the current box, so a subject GROWING as it approaches the
-  camera (IoU with the old small box stays high enough) or jumping is
-  still followed, WITHOUT velocity prediction (predicting a position
-  floated the blur onto empty ground — a real regression). On a live hit
-  emit the detector-tight box + poly EXACTLY as detected (blur only what
-  is visible; what's behind an occluder isn't visible, so there is
-  nothing to over-cover — an earlier "union of sliver + predicted
-  body-box" produced giant frame-spanning boxes and floating ghosts).
-  On a MISS: if the last box's center was at the frame edge, end (it
-  left); else FREEZE the last box CLAMPED to the frame (plain rectangle,
-  never off-screen) for a 0.8s grace, then end if it never re-appears —
-  no ballooning, no floating. Two near-identical subjects: association
-  stays on the SEEDED one by IoU; an unselected look-alike is never
-  grabbed (validated frame-by-frame on two-street-dog footage). Seeding
+  person). Association is PROPAGATE-AND-REFINE (the MaskAnyone
+  principle sized to our no-torch stack: their SAM2 propagate_in_video
+  carries identity by propagation, not per-frame matching; here a
+  VitTrack PROPAGATION ANCHOR at half scale carries identity while
+  detections REFINE with tight silhouettes — detections stay the mask
+  source, the anchor never is). Identity chains to the LAST CONFIDENT
+  DETECTION: a same-class detection is accepted only with IoU >= 0.10
+  vs the current box AND area within 0.33-3.0x of `ref_a`, a slow-shrink
+  size EMA (grow α=0.5, shrink α=0.05 — an occlusion sliver must not
+  drag it down or the full-size re-appearance gets rejected; ended a
+  real track mid-window). SUSPICIOUS-HANDOFF guard: weak overlap
+  (IoU<0.30) AND much larger (>1.8x ref_a) needs anchor confirmation
+  (vscore>=0.35 ∧ IoU(det,vbox)>=0.25) — the classic look-alike-slides-
+  past handoff at a frame exit. The anchor itself is SANITY-CHECKED: a
+  vbox outside the same 0.33-3.0x size band has DRIFTED and is
+  discarded (on real footage it ballooned to a near-frame box over the
+  second dog after the subject left and "confirmed" the wrong handoff).
+  On a detection hit: emit the detector-tight box + poly EXACTLY as
+  detected (blur only what is visible — an earlier predicted-union
+  produced frame-spanning boxes and floating ghosts), update ref_a,
+  RE-ANCHOR VitTrack on the detection (drift can never accumulate past
+  one blink). On a detector miss with the anchor still AGREEING
+  (vscore>=0.35 ∧ IoU(vbox,cur)>=0.20): ride the anchor — but only
+  while the detector gap <= 0.8s (rides bridge BLINKS; an unbounded
+  ride carried a box around the frame long after the subject left —
+  the floating-blur failure). Both blind, or past a blink's length:
+  FREEZE the last box CLAMPED to the frame (score 0, NO stale poly —
+  full-box blur) for a 0.8s grace, then end. NO nearest-distance
+  fallback and NO velocity prediction, ever (both caused real
+  wrong-object/floating regressions). Ends early only when the box
+  center leaves the frame. Two near-identical subjects: association
+  stays on the SEEDED one; an unselected look-alike is never grabbed
+  (validated frame-by-frame on two-street-dog footage: full-window
+  coverage through a person-occlusion at ~7s, zero wrong-dog samples,
+  track ends at the frame exit instead of inheriting the other dog). Seeding
   survives bad frames: detection is retried at
   t_ref±(0.33..1.0)s inside the window, and ALL tracker frame fetches go
   through `_grab_frame` (module-level): fast POS_MSEC seek, else fall
