@@ -35,7 +35,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.53"
+VERSION = "1.0.54"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -1443,9 +1443,11 @@ def track_manual_region(video, box, t_ref, t0, t1, cb=None,
         # tracking: body-tight boxes + silhouettes every frame, immune
         # to the scale/appearance drift that plagues generic trackers
         try:
+            # detector masks are repainted at every sample; at the default
+            # 2-frame cadence the outline visibly STEPS/flickers at half
+            # the frame rate (real footage) — detect EVERY frame instead
             ps = _track_person_dense(video, box, t_ref, t0, t1,
-                                     person_det, log,
-                                     step_frames=step_frames)
+                                     person_det, log, step_frames=1)
         except Exception as e:
             log("      track: person-detector path failed (%s) — using "
                 "the generic tracker" % e)
@@ -2242,6 +2244,24 @@ def _blur_yuv10(y, u, v, x1, y1, x2, y2, mode, shape="rect"):
     _fill(v, cx1, cy1, cx2, cy2, 512, 15)
 
 
+def _dedupe_dense(act):
+    """Dense track samples are POSITION SNAPSHOTS whose spans carry a
+    small grace overlap; a frame covered by TWO snapshots of the same
+    object would get blurred twice at slightly offset positions — the
+    output then pulses at half the frame rate (visible flicker on real
+    footage). Keep only the latest-started snapshot per track."""
+    latest = {}
+    for d in act:
+        if d.dense and d.track >= 0:
+            p = latest.get(d.track)
+            if p is None or d.t_start > p.t_start:
+                latest[d.track] = d
+    if not latest:
+        return act
+    return [d for d in act
+            if not (d.dense and d.track >= 0 and latest[d.track] is not d)]
+
+
 def render_hdr(src, dst, detections, cum, bands, fps, pad, mode,
                encoder, tags, band_margin=25, progress_every=60, cb=None,
                mode_map=None, face_shape="ellipse", audio_spans=None,
@@ -2328,9 +2348,9 @@ def render_hdr(src, dst, detections, cum, bands, fps, pad, mode,
         t = idx / fps
         ox, oy = cum[min(idx, len(cum) - 1)]
 
-        for d in buckets.get(int(t), []):
-            if not (d.t_start - 0.01 <= t <= d.t_end + 0.01):
-                continue
+        act = [d for d in buckets.get(int(t), [])
+               if d.t_start - 0.01 <= t <= d.t_end + 0.01]
+        for d in _dedupe_dense(act):
             drift = min(24.0, 0.05 * (abs(ox - d.aoff[0]) + abs(oy - d.aoff[1])))
             px = pad + drift
             _blur_yuv10(y, u, v, d.cbox[0] + ox - px, d.cbox[1] + oy - px,
@@ -2496,9 +2516,9 @@ def render(src, dst, detections, cum, bands, fps, pad, mode, preview,
         ox, oy = cum[min(idx, len(cum) - 1)]
 
         # 1. tracked PII boxes, translated by scroll offset
-        for d in buckets.get(int(t), []):
-            if not (d.t_start - 0.01 <= t <= d.t_end + 0.01):
-                continue
+        act = [d for d in buckets.get(int(t), [])
+               if d.t_start - 0.01 <= t <= d.t_end + 0.01]
+        for d in _dedupe_dense(act):
             # drift allowance: residual tracking error grows (slowly) with
             # distance scrolled since detection — expand the box to cover it
             drift = min(24.0, 0.05 * (abs(ox - d.aoff[0]) + abs(oy - d.aoff[1])))

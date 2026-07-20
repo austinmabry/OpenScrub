@@ -1510,3 +1510,23 @@ def test_track_person_detector_path(tmp_path):
     assert abs(mid[1][0] - 310) < 20, "must follow the seeded person"
     for q in s:
         assert q[1][0] < 450, "must never jump to the decoy detection"
+
+
+def test_render_dedupes_overlapping_dense_samples():
+    """Manual-track samples carry a grace overlap, so every other frame
+    was covered by TWO snapshots of the same track and got blurred twice
+    — the output pulsed at half the frame rate (visible flicker on real
+    footage). A frame must apply only the latest snapshot per track."""
+    mk = lambda t: openscrub.Detection(t, t + 0.08, (10, 10, 50, 50),
+                                       "manual", "x", 0.9, (0, 0),
+                                       last_seen=t, dense=True, track=3)
+    a, b = mk(0.0), mk(1 / 15)          # both cover frame t = 2/30
+    act = [d for d in (a, b)
+           if d.t_start - 0.01 <= 2 / 30 <= d.t_end + 0.01]
+    assert len(act) == 2, "sanity: the overlap frame sees both snapshots"
+    assert openscrub._dedupe_dense(act) == [b], \
+        "only the latest snapshot may blur the frame"
+    # non-dense detections (text regions etc.) are never deduped
+    n1 = openscrub.Detection(0, 1, (0, 0, 5, 5), "name", "x", 0.9)
+    n2 = openscrub.Detection(0, 1, (8, 8, 12, 12), "name", "y", 0.9)
+    assert openscrub._dedupe_dense([n1, n2]) == [n1, n2]
