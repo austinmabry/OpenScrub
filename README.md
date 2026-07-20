@@ -27,6 +27,13 @@ rather than a half-second late. Defaults are tuned for the hardest case —
 dense, scrolling records screens (medical, financial, CRM, support
 consoles) — but the engine is general-purpose.
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/austinmabry/OpenScrub/main/assets/screenshots/editor-demo.gif"
+       alt="OpenScrub editor in action: a video loaded on the timeline with stackable detection windows, per-window categories and zones, and audio-track lanes"
+       width="900">
+</p>
+<p align="center"><em>One visual editor: stack detection windows on a timeline, draw zones, mute audio — then scan and review before anything is trusted.</em></p>
+
 > Keywords: video redaction · blur faces in video · blur a person in video ·
 > body blur / silhouette masking · redact screen recording · PII redaction ·
 > anonymize video · blur license plates · GDPR / CCPA / FERPA / PCI / HIPAA ·
@@ -314,11 +321,25 @@ after any update to run the new version.
 
 ## Web interface (LAN) — one page, editor to review
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/austinmabry/OpenScrub/main/assets/screenshots/track-object.png"
+       alt="Drawing a track box around a subject in the editor; OpenScrub detects the object, tracks it, and blurs it through the detection window"
+       width="880">
+</p>
+<p align="center"><em>Draw a box around any person, animal, or object — OpenScrub identifies it, tracks it, and blurs it (silhouette-precise) through the window.</em></p>
+
 Run `openscrub-web` (or `python openscrub_web.py`) on an always-on
 machine and open the printed URL from any device on your network —
 laptop, phone, or tablet. The whole app is **one dark, video-editor-style
 page**: the Scan Setup editor on top, your jobs and the review workflow
 right below it, and server settings behind the gear icon in the header.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/austinmabry/OpenScrub/main/assets/screenshots/editor-home.png"
+       alt="The OpenScrub home page: load a video, custom regex categories, advanced settings, and the jobs list — all on one page"
+       width="880">
+</p>
+<p align="center"><em>The editor <strong>is</strong> the homepage — load a video and the timeline appears; nothing is detected until you choose a category.</em></p>
 
 **Scan Setup editor** (the top of the page):
 
