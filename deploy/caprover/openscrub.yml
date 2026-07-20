@@ -1,0 +1,29 @@
+captainVersion: 4
+services:
+  $$cap_appname:
+    image: pharmhero/openscrub:$$cap_version
+    command: ["openscrub-web", "--host", "0.0.0.0", "--http"]
+    volumes:
+      - $$cap_appname-data:/root/.local/share/OpenScrub
+    restart: unless-stopped
+    caproverExtra:
+      containerHttpPort: "8384"
+caproverOneClickApp:
+  variables:
+    - id: $$cap_version
+      label: OpenScrub image tag
+      defaultValue: latest
+      description: Docker image tag (latest, or a specific version)
+      validRegex: /^[a-zA-Z0-9.\-]+$/
+  instructions:
+    start: >-
+      OpenScrub — local video redaction: automatically detect and blur faces,
+      full-body silhouettes, license plates, and on-screen PII with a human
+      review step. Nothing leaves your server.
+    end: >-
+      Done! Enable HTTPS for the app in CapRover, then open it and load a
+      video. Job data persists in the app volume.
+  displayName: OpenScrub
+  isOfficial: false
+  description: Blur faces, plates and PII in videos — locally, with human review
+  documentation: https://github.com/austinmabry/OpenScrub

@@ -1,0 +1,25 @@
+PackageIdentifier: AustinMabry.OpenScrub
+PackageVersion: "1.0.54"
+PackageLocale: en-US
+Publisher: Austin Mabry
+PublisherUrl: https://github.com/austinmabry
+PublisherSupportUrl: https://github.com/austinmabry/OpenScrub/issues
+PackageName: OpenScrub
+PackageUrl: https://github.com/austinmabry/OpenScrub
+License: Apache-2.0
+LicenseUrl: https://github.com/austinmabry/OpenScrub/blob/main/LICENSE
+ShortDescription: Local video redaction — detect and blur faces, license plates, and on-screen PII with human review.
+Description: >-
+  OpenScrub detects and blurs PII in videos and screen recordings entirely on
+  your own machine: faces (grouped by identity), full-body silhouettes,
+  license plates, and on-screen text such as names, SSNs, addresses and
+  custom regex patterns. Every detection is shown for human review before
+  rendering. GPU-accelerated on NVIDIA hardware; nothing is uploaded.
+Tags:
+  - video
+  - privacy
+  - redaction
+  - blur
+  - pii
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

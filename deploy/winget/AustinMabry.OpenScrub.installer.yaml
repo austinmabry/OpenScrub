@@ -1,0 +1,9 @@
+PackageIdentifier: AustinMabry.OpenScrub
+PackageVersion: "1.0.54"
+InstallerType: inno
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/austinmabry/OpenScrub/releases/download/v1.0.54/OpenScrub-Setup-1.0.54.exe
+    InstallerSha256: REPLACE_WITH_SHA256   # see deploy/README.md — or use wingetcreate, which fills this in for you
+ManifestType: installer
+ManifestVersion: 1.6.0

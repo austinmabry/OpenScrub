@@ -1,0 +1,11 @@
+# Reference compose for the TrueNAS app (their repo templates this with
+# questions.yaml — this is the shape reviewers will ask you to express)
+services:
+  openscrub:
+    image: pharmhero/openscrub:latest
+    restart: unless-stopped
+    ports:
+      - "8384:8384"
+    volumes:
+      - /mnt/tank/apps/openscrub:/root/.local/share/OpenScrub
+      - /mnt/tank/media:/media:ro

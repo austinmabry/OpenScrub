@@ -1,0 +1,27 @@
+manifestVersion: 1
+id: openscrub
+category: media
+name: OpenScrub
+version: "1.0.54"
+tagline: Blur faces, plates and PII in videos — locally, with human review
+description: >-
+  OpenScrub detects and blurs PII in videos and screen recordings entirely on
+  your Umbrel: faces (grouped by identity so you decide once per person),
+  full-body silhouettes, license plates, and on-screen text such as names,
+  SSNs and addresses — plus draw-a-box tracking for anything else. Every
+  detection is shown for human review before rendering, and nothing ever
+  leaves your machine.
+
+
+  Performance note: scanning is CPU-intensive. It is fast on x86 and Apple
+  Silicon hardware; on a Raspberry Pi it works but long scans are best left
+  to run overnight.
+developer: Austin Mabry
+website: https://github.com/austinmabry/OpenScrub
+repo: https://github.com/austinmabry/OpenScrub
+support: https://github.com/austinmabry/OpenScrub/issues
+port: 8384
+gallery: []
+releaseNotes: ""
+dependencies: []
+path: ""

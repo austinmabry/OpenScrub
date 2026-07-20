@@ -1,0 +1,7 @@
+# winget version manifest — submit under
+# manifests/a/AustinMabry/OpenScrub/<version>/ in microsoft/winget-pkgs
+PackageIdentifier: AustinMabry.OpenScrub
+PackageVersion: "1.0.54"
+DefaultLocale: en-US
+ManifestType: version
+ManifestVersion: 1.6.0

@@ -1,0 +1,20 @@
+# documentation: https://github.com/austinmabry/OpenScrub
+# slogan: Blur faces, plates and PII in videos — locally, with human review
+# category: media
+# tags: video,privacy,redaction,blur,pii,self-hosted
+# logo: svgs/openscrub.png
+# port: 8384
+
+services:
+  openscrub:
+    image: pharmhero/openscrub:latest
+    command: openscrub-web --host 0.0.0.0 --http
+    environment:
+      - SERVICE_FQDN_OPENSCRUB_8384
+    volumes:
+      - openscrub-data:/root/.local/share/OpenScrub
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8384/', timeout=5)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3

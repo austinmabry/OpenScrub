@@ -1,0 +1,57 @@
+# CasaOS app manifest — submit to a CasaOS appstore repo (see deploy/README.md)
+name: openscrub
+services:
+  openscrub:
+    image: pharmhero/openscrub:latest
+    container_name: openscrub
+    restart: unless-stopped
+    ports:
+      - target: 8384
+        published: "8384"
+        protocol: tcp
+    volumes:
+      - type: bind
+        source: /DATA/AppData/openscrub
+        target: /root/.local/share/OpenScrub
+      - type: bind
+        source: /DATA/Media
+        target: /media
+    x-casaos:
+      volumes:
+        - container: /root/.local/share/OpenScrub
+          description:
+            en_us: Job data (scans, reports, rendered output)
+        - container: /media
+          description:
+            en_us: Media library (scan videos in place via server path)
+      ports:
+        - container: "8384"
+          description:
+            en_us: Web UI (HTTPS, self-signed — accept the browser warning once)
+x-casaos:
+  architectures:
+    - amd64
+    - arm64
+  main: openscrub
+  author: Austin Mabry
+  category: Media
+  description:
+    en_us: >-
+      Local video redaction: automatically detect and blur faces, full-body
+      silhouettes, license plates, and on-screen PII (names, SSNs, addresses,
+      custom regex) in videos and screen recordings — with a human review
+      step before anything is trusted. Nothing leaves your machine.
+      CPU-intensive: fast on x86 and Apple Silicon; works on Raspberry Pi but
+      expect long scans. An NVIDIA GPU image (pharmhero/openscrub:cuda) is
+      available for x86.
+  developer: Austin Mabry
+  icon: https://raw.githubusercontent.com/austinmabry/OpenScrub/main/assets/icon-256.png
+  screenshot_link:
+    - https://raw.githubusercontent.com/austinmabry/OpenScrub/main/assets/social_preview.png
+  tagline:
+    en_us: Blur faces, plates and PII in videos — locally, with human review
+  title:
+    en_us: OpenScrub
+  index: /
+  port_map: "8384"
+  scheme: https

@@ -1,0 +1,28 @@
+# TrueNAS Community Apps metadata (starting point — the truenas/apps repo
+# review will ask for their full library structure; see deploy/README.md)
+app_version: "1.0.54"
+title: OpenScrub
+name: openscrub
+train: community
+description: >-
+  Local video redaction: automatically detect and blur faces, full-body
+  silhouettes, license plates, and on-screen PII (names, SSNs, addresses,
+  custom regex) in videos and screen recordings — with a human review step
+  before anything is trusted. Nothing leaves your machine.
+home: https://github.com/austinmabry/OpenScrub
+sources:
+  - https://github.com/austinmabry/OpenScrub
+  - https://hub.docker.com/r/pharmhero/openscrub
+maintainers:
+  - name: Austin Mabry
+    url: https://github.com/austinmabry
+icon_url: https://raw.githubusercontent.com/austinmabry/OpenScrub/main/assets/icon-256.png
+keywords:
+  - video
+  - privacy
+  - redaction
+  - blur
+  - pii
+lib_version: ""
+categories:
+  - media

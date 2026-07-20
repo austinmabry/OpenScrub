@@ -1,0 +1,14 @@
+version: "3.7"
+
+services:
+  app_proxy:
+    environment:
+      APP_HOST: openscrub_web_1
+      APP_PORT: 8384
+
+  web:
+    image: pharmhero/openscrub:latest
+    command: openscrub-web --host 0.0.0.0 --http
+    restart: on-failure
+    volumes:
+      - ${APP_DATA_DIR}/data:/root/.local/share/OpenScrub

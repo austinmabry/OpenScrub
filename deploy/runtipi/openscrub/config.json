@@ -1,0 +1,17 @@
+{
+  "$schema": "https://schemas.runtipi.io/app-info.json",
+  "id": "openscrub",
+  "name": "OpenScrub",
+  "description": "Local video redaction: automatically detect and blur faces, full-body silhouettes, license plates, and on-screen PII (names, SSNs, addresses, custom regex) in videos and screen recordings — with a human review step before anything is trusted. Nothing leaves your machine.",
+  "short_desc": "Blur faces, plates and PII in videos — locally, with human review",
+  "author": "austinmabry",
+  "source": "https://github.com/austinmabry/OpenScrub",
+  "categories": ["media", "security"],
+  "port": 8384,
+  "available": true,
+  "exposable": true,
+  "supported_architectures": ["amd64", "arm64"],
+  "version": "1.0.54",
+  "tipi_version": 1,
+  "dynamic_config": true
+}

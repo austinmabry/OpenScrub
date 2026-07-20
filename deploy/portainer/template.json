@@ -1,0 +1,17 @@
+{
+  "type": 1,
+  "title": "OpenScrub",
+  "name": "openscrub",
+  "description": "Local video redaction: automatically detect and blur faces, full-body silhouettes, license plates, and on-screen PII (names, SSNs, addresses, custom regex) in videos and screen recordings — with a human review step before anything is trusted. Nothing leaves your machine. NVIDIA users: swap the image tag to 'cuda' and add the nvidia runtime for GPU acceleration.",
+  "categories": ["media", "security"],
+  "platform": "linux",
+  "note": "Web UI on port 8384 (HTTPS with a self-signed certificate — accept the browser warning once). Mount a media folder to scan server-side files in place.",
+  "logo": "https://raw.githubusercontent.com/austinmabry/OpenScrub/main/assets/icon-256.png",
+  "image": "pharmhero/openscrub:latest",
+  "ports": ["8384:8384/tcp"],
+  "restart_policy": "unless-stopped",
+  "volumes": [
+    { "container": "/root/.local/share/OpenScrub", "bind": "/portainer/Files/AppData/openscrub" },
+    { "container": "/media", "bind": "/portainer/Files/Media", "readonly": true }
+  ]
+}
