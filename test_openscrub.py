@@ -1566,3 +1566,31 @@ def test_grab_frame_survives_broken_random_seek():
         def set(self, prop, val): return True
         def read(self): return (False, None)
     assert openscrub._grab_frame(DeadCap(), 5.0, 30.0) is None
+
+
+def test_scan_copy_frame_verification(tmp_path):
+    """A tone-mapped scan copy is read by frame INDEX, so a copy that
+    dropped frames (a real GPU box's NVENC copy did) silently shifts
+    every detection onto the wrong output frames. The verifier must
+    count frames exactly and flag any mismatch beyond the tolerance."""
+    import subprocess
+    src = str(tmp_path / "src.mp4")
+    short = str(tmp_path / "short.mp4")
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-f", "lavfi",
+                    "-i", "testsrc=size=64x64:rate=30:duration=2",
+                    "-pix_fmt", "yuv420p", src], check=True)
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-i", src,
+                    "-frames:v", "50", "-pix_fmt", "yuv420p", short],
+                   check=True)
+    assert openscrub._count_video_frames(src) == 60
+    assert openscrub._count_video_frames(short) == 50
+
+    ok, n_ref, n_cp = openscrub._scan_copy_matches(src, src)
+    assert ok and n_ref == n_cp == 60
+    ok, n_ref, n_cp = openscrub._scan_copy_matches(src, short)
+    assert not ok, "a 10-frame-short copy must be rejected"
+    # unmeasurable inputs never block the pipeline (fail open here would
+    # mean refusing every scan on a box without ffprobe — the guard only
+    # acts on a MEASURED mismatch)
+    ok, _, _ = openscrub._scan_copy_matches(src, str(tmp_path / "nope.mp4"))
+    assert ok

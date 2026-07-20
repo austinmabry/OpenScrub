@@ -171,7 +171,15 @@ Key classes/functions (locate with grep, line numbers drift):
 - Intake normalization (`normalize_vfr`): VFR input → CFR (`probe_vfr`);
   HDR input (`probe_hdr`: PQ/HLG transfer or BT.2020 10-bit) → tone-mapped
   SDR copy (zscale/tonemap, loud NOTE if ffmpeg lacks them) that the SCAN
-  runs on. With `--hdr-output match` (default) a 10-bit CFR HDR source is
+  runs on. The 1:1 (non-CFR-resampling) tonemap copy is VERIFIED after
+  creation (`_scan_copy_matches`: full-decode frame counts, tol 2) — the
+  scan reads it by frame INDEX, and a GPU encode that drops frames
+  silently shifts every later detection onto the wrong output frames
+  (misplaced blur beside the subject; a real P2000/Unraid NVENC copy did
+  this while the render's own timeline stayed perfect). Mismatch → the
+  lying copy is DELETED (never left for the mtime cache), redone with
+  libx264, re-verified; still off → RuntimeError, refuse to scan.
+  Unmeasurable counts never block (guard acts only on a measured lie). With `--hdr-output match` (default) a 10-bit CFR HDR source is
   kept (`args.hdr_source`/`hdr_encoder`/`hdr_tags`) and `run_render`
   dispatches to `render_hdr`: raw yuv420p10le pipe in/out, planar blur
   (`_blur_yuv10` — no colorspace conversion ever touches unblurred

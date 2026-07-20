@@ -35,7 +35,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.58"
+VERSION = "1.0.59"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -4125,6 +4125,34 @@ _TONEMAP_VF = ("zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,"
                "zscale=t=bt709:m=bt709:r=tv,format=yuv420p")
 
 
+def _count_video_frames(path):
+    """Exact decoded frame count (full decode via ffprobe), or None."""
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-count_frames",
+             "-select_streams", "v:0",
+             "-show_entries", "stream=nb_read_frames",
+             "-of", "csv=p=0", path],
+            capture_output=True, text=True).stdout.strip()
+        return int(out.split(",")[0]) if out else None
+    except Exception:
+        return None
+
+
+def _scan_copy_matches(ref, copy, tol=2):
+    """(ok, n_ref, n_copy) — a 1:1 (non-resampling) scan copy must carry
+    exactly the source's frames: the scan reads it by frame INDEX, so a
+    single dropped or duplicated frame silently shifts every detection
+    made after it onto the wrong output frames (misplaced blur — seen on
+    a real GPU box whose NVENC copy desynced). Counting requires a full
+    decode of both files; that cost is nothing next to the scan itself
+    and it is the only check that catches the failure."""
+    n_ref, n_cp = _count_video_frames(ref), _count_video_frames(copy)
+    if n_ref is None or n_cp is None:
+        return True, n_ref, n_cp        # can't measure — don't block
+    return abs(n_ref - n_cp) <= tol, n_ref, n_cp
+
+
 def normalize_vfr(args, cb):
     """Intake normalization: VFR input is transcoded to CFR (frame->time
     mapping assumes CFR); HDR input additionally gets a tone-mapped SDR
@@ -4230,8 +4258,41 @@ def normalize_vfr(args, cb):
     if _cached(sdr):
         cb.log(f"      reusing existing {os.path.basename(sdr)}")
     else:
-        _encode(hdr_src or src0, sdr, cfr=(is_vfr and hdr_src is None),
-                tonemap=True, vargs=sdr_vargs)
+        sdr_ref = hdr_src or src0
+        sdr_cfr = is_vfr and hdr_src is None
+        _encode(sdr_ref, sdr, cfr=sdr_cfr, tonemap=True, vargs=sdr_vargs)
+        if not sdr_cfr:
+            # fail closed: the scan trusts this copy's frame indexes as
+            # timestamps. A GPU encode that drops or duplicates even a few
+            # frames shifts every later detection onto the wrong output
+            # frames — blur lands beside the subject with no error
+            # anywhere. Verify the copy 1:1; redo on the CPU encoder if
+            # it lies; refuse to scan if even that can't match.
+            ok, n_ref, n_cp = _scan_copy_matches(sdr_ref, sdr)
+            if not ok:
+                cb.log(f"      NOTE: scan copy came out with {n_cp} frames "
+                       f"but the source has {n_ref} — this encoder "
+                       "desynced the timeline (detections would blur the "
+                       "wrong moments). Re-encoding the copy with libx264 "
+                       "(CPU).")
+                try:
+                    os.remove(sdr)      # never leave a lying copy for the
+                except OSError:         # mtime cache to reuse
+                    pass
+                _encode(sdr_ref, sdr, cfr=False, tonemap=True,
+                        vargs=["-c:v", "libx264", "-crf", "18",
+                               "-preset", "fast", "-pix_fmt", "yuv420p"])
+                ok, n_ref, n_cp = _scan_copy_matches(sdr_ref, sdr)
+                if not ok:
+                    try:
+                        os.remove(sdr)
+                    except OSError:
+                        pass
+                    raise RuntimeError(
+                        "scan copy could not be created with a faithful "
+                        f"timeline ({n_cp} vs {n_ref} frames) — refusing "
+                        "to scan a desynced copy (blur would land at the "
+                        "wrong times)")
 
     args.original_video = src0
     args.hdr_tonemapped = True
