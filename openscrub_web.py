@@ -922,8 +922,20 @@ def job_track_object(jid):
             class L(openscrub.Callbacks):
                 def log(self, m):
                     job["log"].append(m)
+            det = None
+            try:
+                # same person-model resolution the scan uses: the panel
+                # selection first, then the engine's default ladder
+                mid = load_model_select().get("person")
+                p = find_model_file("%s.onnx" % mid) if mid else None
+                det = openscrub.PersonDetector(L(), model_path=p,
+                                               thresh=0.35)
+                if det.net is None and det.ort is None:
+                    det = None
+            except Exception:
+                det = None
             samples = openscrub.track_manual_region(
-                job["video"], box, t_ref, t0, t1, cb=L())
+                job["video"], box, t_ref, t0, t1, cb=L(), person_det=det)
             if not samples:
                 st.update(state="done", added=0,
                           error="could not track that region — try a "
@@ -936,17 +948,24 @@ def job_track_object(jid):
             tid = max([d.get("track", -1) for d in doc["detections"]]
                       + [-1]) + 1
             new = []
-            for t, b, score in samples:
+            is_person = len(samples[0]) > 3
+            for s in samples:
+                t, b, score = s[0], s[1], s[2]
+                poly = s[3] if len(s) > 3 and s[3] else ()
                 fidx = min(int(t * fps), len(rs["cum"]) - 1)
                 ox, oy = rs["cum"][fidx]
                 new.append({
                     "t_start": t, "t_end": t + step * 1.2,
                     "cbox": [int(b[0] - ox), int(b[1] - oy),
                              int(b[2] - ox), int(b[3] - oy)],
-                    "category": "manual", "text": "tracked object",
+                    "category": "manual",
+                    "text": ("tracked person" if is_person
+                             else "tracked object"),
                     "confidence": round(float(score), 3),
                     "aoff": [ox, oy], "last_seen": t,
-                    "dense": True, "track": tid, "enabled": True})
+                    "dense": True, "track": tid, "enabled": True,
+                    "poly": [[[float(x), float(y)] for x, y in c]
+                             for c in poly]})
             # grace pads: cover the sub-sample sliver at both ends
             new[0]["t_start"] = max(0.0, new[0]["t_start"] - 0.25)
             new[-1]["t_end"] += 0.25

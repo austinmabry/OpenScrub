@@ -35,7 +35,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.52"
+VERSION = "1.0.53"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -1209,8 +1209,159 @@ def _vittrack_factory(log):
     return make
 
 
+def _iou(a, b):
+    ix1, iy1 = max(a[0], b[0]), max(a[1], b[1])
+    ix2, iy2 = min(a[2], b[2]), min(a[3], b[3])
+    inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+    if inter <= 0:
+        return 0.0
+    aa = (a[2] - a[0]) * (a[3] - a[1])
+    bb = (b[2] - b[0]) * (b[3] - b[1])
+    return inter / max(aa + bb - inter, 1e-9)
+
+
+def _track_person_dense(video, box, t_ref, t0, t1, det, log,
+                        step_frames=2):
+    """Follow the PERSON inside a user-drawn box using the person
+    detector itself: per-frame detections give body-tight boxes (and
+    silhouette polygons from -seg models), so the blur hugs the body
+    instead of a drifting rectangle — no scale problems, no appearance
+    drift, ever. Association keeps the lock on the SEEDED person even
+    with others in frame: each step picks the detection with the best
+    IoU against the last position (or the nearest within half a
+    box-size when overlap breaks during fast motion) — the same
+    cannot-jump reach rule the dense person tracks use. Misses FAIL
+    CLOSED: the box freezes (full-box blur, no stale silhouette) until
+    the person is re-detected or the window ends; coverage only ends
+    early when the person visibly leaves the frame.
+
+    Returns [(t, box, score, poly)] — or [] when no person overlaps the
+    drawn box at t_ref (caller falls back to the generic tracker)."""
+    cap = cv2.VideoCapture(video)
+    if not cap.isOpened():
+        return []
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    step = max(1, int(step_frames)) / fps
+    t_ref = min(max(t_ref, t0), t1)
+    W = cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0
+    H = cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0
+
+    def _frame(t):
+        cap.set(cv2.CAP_PROP_POS_MSEC, max(t, 0.0) * 1000)
+        ok, fr = cap.read()
+        return fr if ok else None
+
+    def _center_off(b):
+        cx, cy = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
+        return not (0.02 * W < cx < 0.98 * W and 0.02 * H < cy < 0.98 * H)
+
+    def _poly(d):
+        return tuple(d[5]) if len(d) > 5 and d[5] else ()
+
+    fr0 = _frame(t_ref)
+    if fr0 is None:
+        cap.release()
+        return []
+    dbox = tuple(float(v) for v in box)
+    darea = max((dbox[2] - dbox[0]) * (dbox[3] - dbox[1]), 1e-9)
+    best, bsc = None, 0.0
+    for d in det.find(fr0):
+        db = tuple(float(v) for v in d[:4])
+        ovx = max(0.0, min(dbox[2], db[2]) - max(dbox[0], db[0]))
+        ovy = max(0.0, min(dbox[3], db[3]) - max(dbox[1], db[1]))
+        # IoU plus how much of the DRAWN box the person covers — a tight
+        # torso-only box around a full body still seeds cleanly
+        sc = _iou(dbox, db) + 0.5 * (ovx * ovy) / darea
+        if sc > bsc:
+            best, bsc = d, sc
+    if best is None or bsc < 0.15:
+        cap.release()
+        return []
+    log("      track: person detected under the drawn box — following "
+        "THAT person with body-tight masks")
+    seed = tuple(float(v) for v in best[:4])
+    samples = [(t_ref, seed, float(best[4]), _poly(best))]
+    _last_log = time.time()
+    for direction in (1, -1):
+        cur = list(seed)
+        held = False
+        t = t_ref
+        if direction == 1:      # forward: sequential reads, no re-seeking
+            cap.set(cv2.CAP_PROP_POS_MSEC, max(t_ref, 0.0) * 1000)
+            cap.read()
+        while True:
+            t2 = t + direction * step
+            if t2 < t0 - 1e-6 or t2 > t1 + 1e-6:
+                break
+            if direction == 1:
+                fr = None
+                for _ in range(max(1, int(step_frames))):
+                    ok0, f0 = cap.read()
+                    if not ok0:
+                        fr = None
+                        break
+                    fr = f0
+            else:
+                fr = _frame(t2)
+            if fr is None:
+                break
+            dets = det.find(fr)
+            pick, bi = None, 0.0
+            for d in dets:
+                i = _iou(cur, [float(v) for v in d[:4]])
+                if i > bi:
+                    pick, bi = d, i
+            if pick is None:
+                # overlap broke (fast motion): nearest within half a
+                # box-size — beyond that reach it's a DIFFERENT person
+                reach = 0.5 * max(cur[2] - cur[0], cur[3] - cur[1])
+                nearest = None
+                for d in dets:
+                    db = [float(v) for v in d[:4]]
+                    dx = (db[0] + db[2]) / 2 - (cur[0] + cur[2]) / 2
+                    dy = (db[1] + db[3]) / 2 - (cur[1] + cur[3]) / 2
+                    dist = (dx * dx + dy * dy) ** 0.5
+                    if dist <= reach and (nearest is None
+                                          or dist < nearest[0]):
+                        nearest = (dist, d)
+                if nearest is not None:
+                    pick = nearest[1]
+            elif bi < 0.10:
+                pick = None     # sliver overlap = adjacent person brushing
+            if pick is None:
+                if not held:
+                    held = True
+                    if _center_off(cur):
+                        log("      track: person left the frame at "
+                            "t=%.1fs — coverage ends there" % t2)
+                        break
+                    log("      track: person not detected at t=%.1fs — "
+                        "blur holds its last position until re-detected"
+                        % t2)
+                samples.append((t2, tuple(cur), 0.0, ()))
+            else:
+                held = False
+                cur = [float(v) for v in pick[:4]]
+                if _center_off(cur):
+                    log("      track: person left the frame at t=%.1fs — "
+                        "coverage ends there" % t2)
+                    break
+                samples.append((t2, tuple(cur), float(pick[4]),
+                                _poly(pick)))
+            if time.time() - _last_log >= 3.0:
+                _last_log = time.time()
+                log("        …tracking %s to t=%.1fs (%d samples)"
+                    % ("forward" if direction > 0 else "backward",
+                       t2, len(samples)))
+            t = t2
+    cap.release()
+    samples.sort(key=lambda s: s[0])
+    return samples
+
+
 def track_manual_region(video, box, t_ref, t0, t1, cb=None,
-                        step_frames=2, thr=0.55, scale=0.5):
+                        step_frames=2, thr=0.55, scale=0.5,
+                        person_det=None):
     """Track a user-drawn screen-space box through [t0, t1], starting
     from its appearance at t_ref and walking both directions. This powers
     targeted redaction: circle anything the detectors don't know (a
@@ -1260,6 +1411,24 @@ def track_manual_region(video, box, t_ref, t0, t1, cb=None,
         cap.release()
         log("      track: region too small to track reliably")
         return []
+
+    if person_det is not None:
+        # a drawn box that CONTAINS A PERSON gets detector-driven
+        # tracking: body-tight boxes + silhouettes every frame, immune
+        # to the scale/appearance drift that plagues generic trackers
+        try:
+            ps = _track_person_dense(video, box, t_ref, t0, t1,
+                                     person_det, log,
+                                     step_frames=step_frames)
+        except Exception as e:
+            log("      track: person-detector path failed (%s) — using "
+                "the generic tracker" % e)
+            ps = []
+        if ps:
+            cap.release()
+            return ps
+        log("      track: no person found under the drawn box — "
+            "tracking it as a generic object")
 
     samples = [(t_ref, (float(box[0]), float(box[1]),
                         float(box[2]), float(box[3])), 1.0)]
@@ -5035,26 +5204,50 @@ def run_scan(args, cb=None):
         # the review-stage "Track object" tool.
         cb.log(f"      tracked objects: following {len(track_jobs)} "
                "user-drawn box(es) through their window(s)…")
+        # a person model turns drawn-box tracking into body-tight person
+        # tracking (silhouettes and all) — reuse the scan's detector, or
+        # load one just for tracking when the category wasn't selected
+        track_det = personer
+        if track_det is None:
+            try:
+                track_det = PersonDetector(
+                    cb, model_path=getattr(args, "person_model", None),
+                    thresh=0.35)
+            except Exception:
+                track_det = None
+        if track_det is not None and track_det.net is None \
+                and track_det.ort is None:
+            track_det = None
+        if track_det is None:
+            cb.log("      tip: with a person model installed (Detection "
+                   "models panel), a drawn box containing a person gets "
+                   "body-tight person tracking")
         tid = max([d.track for d in detections] + [n_tracks - 1]) + 1
         step_t = 2.0 / max(fps, 1.0)
         for (tt0, tt1, tbox, tref) in track_jobs:
             samples = track_manual_region(args.video, tbox, tref, tt0, tt1,
-                                          cb=cb)
+                                          cb=cb, person_det=track_det)
             if not samples:
                 cb.log("      tracked object: could not lock onto the "
                        f"region at {tref:.1f}s — draw a larger box or pick "
                        "a frame where the object is clearer")
                 continue
             new = []
-            for t, b, score in samples:
+            is_person = len(samples[0]) > 3
+            for s in samples:
+                t, b, score = s[0], s[1], s[2]
+                poly = tuple(s[3]) if len(s) > 3 and s[3] else ()
                 fidx = min(int(t * fps), len(cum) - 1) if cum else 0
                 ox, oy = cum[fidx] if cum else (0.0, 0.0)
                 new.append(Detection(
                     t, t + step_t * 1.2,
                     (int(b[0] - ox), int(b[1] - oy),
                      int(b[2] - ox), int(b[3] - oy)),
-                    "manual", "tracked object", round(float(score), 3),
-                    (ox, oy), last_seen=t, dense=True, track=tid))
+                    "manual",
+                    "tracked person" if is_person else "tracked object",
+                    round(float(score), 3),
+                    (ox, oy), last_seen=t, dense=True, track=tid,
+                    poly=poly))
             # grace pads: cover the sub-sample sliver at both ends
             new[0].t_start = max(0.0, new[0].t_start - 0.25)
             new[-1].t_end += 0.25

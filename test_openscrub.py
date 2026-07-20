@@ -1483,3 +1483,30 @@ def test_track_fail_closed_hold(tmp_path, monkeypatch):
         "held samples must carry score 0 (visible in review)"
     for _, b, _ in late:                 # frozen where it last saw it
         assert abs(b[0] - 290) < 40 and abs(b[1] - 150) < 40
+
+
+def test_track_person_detector_path(tmp_path):
+    """A drawn box containing a person switches to detector-driven
+    tracking: body-tight boxes + silhouettes that follow the SEEDED
+    person and never jump to a decoy detection standing elsewhere."""
+    v = _moving_square_video(str(tmp_path / "move.mp4"))
+    SQ = (((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)),)
+
+    class StubDet:
+        def find(self, frame):
+            g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            ys, xs = np.where(g > 120)          # the moving "person"
+            dets = [(500.0, 20.0, 560.0, 80.0, 0.9, SQ)]   # static decoy
+            if len(xs):
+                dets.append((float(xs.min()), float(ys.min()),
+                             float(xs.max()), float(ys.max()), 0.95, SQ))
+            return dets
+
+    s = openscrub.track_manual_region(v, (218, 148, 282, 212), 2.0,
+                                      1.0, 4.0, person_det=StubDet())
+    assert s and len(s[0]) == 4 and s[0][3], \
+        "person path must return silhouette-bearing samples"
+    mid = min(s, key=lambda q: abs(q[0] - 3.0))  # true x at t=3.0 is 310
+    assert abs(mid[1][0] - 310) < 20, "must follow the seeded person"
+    for q in s:
+        assert q[1][0] < 450, "must never jump to the decoy detection"

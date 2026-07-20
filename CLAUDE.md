@@ -24,7 +24,7 @@ target is Windows 10 + NVIDIA RTX 3060.
 | `fetch_plate_models.py` | Alt path to fetch plate models via the open-image-models pip package. |
 | `openscrub_update.py` | `openscrub-update` command + web self-update backend: PyPI version check, sha256-verified sdist download, data-preserving folder update (PRESERVE set), TOFU pin carry-forward. Ships in the wheel. |
 | `openscrub_vault.py` | At-rest encryption for the job store: scrypt keystore, chunked AES-256-GCM files (`.osvault`), lock/unlock tree walkers. NO password reset by design. Ships in the wheel. Lock-on-shutdown lives in openscrub_web: a SIGTERM handler (docker stop; locks then os._exit — sys.exit is swallowed by cheroot) + an atexit hook (Ctrl+C; uses the import-time `_HERE` constant because `__file__` is gone during interpreter teardown — both failure modes were real and verified). Encryption must finish inside the container stop grace period (`docker stop -t 120`). |
-| `test_openscrub.py` | pytest suite (49 tests). Must stay green. |
+| `test_openscrub.py` | pytest suite (50 tests). Must stay green. |
 | `tools/make_icons.py` | Regenerates every icon/logo asset from `assets/badge_master.png`. |
 | `tools/make_wordmark.py` | Regenerates the typeset Poppins wordmarks (navy + white). |
 | `assets/` | Brand assets. `badge_master.png` (canonical, mosaic+brackets style) and `badge_master_blurbox_alt.png` (alternate) are the sources; everything else is generated. |
@@ -262,8 +262,24 @@ Key classes/functions (locate with grep, line numbers drift):
   `const CATS`/`CATDN` (review rendering + the alignment rule) even
   though the homepage checkbox grid is gone.
 - Targeted redaction: `track_manual_region` tracks a user-drawn box
-  through a chosen time window (both directions from t_ref). PRIMARY
-  engine: cv2.TrackerVit (OpenCV >= 4.9) + the opencv_zoo vittrack model
+  through a chosen time window (both directions from t_ref). PERSON
+  path first: when a person model is available (both callers resolve
+  one — run_scan reuses `personer` or loads a dedicated det at
+  thresh=0.35; the web track_object endpoint resolves the panel
+  selection), `_track_person_dense` seeds on the person detection best
+  overlapping the drawn box (IoU + covered-fraction >= 0.15; no match →
+  generic tracker) and follows THAT person with per-frame detections:
+  body-tight boxes + silhouette polys (4-tuple samples (t,box,score,
+  poly) vs the generic 3-tuples; text "tracked person"; Detection.poly
+  → blur_silhouette, so the blur hugs the body — validated frame-by-
+  frame on real footage where it never jumped to an adjacent person).
+  Association = best IoU vs last box (sliver <0.10 rejected — adjacent
+  person brushing past), else nearest within 0.5×box-size reach (same
+  cannot-jump rule as dense person tracks); a miss FREEZES the box
+  (score 0, NO stale poly — full-box blur) until re-detection or window
+  edge; ends early only when the person's box center leaves the frame.
+  GENERIC path (non-person objects, no person model): cv2.TrackerVit
+  (OpenCV >= 4.9) + the opencv_zoo vittrack model
   (~0.7MB, Apache-2.0, auto-downloaded via `_fetch_model` with pinned
   VITTRACK_SHA256, baked into both Docker images) — survives scale
   change/turning/appearance drift that killed the old template matcher
@@ -428,7 +444,7 @@ python -c "import ast; ast.parse(open('openscrub.py').read())"   # each edited .
 #   PAGE now holds TWO <script> blocks (editor + app) sharing one global
 #   scope — join them so duplicate top-level declarations are caught too:
 #   python -c "import openscrub_web as w, re; open('/tmp/p.js','w').write('\n'.join(re.findall(r'<script>(.*?)</script>', w.PAGE, re.S)))" && node --check /tmp/p.js
-python -m pytest test_openscrub.py -q                             # 49 tests, all green
+python -m pytest test_openscrub.py -q                             # 50 tests, all green
 python -m build          # FULL build (sdist->wheel), NEVER just `-w`:
                          # the wheel is built FROM the sdist in CI, so any
                          # file the wheel force-includes must be in the
