@@ -91,9 +91,12 @@ Key classes/functions (locate with grep, line numbers drift):
   asserts AT INFERENCE TIME on multi-output graphs on some builds
   (fuseLayers, 4.10 CUDA) — the load probe can't catch it and it killed
   a whole scan once; a residual cv2 forward failure degrades LOUDLY to
-  box masks instead of crashing. Silhouettes are masked
-  (pad becomes an outward mask dilation; degenerate masks fall back to
-  the full box, fail closed; HDR render logs a NOTE and uses boxes).
+  box masks instead of crashing. Silhouettes are masked in BOTH renders
+  — `blur_silhouette` (SDR) and `_blur_silhouette_yuv10` (HDR: mask
+  rasterized at luma res, resized NEAREST for the half-res chroma
+  planes; untouched pixels never leave the native YUV domain); pad
+  becomes an outward mask dilation and degenerate masks fall back to
+  the full box, fail closed.
   Detection-only models still work and blur the box. ALWAYS dense
   (per-frame, like faces), feeds the same assign/smooth track pipeline —
   smoothing's `_mk` copies `poly` from the ref sample so interpolated/
@@ -284,7 +287,20 @@ Key classes/functions (locate with grep, line numbers drift):
   a kicked ball crosses several box-widths per step), sliver overlaps
   <0.10 rejected (neighbour brushing past); a miss FREEZES the box
   (score 0, NO stale poly — full-box blur) until re-detection or window
-  edge; ends early only when the box center leaves the frame. The
+  edge; ends early only when the box center leaves the frame. OCCLUSION
+  hardening (dog-behind-person, real footage): a mid-frame detection
+  that COLLAPSES below half the reference body size (slow-adapt EMA) is
+  partial occlusion — emit the union of the sliver and a body-sized box
+  at the predicted position, never shrink coverage (at the frame edge
+  shrinking is a legitimate exit); the nearest-reach EXPANDS with hold
+  time (×(1+0.4·steps), cap 4×) because the object keeps moving while
+  unseen; re-acquisition bridges old→new with one union sample; and a
+  retroactive pass stretches every UNCERTAIN run (holds/slivers/bridges
+  = samples without a poly when the track has polys) to the union of
+  its confident neighbours +15% margin — validated frame-by-frame on
+  the dog footage. Seeding survives bad frames: detection is retried at
+  t_ref±(0.33..1.0)s inside the window and read failures are logged
+  loudly (one bad frame at t_ref killed a real window's track). The
   detector path samples EVERY frame (step_frames=1): masks repainted at
   a 2-frame cadence visibly STEP/flicker at 15Hz on real footage.
   Renders (SDR + HDR) apply `_dedupe_dense` per frame: dense-track

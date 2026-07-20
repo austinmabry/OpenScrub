@@ -35,7 +35,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.54"
+VERSION = "1.0.55"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -1261,10 +1261,6 @@ def _track_person_dense(video, box, t_ref, t0, t1, det, log,
     def _cls(d):
         return int(d[6]) if len(d) > 6 else 0
 
-    fr0 = _frame(t_ref)
-    if fr0 is None:
-        cap.release()
-        return []
     # tracking mode: decode EVERY COCO class — the drawn box may hold a
     # person, a bird, a ball, a laptop… whatever it is, follow THAT
     prev_any = getattr(det, "want_any", False)
@@ -1272,18 +1268,42 @@ def _track_person_dense(video, box, t_ref, t0, t1, det, log,
     try:
         dbox = tuple(float(v) for v in box)
         darea = max((dbox[2] - dbox[0]) * (dbox[3] - dbox[1]), 1e-9)
-        best, bsc = None, 0.0
-        for d in det.find(fr0):
-            db = tuple(float(v) for v in d[:4])
-            ovx = max(0.0, min(dbox[2], db[2]) - max(dbox[0], db[0]))
-            ovy = max(0.0, min(dbox[3], db[3]) - max(dbox[1], db[1]))
-            # IoU plus how much of the DRAWN box the object covers — a
-            # tight torso-only box around a full body still seeds cleanly
-            sc = _iou(dbox, db) + 0.5 * (ovx * ovy) / darea
-            if sc > bsc:
-                best, bsc = d, sc
+        # the user pointed at something REAL: one unreadable or
+        # motion-blurred frame at exactly t_ref must not kill the track
+        # (a real scan lost a whole window this way). Try t_ref first,
+        # then nearby frames inside the window.
+        best, bsc, seed_t = None, 0.0, t_ref
+        read_fail = 0
+        for dt in (0.0, 0.33, -0.33, 0.66, -0.66, 1.0, -1.0):
+            ts = t_ref + dt
+            if ts < t0 - 1e-6 or ts > t1 + 1e-6:
+                continue
+            fr0 = _frame(ts)
+            if fr0 is None:
+                read_fail += 1
+                continue
+            for d in det.find(fr0):
+                db = tuple(float(v) for v in d[:4])
+                ovx = max(0.0, min(dbox[2], db[2]) - max(dbox[0], db[0]))
+                ovy = max(0.0, min(dbox[3], db[3]) - max(dbox[1], db[1]))
+                # IoU plus how much of the DRAWN box the object covers —
+                # a tight torso-only box around a full body seeds cleanly
+                sc = _iou(dbox, db) + 0.5 * (ovx * ovy) / darea
+                if sc > bsc:
+                    best, bsc = d, sc
+            if best is not None and bsc >= 0.15:
+                seed_t = ts
+                if dt:
+                    log("      track: seeded %.2fs away from the marked "
+                        "frame (the marked frame had no clear detection)"
+                        % abs(dt))
+                break
+        if read_fail:
+            log("      track: NOTE — %d frame read(s) failed near t=%.1fs"
+                % (read_fail, t_ref))
         if best is None or bsc < 0.15:
             return []
+        t_ref = seed_t
         tcls = _cls(best)
         tname = (COCO_NAMES[tcls] if 0 <= tcls < len(COCO_NAMES)
                  else "object")
@@ -1296,6 +1316,16 @@ def _track_person_dense(video, box, t_ref, t0, t1, det, log,
             cur = list(seed)
             held = False
             vx = vy = 0.0       # last step's motion, for fast movers
+            # reference body size: a detection that suddenly COLLAPSES to
+            # a fraction of it mid-frame means partial occlusion (someone
+            # walking in front), not a shrinking subject — the blur must
+            # keep covering the full body (a real dog was exposed for
+            # ~0.4s exactly this way). Shrinks only adapt slowly; at the
+            # frame edge shrinking is legitimate (the subject is leaving).
+            rw = max(8.0, seed[2] - seed[0])
+            rh = max(8.0, seed[3] - seed[1])
+            last_emit = list(seed)
+            hold_steps = 0
             t = t_ref
             if direction == 1:  # forward: sequential reads, no re-seeking
                 cap.set(cv2.CAP_PROP_POS_MSEC, max(t_ref, 0.0) * 1000)
@@ -1330,9 +1360,14 @@ def _track_person_dense(video, box, t_ref, t0, t1, det, log,
                 if pick is None:
                     # overlap broke: nearest within half a box-size plus
                     # the distance just travelled — beyond that reach a
-                    # same-class detection is a DIFFERENT object
-                    reach = (0.5 * max(cur[2] - cur[0], cur[3] - cur[1])
-                             + 1.5 * (vx * vx + vy * vy) ** 0.5)
+                    # same-class detection is a DIFFERENT object. While
+                    # the object is UNSEEN the reach must GROW with hold
+                    # time: a dog kept walking behind the person and
+                    # re-emerged beyond the static reach (real footage —
+                    # it stayed exposed until the track caught up).
+                    reach = ((0.5 * max(cur[2] - cur[0], cur[3] - cur[1])
+                              + 1.5 * (vx * vx + vy * vy) ** 0.5)
+                             * min(4.0, 1.0 + 0.4 * hold_steps))
                     nearest = None
                     for d in dets:
                         db = [float(v) for v in d[:4]]
@@ -1358,20 +1393,60 @@ def _track_person_dense(video, box, t_ref, t0, t1, det, log,
                         log("      track: %s not detected at t=%.1fs — "
                             "blur holds its last position until "
                             "re-detected" % (tname, t2))
-                    samples.append((t2, tuple(cur), 0.0, (), tcls))
+                    # hold the last EMITTED coverage (which never shrank
+                    # below body size), not the last raw detection sliver
+                    hold_steps += 1
+                    samples.append((t2, tuple(last_emit), 0.0, (), tcls))
                 else:
                     nb = [float(v) for v in pick[:4]]
+                    was_held = held
                     if not held:
                         vx = ((nb[0] + nb[2]) - (cur[0] + cur[2])) / 2
                         vy = ((nb[1] + nb[3]) - (cur[1] + cur[3])) / 2
                     held = False
+                    hold_steps = 0
                     cur = nb
                     if _center_off(cur):
                         log("      track: %s left the frame at t=%.1fs — "
                             "coverage ends there" % (tname, t2))
                         break
-                    samples.append((t2, tuple(cur), float(pick[4]),
-                                    _poly(pick), tcls))
+                    nw, nh = nb[2] - nb[0], nb[3] - nb[1]
+                    at_edge = (nb[0] <= 2 or nb[1] <= 2
+                               or nb[2] >= W - 2 or nb[3] >= H - 2)
+                    if not at_edge and nw * nh < 0.5 * rw * rh:
+                        # partial occlusion: the detector only sees a
+                        # sliver. Blur the UNION of the sliver and a
+                        # body-sized box where the body was heading —
+                        # over-blur, never expose the hidden side. No
+                        # poly: the sliver's mask covers too little.
+                        cxp = (cur[0] + cur[2]) / 2 + vx
+                        cyp = (cur[1] + cur[3]) / 2 + vy
+                        last_emit = [min(nb[0], cxp - rw / 2),
+                                     min(nb[1], cyp - rh / 2),
+                                     max(nb[2], cxp + rw / 2),
+                                     max(nb[3], cyp + rh / 2)]
+                        samples.append((t2, tuple(last_emit),
+                                        float(pick[4]), (), tcls))
+                    elif was_held:
+                        # first sample after a hold: the object may have
+                        # moved while unseen — bridge old and new
+                        # positions with one union blur (no poly), then
+                        # resume tight masks next step
+                        bridge = (min(last_emit[0], nb[0]),
+                                  min(last_emit[1], nb[1]),
+                                  max(last_emit[2], nb[2]),
+                                  max(last_emit[3], nb[3]))
+                        rw += 0.3 * (nw - rw)
+                        rh += 0.3 * (nh - rh)
+                        last_emit = list(nb)
+                        samples.append((t2, bridge, float(pick[4]),
+                                        (), tcls))
+                    else:
+                        rw += 0.3 * (nw - rw)
+                        rh += 0.3 * (nh - rh)
+                        last_emit = list(nb)
+                        samples.append((t2, tuple(cur), float(pick[4]),
+                                        _poly(pick), tcls))
                 if time.time() - _last_log >= 3.0:
                     _last_log = time.time()
                     log("        …tracking %s to t=%.1fs (%d samples)"
@@ -1382,6 +1457,44 @@ def _track_person_dense(video, box, t_ref, t0, t1, det, log,
         det.want_any = prev_any
         cap.release()
     samples.sort(key=lambda s: s[0])
+    # retroactive gap widening: while the object is occluded it may keep
+    # MOVING, and partial-occlusion slivers anchor coverage at the OLD
+    # position (a real dog's head poked out beyond both). UNCERTAIN
+    # samples = holds, slivers and bridges — anything without a
+    # silhouette when the track has silhouettes (score 0 otherwise).
+    # Each uncertain run is stretched to the union of its CONFIDENT
+    # neighbours plus a margin, so coverage spans wherever the object
+    # was mid-gap. Trailing runs keep their boxes.
+    has_poly = any(len(s) > 3 and s[3] for s in samples)
+
+    def _uncertain(s):
+        if s[2] == 0.0:
+            return True
+        return has_poly and not (len(s) > 3 and s[3])
+
+    i = 0
+    while i < len(samples):
+        if _uncertain(samples[i]):
+            j = i
+            while j < len(samples) and _uncertain(samples[j]):
+                j += 1
+            if j < len(samples):
+                a = samples[i - 1][1] if i > 0 else samples[i][1]
+                b = samples[j][1]
+                ub = (min(a[0], b[0]), min(a[1], b[1]),
+                      max(a[2], b[2]), max(a[3], b[3]))
+                mx = 0.15 * (ub[2] - ub[0])
+                my = 0.15 * (ub[3] - ub[1])
+                ub = (ub[0] - mx, ub[1] - my, ub[2] + mx, ub[3] + my)
+                for k in range(i, j):
+                    s = samples[k]
+                    w = (min(ub[0], s[1][0]), min(ub[1], s[1][1]),
+                         max(ub[2], s[1][2]), max(ub[3], s[1][3]))
+                    samples[k] = (s[0], w, s[2], (),
+                                  s[4] if len(s) > 4 else 0)
+            i = j
+        else:
+            i += 1
     return samples
 
 
@@ -1487,8 +1600,19 @@ def track_manual_region(video, box, t_ref, t0, t1, cb=None,
 
     vit = _vittrack_factory(log)
     if vit is not None:
-        fr0 = _frame(t_ref)
+        fr0 = None
+        for dt in (0.0, 0.066, -0.066, 0.33, -0.33, 1.0):
+            ts = t_ref + dt
+            if ts < t0 - 1e-6 or ts > t1 + 1e-6:
+                continue
+            fr0 = _frame(ts)
+            if fr0 is not None:
+                t_ref = ts
+                break
         if fr0 is None:
+            log("      track: could not READ the video near t=%.1fs — "
+                "cannot start tracking there (is the clip shorter than "
+                "expected?)" % t_ref)
             cap.release()
             return []
         sm0 = cv2.resize(fr0, None, fx=scale, fy=scale)
@@ -2244,6 +2368,69 @@ def _blur_yuv10(y, u, v, x1, y1, x2, y2, mode, shape="rect"):
     _fill(v, cx1, cy1, cx2, cy2, 512, 15)
 
 
+def _blur_silhouette_yuv10(y, u, v, x1, y1, x2, y2, mode, polys,
+                           poly_box, pad_px=0):
+    """blur_silhouette for the 10-bit planar HDR path: rasterize the
+    silhouette at luma resolution and redact each plane only inside the
+    (dilated) mask — untouched pixels never leave the native YUV domain.
+    Degenerate masks fall back to the full box (fail closed), exactly
+    like the SDR version."""
+    h, w = y.shape
+    x1i, y1i = max(0, int(x1)), max(0, int(y1))
+    x2i, y2i = min(w, int(x2)), min(h, int(y2))
+    if x2i <= x1i or y2i <= y1i:
+        return
+    if not polys:
+        _blur_yuv10(y, u, v, x1, y1, x2, y2, mode)
+        return
+    pbx1, pby1, pbx2, pby2 = poly_box
+    pbw, pbh = max(1.0, pbx2 - pbx1), max(1.0, pby2 - pby1)
+    rw, rh = x2i - x1i, y2i - y1i
+    mask = np.zeros((rh, rw), np.uint8)
+    for pts in polys:
+        arr = np.array([[int(round(float(qx) * pbw + pbx1)) - x1i,
+                         int(round(float(qy) * pbh + pby1)) - y1i]
+                        for qx, qy in pts], np.int32)
+        if len(arr) >= 3:
+            cv2.fillPoly(mask, [arr], 255)
+    if not mask.any():
+        _blur_yuv10(y, u, v, x1, y1, x2, y2, mode)     # fail closed
+        return
+    if pad_px > 0:
+        k = 2 * int(pad_px) + 1
+        mask = cv2.dilate(mask, np.ones((k, k), np.uint8))
+
+    def _fill_masked(plane, px1, py1, px2, py2, black, kmin):
+        if px2 <= px1 or py2 <= py1:
+            return
+        roi = plane[py1:py2, px1:px2]
+        if mode == "box":
+            filled = np.full_like(roi, black)
+        elif mode == "mosaic":
+            fw = max(2, (px2 - px1) // 14)
+            small = cv2.resize(roi, (max(1, (px2 - px1) // fw),
+                                     max(1, (py2 - py1) // fw)),
+                               interpolation=cv2.INTER_LINEAR)
+            filled = cv2.resize(small, (px2 - px1, py2 - py1),
+                                interpolation=cv2.INTER_NEAREST)
+        else:
+            k = max(kmin, (((px2 - px1) // 3) | 1))
+            filled = cv2.GaussianBlur(roi, (k, k), 0)
+        m = mask
+        if m.shape != roi.shape:            # chroma planes are half-res
+            m = cv2.resize(mask, (roi.shape[1], roi.shape[0]),
+                           interpolation=cv2.INTER_NEAREST)
+        roi[m > 0] = filled[m > 0]
+
+    _fill_masked(y, x1i, y1i, x2i, y2i, 64, 31)
+    _fill_masked(u, x1i // 2, y1i // 2,
+                 min(u.shape[1], (x2i + 1) // 2),
+                 min(u.shape[0], (y2i + 1) // 2), 512, 15)
+    _fill_masked(v, x1i // 2, y1i // 2,
+                 min(v.shape[1], (x2i + 1) // 2),
+                 min(v.shape[0], (y2i + 1) // 2), 512, 15)
+
+
 def _dedupe_dense(act):
     """Dense track samples are POSITION SNAPSHOTS whose spans carry a
     small grace overlap; a frame covered by TWO snapshots of the same
@@ -2271,10 +2458,6 @@ def render_hdr(src, dst, detections, cum, bands, fps, pad, mode,
     source's color tags (PQ/HLG + BT.2020) carried over. `hvc1` tagging
     keeps QuickTime/Apple players happy. No preview mode — previews use
     the SDR copy."""
-    if any(getattr(d, "poly", ()) for d in detections):
-        print("      NOTE: silhouette masks are not supported in the 10-bit "
-              "HDR render yet — person detections use full-box redaction "
-              "here (over-blur, never under).")
     mode_map = mode_map or {}
     def _mode_for(cat):
         return mode_map.get(cat, mode)
@@ -2353,11 +2536,19 @@ def render_hdr(src, dst, detections, cum, bands, fps, pad, mode,
         for d in _dedupe_dense(act):
             drift = min(24.0, 0.05 * (abs(ox - d.aoff[0]) + abs(oy - d.aoff[1])))
             px = pad + drift
-            _blur_yuv10(y, u, v, d.cbox[0] + ox - px, d.cbox[1] + oy - px,
-                        d.cbox[2] + ox + px, d.cbox[3] + oy + px,
-                        _mode_for(d.category),
-                        shape=("ellipse" if d.category == "face"
-                               and face_shape == "ellipse" else "rect"))
+            if d.poly:
+                _blur_silhouette_yuv10(
+                    y, u, v, d.cbox[0] + ox - px, d.cbox[1] + oy - px,
+                    d.cbox[2] + ox + px, d.cbox[3] + oy + px,
+                    _mode_for(d.category), d.poly,
+                    (d.cbox[0] + ox, d.cbox[1] + oy,
+                     d.cbox[2] + ox, d.cbox[3] + oy), pad_px=px)
+            else:
+                _blur_yuv10(y, u, v, d.cbox[0] + ox - px, d.cbox[1] + oy - px,
+                            d.cbox[2] + ox + px, d.cbox[3] + oy + px,
+                            _mode_for(d.category),
+                            shape=("ellipse" if d.category == "face"
+                                   and face_shape == "ellipse" else "rect"))
 
         bx, by = bands[min(idx, len(bands) - 1)]
         vals = set(mode_map.values()) | {mode}
