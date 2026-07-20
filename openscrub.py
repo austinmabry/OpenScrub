@@ -1258,103 +1258,129 @@ def _track_person_dense(video, box, t_ref, t0, t1, det, log,
     def _poly(d):
         return tuple(d[5]) if len(d) > 5 and d[5] else ()
 
+    def _cls(d):
+        return int(d[6]) if len(d) > 6 else 0
+
     fr0 = _frame(t_ref)
     if fr0 is None:
         cap.release()
         return []
-    dbox = tuple(float(v) for v in box)
-    darea = max((dbox[2] - dbox[0]) * (dbox[3] - dbox[1]), 1e-9)
-    best, bsc = None, 0.0
-    for d in det.find(fr0):
-        db = tuple(float(v) for v in d[:4])
-        ovx = max(0.0, min(dbox[2], db[2]) - max(dbox[0], db[0]))
-        ovy = max(0.0, min(dbox[3], db[3]) - max(dbox[1], db[1]))
-        # IoU plus how much of the DRAWN box the person covers — a tight
-        # torso-only box around a full body still seeds cleanly
-        sc = _iou(dbox, db) + 0.5 * (ovx * ovy) / darea
-        if sc > bsc:
-            best, bsc = d, sc
-    if best is None or bsc < 0.15:
-        cap.release()
-        return []
-    log("      track: person detected under the drawn box — following "
-        "THAT person with body-tight masks")
-    seed = tuple(float(v) for v in best[:4])
-    samples = [(t_ref, seed, float(best[4]), _poly(best))]
-    _last_log = time.time()
-    for direction in (1, -1):
-        cur = list(seed)
-        held = False
-        t = t_ref
-        if direction == 1:      # forward: sequential reads, no re-seeking
-            cap.set(cv2.CAP_PROP_POS_MSEC, max(t_ref, 0.0) * 1000)
-            cap.read()
-        while True:
-            t2 = t + direction * step
-            if t2 < t0 - 1e-6 or t2 > t1 + 1e-6:
-                break
-            if direction == 1:
-                fr = None
-                for _ in range(max(1, int(step_frames))):
-                    ok0, f0 = cap.read()
-                    if not ok0:
-                        fr = None
-                        break
-                    fr = f0
-            else:
-                fr = _frame(t2)
-            if fr is None:
-                break
-            dets = det.find(fr)
-            pick, bi = None, 0.0
-            for d in dets:
-                i = _iou(cur, [float(v) for v in d[:4]])
-                if i > bi:
-                    pick, bi = d, i
-            if pick is None:
-                # overlap broke (fast motion): nearest within half a
-                # box-size — beyond that reach it's a DIFFERENT person
-                reach = 0.5 * max(cur[2] - cur[0], cur[3] - cur[1])
-                nearest = None
-                for d in dets:
-                    db = [float(v) for v in d[:4]]
-                    dx = (db[0] + db[2]) / 2 - (cur[0] + cur[2]) / 2
-                    dy = (db[1] + db[3]) / 2 - (cur[1] + cur[3]) / 2
-                    dist = (dx * dx + dy * dy) ** 0.5
-                    if dist <= reach and (nearest is None
-                                          or dist < nearest[0]):
-                        nearest = (dist, d)
-                if nearest is not None:
-                    pick = nearest[1]
-            elif bi < 0.10:
-                pick = None     # sliver overlap = adjacent person brushing
-            if pick is None:
-                if not held:
-                    held = True
-                    if _center_off(cur):
-                        log("      track: person left the frame at "
-                            "t=%.1fs — coverage ends there" % t2)
-                        break
-                    log("      track: person not detected at t=%.1fs — "
-                        "blur holds its last position until re-detected"
-                        % t2)
-                samples.append((t2, tuple(cur), 0.0, ()))
-            else:
-                held = False
-                cur = [float(v) for v in pick[:4]]
-                if _center_off(cur):
-                    log("      track: person left the frame at t=%.1fs — "
-                        "coverage ends there" % t2)
+    # tracking mode: decode EVERY COCO class — the drawn box may hold a
+    # person, a bird, a ball, a laptop… whatever it is, follow THAT
+    prev_any = getattr(det, "want_any", False)
+    det.want_any = True
+    try:
+        dbox = tuple(float(v) for v in box)
+        darea = max((dbox[2] - dbox[0]) * (dbox[3] - dbox[1]), 1e-9)
+        best, bsc = None, 0.0
+        for d in det.find(fr0):
+            db = tuple(float(v) for v in d[:4])
+            ovx = max(0.0, min(dbox[2], db[2]) - max(dbox[0], db[0]))
+            ovy = max(0.0, min(dbox[3], db[3]) - max(dbox[1], db[1]))
+            # IoU plus how much of the DRAWN box the object covers — a
+            # tight torso-only box around a full body still seeds cleanly
+            sc = _iou(dbox, db) + 0.5 * (ovx * ovy) / darea
+            if sc > bsc:
+                best, bsc = d, sc
+        if best is None or bsc < 0.15:
+            return []
+        tcls = _cls(best)
+        tname = (COCO_NAMES[tcls] if 0 <= tcls < len(COCO_NAMES)
+                 else "object")
+        log("      track: %s detected under the drawn box — following "
+            "THAT %s with detector-tight masks" % (tname, tname))
+        seed = tuple(float(v) for v in best[:4])
+        samples = [(t_ref, seed, float(best[4]), _poly(best), tcls)]
+        _last_log = time.time()
+        for direction in (1, -1):
+            cur = list(seed)
+            held = False
+            vx = vy = 0.0       # last step's motion, for fast movers
+            t = t_ref
+            if direction == 1:  # forward: sequential reads, no re-seeking
+                cap.set(cv2.CAP_PROP_POS_MSEC, max(t_ref, 0.0) * 1000)
+                cap.read()
+            while True:
+                t2 = t + direction * step
+                if t2 < t0 - 1e-6 or t2 > t1 + 1e-6:
                     break
-                samples.append((t2, tuple(cur), float(pick[4]),
-                                _poly(pick)))
-            if time.time() - _last_log >= 3.0:
-                _last_log = time.time()
-                log("        …tracking %s to t=%.1fs (%d samples)"
-                    % ("forward" if direction > 0 else "backward",
-                       t2, len(samples)))
-            t = t2
-    cap.release()
+                if direction == 1:
+                    fr = None
+                    for _ in range(max(1, int(step_frames))):
+                        ok0, f0 = cap.read()
+                        if not ok0:
+                            fr = None
+                            break
+                        fr = f0
+                else:
+                    fr = _frame(t2)
+                if fr is None:
+                    break
+                # associate against the VELOCITY-PREDICTED position: a
+                # kicked ball crosses several box-widths per step — pure
+                # last-position overlap would lose it instantly
+                pred = [cur[0] + vx, cur[1] + vy,
+                        cur[2] + vx, cur[3] + vy]
+                dets = [d for d in det.find(fr) if _cls(d) == tcls]
+                pick, bi = None, 0.0
+                for d in dets:
+                    i = _iou(pred, [float(v) for v in d[:4]])
+                    if i > bi:
+                        pick, bi = d, i
+                if pick is None:
+                    # overlap broke: nearest within half a box-size plus
+                    # the distance just travelled — beyond that reach a
+                    # same-class detection is a DIFFERENT object
+                    reach = (0.5 * max(cur[2] - cur[0], cur[3] - cur[1])
+                             + 1.5 * (vx * vx + vy * vy) ** 0.5)
+                    nearest = None
+                    for d in dets:
+                        db = [float(v) for v in d[:4]]
+                        dx = (db[0] + db[2]) / 2 - (pred[0] + pred[2]) / 2
+                        dy = (db[1] + db[3]) / 2 - (pred[1] + pred[3]) / 2
+                        dist = (dx * dx + dy * dy) ** 0.5
+                        if dist <= reach and (nearest is None
+                                              or dist < nearest[0]):
+                            nearest = (dist, d)
+                    if nearest is not None:
+                        pick = nearest[1]
+                elif bi < 0.10:
+                    pick = None     # sliver overlap = neighbour brushing
+                if pick is None:
+                    if not held:
+                        held = True
+                        vx = vy = 0.0
+                        if _center_off(cur):
+                            log("      track: %s left the frame at "
+                                "t=%.1fs — coverage ends there"
+                                % (tname, t2))
+                            break
+                        log("      track: %s not detected at t=%.1fs — "
+                            "blur holds its last position until "
+                            "re-detected" % (tname, t2))
+                    samples.append((t2, tuple(cur), 0.0, (), tcls))
+                else:
+                    nb = [float(v) for v in pick[:4]]
+                    if not held:
+                        vx = ((nb[0] + nb[2]) - (cur[0] + cur[2])) / 2
+                        vy = ((nb[1] + nb[3]) - (cur[1] + cur[3])) / 2
+                    held = False
+                    cur = nb
+                    if _center_off(cur):
+                        log("      track: %s left the frame at t=%.1fs — "
+                            "coverage ends there" % (tname, t2))
+                        break
+                    samples.append((t2, tuple(cur), float(pick[4]),
+                                    _poly(pick), tcls))
+                if time.time() - _last_log >= 3.0:
+                    _last_log = time.time()
+                    log("        …tracking %s to t=%.1fs (%d samples)"
+                        % ("forward" if direction > 0 else "backward",
+                           t2, len(samples)))
+                t = t2
+    finally:
+        det.want_any = prev_any
+        cap.release()
     samples.sort(key=lambda s: s[0])
     return samples
 
@@ -1425,10 +1451,19 @@ def track_manual_region(video, box, t_ref, t0, t1, cb=None,
                 "the generic tracker" % e)
             ps = []
         if ps:
-            cap.release()
-            return ps
-        log("      track: no person found under the drawn box — "
-            "tracking it as a generic object")
+            live = sum(1 for x in ps if x[2] > 0.0) / float(len(ps))
+            if live >= 0.5:
+                cap.release()
+                return ps
+            # the detector barely sees this object (marginal class, odd
+            # angle) — frozen coverage would win over live tracking.
+            # The generic tracker follows pixels and will do better.
+            log("      track: the detector only saw the object in %d%% "
+                "of frames — using the generic tracker instead"
+                % round(live * 100))
+        else:
+            log("      track: nothing recognizable under the drawn box — "
+                "tracking the region as a generic object")
 
     samples = [(t_ref, (float(box[0]), float(box[1]),
                         float(box[2]), float(box[3])), 1.0)]
@@ -2875,6 +2910,22 @@ def download_plate_model(entry, dest_dir=None, cb=None, progress=None):
                           progress=progress)
 
 
+COCO_NAMES = (
+    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train",
+    "truck", "boat", "traffic light", "fire hydrant", "stop sign",
+    "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep",
+    "cow", "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella",
+    "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard",
+    "sports ball", "kite", "baseball bat", "baseball glove", "skateboard",
+    "surfboard", "tennis racket", "bottle", "wine glass", "cup", "fork",
+    "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange",
+    "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair",
+    "couch", "potted plant", "bed", "dining table", "toilet", "tv",
+    "laptop", "mouse", "remote", "keyboard", "cell phone", "microwave",
+    "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase",
+    "scissors", "teddy bear", "hair drier", "toothbrush")
+
+
 class PlateDetector:
     """License-plate detector using a single-class YOLO ONNX model (no PyTorch
     / ultralytics dependency at runtime).
@@ -2915,6 +2966,8 @@ class PlateDetector:
         self.log = (cb.log if cb else print)
         self.INPUT = int(input_size)
         self.thresh = float(thresh)
+        self.want_any = False   # tracking mode: decode EVERY class,
+                                # rows gain (poly, cls) tail elements
         self.nms = float(nms)
         self.expand = float(expand)
         self.net = None          # OpenCV DNN backend (raw-head models)
@@ -3123,8 +3176,10 @@ class PlateDetector:
                                              float(r[2]), float(r[3]),
                                              float(r[4]))
                     kls = float(r[5]) if len(r) > 5 else 0.0
-                # multi-class COCO models (person): keep ONLY the wanted class
-                if self.WANT_CLASS is not None and int(kls) != self.WANT_CLASS:
+                # multi-class COCO models (person): keep ONLY the wanted
+                # class — unless want_any (object tracking) keeps them all
+                if (not self.want_any and self.WANT_CLASS is not None
+                        and int(kls) != self.WANT_CLASS):
                     continue
                 if score < self.thresh:
                     continue
@@ -3132,17 +3187,24 @@ class PlateDetector:
                 bx1, by1, bx2, by2 = x1 / s, y1 / s, x2 / s, y2 / s
                 bw, bh = bx2 - bx1, by2 - by1
                 ex, ey = bw * self.expand, bh * self.expand
-                res.append((max(0.0, bx1 - ex), max(0.0, by1 - ey),
-                            min(float(w), bx2 + ex), min(float(h), by2 + ey),
-                            round(score, 3)))
+                row = (max(0.0, bx1 - ex), max(0.0, by1 - ey),
+                       min(float(w), bx2 + ex), min(float(h), by2 + ey),
+                       round(score, 3))
+                res.append(row + ((), int(kls)) if self.want_any else row)
             return res
 
         # raw YOLOv8 head: (5, 8400) -> transpose to per-box rows
         if out.shape[0] < out.shape[1]:
             out = out.T
-        boxes, scores = [], []
+        nc = out.shape[1] - 4
+        boxes, scores, klss = [], [], []
         for row in out:
-            score = float(row[4 + (self.WANT_CLASS or 0)])
+            if self.want_any and nc > 1:
+                kls = int(np.argmax(row[4:4 + nc]))
+                score = float(row[4 + kls])
+            else:
+                kls = self.WANT_CLASS or 0
+                score = float(row[4 + kls])
             if score < self.thresh:
                 continue
             cx, cy, bw, bh = row[0], row[1], row[2], row[3]
@@ -3150,15 +3212,22 @@ class PlateDetector:
             y = (cy - bh / 2) / s
             boxes.append([int(x), int(y), int(bw / s), int(bh / s)])
             scores.append(score)
+            klss.append(kls)
         if not boxes:
             return []
-        idxs = cv2.dnn.NMSBoxes(boxes, scores, self.thresh, self.nms)
+        # class-aware NMS (offset trick): a ball held by a person must not
+        # be suppressed by the person's box
+        nboxes = ([[b[0] + k * 8192, b[1] + k * 8192, b[2], b[3]]
+                   for b, k in zip(boxes, klss)]
+                  if self.want_any else boxes)
+        idxs = cv2.dnn.NMSBoxes(nboxes, scores, self.thresh, self.nms)
         for i in np.array(idxs).flatten():
             bx, by, bw, bh = boxes[i]
             ex, ey = int(bw * self.expand), int(bh * self.expand)
             x1 = max(0, bx - ex); y1 = max(0, by - ey)
             x2 = min(w, bx + bw + ex); y2 = min(h, by + bh + ey)
-            res.append((float(x1), float(y1), float(x2), float(y2), scores[i]))
+            row = (float(x1), float(y1), float(x2), float(y2), scores[i])
+            res.append(row + ((), klss[i]) if self.want_any else row)
         return res
 
 
@@ -3293,9 +3362,14 @@ class PersonDetector(PlateDetector):
         if nc < 1:
             return []
         ccol = 4 + (self.WANT_CLASS or 0)
-        boxes, scores, coefs = [], [], []
+        boxes, scores, coefs, klss = [], [], [], []
         for r in det:
-            score = float(r[ccol])
+            if self.want_any and nc > 1:
+                kls = int(np.argmax(r[4:4 + nc]))
+                score = float(r[4 + kls])
+            else:
+                kls = self.WANT_CLASS or 0
+                score = float(r[ccol])
             if score < self.thresh:
                 continue
             cx, cy, bw, bh = (float(r[0]), float(r[1]),
@@ -3304,9 +3378,14 @@ class PersonDetector(PlateDetector):
                           int(bw), int(bh)])
             scores.append(score)
             coefs.append(np.asarray(r[4 + nc:4 + nc + 32], np.float32))
+            klss.append(kls)
         if not boxes:
             return []
-        idxs = cv2.dnn.NMSBoxes(boxes, scores, self.thresh, self.nms)
+        # class-aware NMS (offset trick) in want_any tracking mode
+        nboxes = ([[b[0] + k * 8192, b[1] + k * 8192, b[2], b[3]]
+                   for b, k in zip(boxes, klss)]
+                  if self.want_any else boxes)
+        idxs = cv2.dnn.NMSBoxes(nboxes, scores, self.thresh, self.nms)
         proto = np.asarray(proto, np.float32)
         ph, pw = proto.shape[2], proto.shape[3]
         P = proto[0].reshape(32, -1)
@@ -3343,8 +3422,9 @@ class PersonDetector(PlateDetector):
                 polys.append(tuple(
                     (round(float(a), 4), round(float(b), 4))
                     for a, b in zip(qx, qy)))
-            res.append((rx1, ry1, rx2, ry2, round(scores[i], 3),
-                        tuple(polys)))
+            row = (rx1, ry1, rx2, ry2, round(scores[i], 3),
+                   tuple(polys))
+            res.append(row + (klss[i],) if self.want_any else row)
         return res
 
 
@@ -5212,7 +5292,7 @@ def run_scan(args, cb=None):
             try:
                 track_det = PersonDetector(
                     cb, model_path=getattr(args, "person_model", None),
-                    thresh=0.35)
+                    thresh=0.2)    # drawn box = strong prior: seed low
             except Exception:
                 track_det = None
         if track_det is not None and track_det.net is None \
@@ -5220,8 +5300,9 @@ def run_scan(args, cb=None):
             track_det = None
         if track_det is None:
             cb.log("      tip: with a person model installed (Detection "
-                   "models panel), a drawn box containing a person gets "
-                   "body-tight person tracking")
+                   "models panel), a drawn box containing a person, "
+                   "animal, ball or other common object gets "
+                   "detector-tight tracking")
         tid = max([d.track for d in detections] + [n_tracks - 1]) + 1
         step_t = 2.0 / max(fps, 1.0)
         for (tt0, tt1, tbox, tref) in track_jobs:
@@ -5233,7 +5314,10 @@ def run_scan(args, cb=None):
                        "a frame where the object is clearer")
                 continue
             new = []
-            is_person = len(samples[0]) > 3
+            tcls = samples[0][4] if len(samples[0]) > 4 else None
+            label = ("tracked %s" % COCO_NAMES[tcls]
+                     if tcls is not None and 0 <= tcls < len(COCO_NAMES)
+                     else "tracked object")
             for s in samples:
                 t, b, score = s[0], s[1], s[2]
                 poly = tuple(s[3]) if len(s) > 3 and s[3] else ()
@@ -5243,9 +5327,7 @@ def run_scan(args, cb=None):
                     t, t + step_t * 1.2,
                     (int(b[0] - ox), int(b[1] - oy),
                      int(b[2] - ox), int(b[3] - oy)),
-                    "manual",
-                    "tracked person" if is_person else "tracked object",
-                    round(float(score), 3),
+                    "manual", label, round(float(score), 3),
                     (ox, oy), last_seen=t, dense=True, track=tid,
                     poly=poly))
             # grace pads: cover the sub-sample sliver at both ends

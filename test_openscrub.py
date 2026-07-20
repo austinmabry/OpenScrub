@@ -1504,8 +1504,8 @@ def test_track_person_detector_path(tmp_path):
 
     s = openscrub.track_manual_region(v, (218, 148, 282, 212), 2.0,
                                       1.0, 4.0, person_det=StubDet())
-    assert s and len(s[0]) == 4 and s[0][3], \
-        "person path must return silhouette-bearing samples"
+    assert s and len(s[0]) >= 4 and s[0][3], \
+        "detector path must return silhouette-bearing samples"
     mid = min(s, key=lambda q: abs(q[0] - 3.0))  # true x at t=3.0 is 310
     assert abs(mid[1][0] - 310) < 20, "must follow the seeded person"
     for q in s:

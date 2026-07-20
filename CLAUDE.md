@@ -262,23 +262,33 @@ Key classes/functions (locate with grep, line numbers drift):
   `const CATS`/`CATDN` (review rendering + the alignment rule) even
   though the homepage checkbox grid is gone.
 - Targeted redaction: `track_manual_region` tracks a user-drawn box
-  through a chosen time window (both directions from t_ref). PERSON
+  through a chosen time window (both directions from t_ref). DETECTOR
   path first: when a person model is available (both callers resolve
   one — run_scan reuses `personer` or loads a dedicated det at
-  thresh=0.35; the web track_object endpoint resolves the panel
-  selection), `_track_person_dense` seeds on the person detection best
+  thresh=0.2, the drawn box being a strong prior; the web track_object
+  endpoint resolves the panel selection), `_track_person_dense` decodes
+  EVERY COCO class (`det.want_any=True` — the "person" registry models
+  are 80-class COCO: bird=14, sports ball=32…; `_decode`/`_decode_seg`
+  gain argmax-class mode + class-aware NMS via the coordinate-offset
+  trick so a ball held by a person isn't suppressed; rows grow (poly,
+  cls) tails, `COCO_NAMES` maps ids), seeds on the detection best
   overlapping the drawn box (IoU + covered-fraction >= 0.15; no match →
-  generic tracker) and follows THAT person with per-frame detections:
-  body-tight boxes + silhouette polys (4-tuple samples (t,box,score,
-  poly) vs the generic 3-tuples; text "tracked person"; Detection.poly
-  → blur_silhouette, so the blur hugs the body — validated frame-by-
-  frame on real footage where it never jumped to an adjacent person).
-  Association = best IoU vs last box (sliver <0.10 rejected — adjacent
-  person brushing past), else nearest within 0.5×box-size reach (same
-  cannot-jump rule as dense person tracks); a miss FREEZES the box
+  generic tracker) and follows THAT object with per-frame detections of
+  the SAME class only: detector-tight boxes + silhouette polys (5-tuple
+  samples (t,box,score,poly,cls) vs the generic 3-tuples; review text
+  "tracked <classname>"; Detection.poly → blur_silhouette — validated
+  frame-by-frame on real footage where it never jumped to an adjacent
+  person). Association is VELOCITY-PREDICTED (match against the box
+  shifted by the last step's motion; reach = 0.5×box-size + 1.5×|v| —
+  a kicked ball crosses several box-widths per step), sliver overlaps
+  <0.10 rejected (neighbour brushing past); a miss FREEZES the box
   (score 0, NO stale poly — full-box blur) until re-detection or window
-  edge; ends early only when the person's box center leaves the frame.
-  GENERIC path (non-person objects, no person model): cv2.TrackerVit
+  edge; ends early only when the box center leaves the frame. LIVE-
+  FRACTION GATE: if the detector saw the object in <50% of steps (a
+  marginal class at 0.2 conf flickers), the whole attempt is DISCARDED
+  for the generic tracker — frozen coverage must not beat live pixel
+  tracking (a synthetic ball hit exactly this).
+  GENERIC path (unrecognized objects, no person model): cv2.TrackerVit
   (OpenCV >= 4.9) + the opencv_zoo vittrack model
   (~0.7MB, Apache-2.0, auto-downloaded via `_fetch_model` with pinned
   VITTRACK_SHA256, baked into both Docker images) — survives scale

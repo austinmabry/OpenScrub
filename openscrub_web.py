@@ -929,7 +929,7 @@ def job_track_object(jid):
                 mid = load_model_select().get("person")
                 p = find_model_file("%s.onnx" % mid) if mid else None
                 det = openscrub.PersonDetector(L(), model_path=p,
-                                               thresh=0.35)
+                                               thresh=0.2)
                 if det.net is None and det.ort is None:
                     det = None
             except Exception:
@@ -948,7 +948,11 @@ def job_track_object(jid):
             tid = max([d.get("track", -1) for d in doc["detections"]]
                       + [-1]) + 1
             new = []
-            is_person = len(samples[0]) > 3
+            tcls = samples[0][4] if len(samples[0]) > 4 else None
+            label = ("tracked %s" % openscrub.COCO_NAMES[tcls]
+                     if tcls is not None
+                     and 0 <= tcls < len(openscrub.COCO_NAMES)
+                     else "tracked object")
             for s in samples:
                 t, b, score = s[0], s[1], s[2]
                 poly = s[3] if len(s) > 3 and s[3] else ()
@@ -958,9 +962,7 @@ def job_track_object(jid):
                     "t_start": t, "t_end": t + step * 1.2,
                     "cbox": [int(b[0] - ox), int(b[1] - oy),
                              int(b[2] - ox), int(b[3] - oy)],
-                    "category": "manual",
-                    "text": ("tracked person" if is_person
-                             else "tracked object"),
+                    "category": "manual", "text": label,
                     "confidence": round(float(score), 3),
                     "aoff": [ox, oy], "last_seen": t,
                     "dense": True, "track": tid, "enabled": True,
