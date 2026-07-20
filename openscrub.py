@@ -35,7 +35,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.55"
+VERSION = "1.0.56"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -1209,6 +1209,41 @@ def _vittrack_factory(log):
     return make
 
 
+def _grab_frame(cap, t, fps):
+    """Fetch the frame at time t from an open VideoCapture, ROBUSTLY.
+
+    `cap.set(POS_MSEC)` + read is the fast path, but random-access seeks
+    to deep timestamps FAIL on some codec/build combinations (h264_nvenc
+    HDR-tonemapped copies in the CUDA image's OpenCV did exactly this —
+    every seek near 19.9s returned nothing, so a tracking window silently
+    failed to seed). The render never hit it because it decodes the file
+    SEQUENTIALLY through an ffmpeg pipe. So the fallback here mirrors that:
+    seek by FRAME INDEX (more reliable than POS_MSEC) to a point before
+    the target and decode forward — ultimately from frame 0, which is
+    guaranteed to work for any file the renderer can decode. Returns the
+    frame or None."""
+    cap.set(cv2.CAP_PROP_POS_MSEC, max(t, 0.0) * 1000)
+    ok, fr = cap.read()
+    if ok and fr is not None:
+        return fr
+    target = int(round(max(t, 0.0) * (fps or 30.0)))
+    for back in (int((fps or 30.0)), int(4 * (fps or 30.0)),
+                 int(12 * (fps or 30.0)), target):
+        start = max(0, target - back)
+        if not cap.set(cv2.CAP_PROP_POS_FRAMES, float(start)):
+            continue
+        fr = None
+        for _ in range(start, target + 1):
+            ok, f = cap.read()
+            if not ok:
+                fr = None
+                break
+            fr = f
+        if fr is not None:
+            return fr
+    return None
+
+
 def _iou(a, b):
     ix1, iy1 = max(a[0], b[0]), max(a[1], b[1])
     ix2, iy2 = min(a[2], b[2]), min(a[3], b[3])
@@ -1247,9 +1282,7 @@ def _track_person_dense(video, box, t_ref, t0, t1, det, log,
     H = cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0
 
     def _frame(t):
-        cap.set(cv2.CAP_PROP_POS_MSEC, max(t, 0.0) * 1000)
-        ok, fr = cap.read()
-        return fr if ok else None
+        return _grab_frame(cap, t, fps)
 
     def _center_off(b):
         cx, cy = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
@@ -1328,8 +1361,9 @@ def _track_person_dense(video, box, t_ref, t0, t1, det, log,
             hold_steps = 0
             t = t_ref
             if direction == 1:  # forward: sequential reads, no re-seeking
-                cap.set(cv2.CAP_PROP_POS_MSEC, max(t_ref, 0.0) * 1000)
-                cap.read()
+                # robust prime: positions the decoder just past t_ref's
+                # frame even when random POS_MSEC seek fails on this file
+                _grab_frame(cap, t_ref, fps)
             while True:
                 t2 = t + direction * step
                 if t2 < t0 - 1e-6 or t2 > t1 + 1e-6:
@@ -1535,9 +1569,7 @@ def track_manual_region(video, box, t_ref, t0, t1, cb=None,
     H = cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0
 
     def _frame(t):
-        cap.set(cv2.CAP_PROP_POS_MSEC, max(t, 0.0) * 1000)
-        ok, fr = cap.read()
-        return fr if ok else None
+        return _grab_frame(cap, t, fps)
 
     def _left_frame(b):
         # the object is gone only when the box CENTER walks off-screen —
@@ -1625,8 +1657,9 @@ def track_manual_region(video, box, t_ref, t0, t1, cb=None,
             held = False
             t = t_ref
             if direction == 1:  # forward: sequential reads, no re-seeking
-                cap.set(cv2.CAP_PROP_POS_MSEC, max(t_ref, 0.0) * 1000)
-                cap.read()
+                # robust prime: positions the decoder just past t_ref's
+                # frame even when random POS_MSEC seek fails on this file
+                _grab_frame(cap, t_ref, fps)
             while True:
                 t2 = t + direction * step
                 if t2 < t0 - 1e-6 or t2 > t1 + 1e-6:

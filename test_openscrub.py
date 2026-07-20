@@ -1530,3 +1530,39 @@ def test_render_dedupes_overlapping_dense_samples():
     n1 = openscrub.Detection(0, 1, (0, 0, 5, 5), "name", "x", 0.9)
     n2 = openscrub.Detection(0, 1, (8, 8, 12, 12), "name", "y", 0.9)
     assert openscrub._dedupe_dense([n1, n2]) == [n1, n2]
+
+
+def test_grab_frame_survives_broken_random_seek():
+    """Some codec/build combos (h264_nvenc HDR copies in the CUDA image)
+    fail POS_MSEC random-access seeks to deep timestamps, silently killing
+    a tracking window's seed. _grab_frame must fall back to sequential
+    decode (what the renderer always does) and return the CORRECT frame."""
+    class BrokenSeekCap:
+        def __init__(self, n):
+            self.n = n; self.pos = 0; self.msec = False
+        def set(self, prop, val):
+            if prop == cv2.CAP_PROP_POS_MSEC:
+                self.msec = True; return True
+            if prop == cv2.CAP_PROP_POS_FRAMES:
+                self.pos = int(val); self.msec = False; return True
+            return False
+        def read(self):
+            if self.msec:                       # random seek → broken
+                return (False, None)
+            if self.pos >= self.n:
+                return (False, None)
+            fr = np.full((4, 4, 3), self.pos % 251, np.uint8)
+            self.pos += 1
+            return (True, fr)
+
+    cap = BrokenSeekCap(816)
+    fr = openscrub._grab_frame(cap, 19.9, 30.0)
+    assert fr is not None, "must recover a frame via sequential fallback"
+    assert int(fr[0, 0, 0]) == int(round(19.9 * 30.0)) % 251, \
+        "fallback must return the frame at the requested time"
+
+    # a totally dead capture returns None, never raises
+    class DeadCap:
+        def set(self, prop, val): return True
+        def read(self): return (False, None)
+    assert openscrub._grab_frame(DeadCap(), 5.0, 30.0) is None

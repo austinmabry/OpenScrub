@@ -24,7 +24,7 @@ target is Windows 10 + NVIDIA RTX 3060.
 | `fetch_plate_models.py` | Alt path to fetch plate models via the open-image-models pip package. |
 | `openscrub_update.py` | `openscrub-update` command + web self-update backend: PyPI version check, sha256-verified sdist download, data-preserving folder update (PRESERVE set), TOFU pin carry-forward. Ships in the wheel. |
 | `openscrub_vault.py` | At-rest encryption for the job store: scrypt keystore, chunked AES-256-GCM files (`.osvault`), lock/unlock tree walkers. NO password reset by design. Ships in the wheel. Lock-on-shutdown lives in openscrub_web: a SIGTERM handler (docker stop; locks then os._exit — sys.exit is swallowed by cheroot) + an atexit hook (Ctrl+C; uses the import-time `_HERE` constant because `__file__` is gone during interpreter teardown — both failure modes were real and verified). Encryption must finish inside the container stop grace period (`docker stop -t 120`). |
-| `test_openscrub.py` | pytest suite (51 tests). Must stay green. |
+| `test_openscrub.py` | pytest suite (52 tests). Must stay green. |
 | `deploy/` | App-store submission kit: winget/CasaOS/Runtipi/TrueNAS/Umbrel/Portainer/CapRover/Coolify manifests + a novice-friendly submission guide (deploy/README.md). Platforms with their own reverse proxy get `--http` in the command; direct-port platforms keep default TLS. Bump pinned versions at submission time. |
 | `tools/make_icons.py` | Regenerates every icon/logo asset from `assets/badge_master.png`. |
 | `tools/make_wordmark.py` | Regenerates the typeset Poppins wordmarks (navy + white). |
@@ -299,8 +299,16 @@ Key classes/functions (locate with grep, line numbers drift):
   = samples without a poly when the track has polys) to the union of
   its confident neighbours +15% margin — validated frame-by-frame on
   the dog footage. Seeding survives bad frames: detection is retried at
-  t_ref±(0.33..1.0)s inside the window and read failures are logged
-  loudly (one bad frame at t_ref killed a real window's track). The
+  t_ref±(0.33..1.0)s inside the window, and ALL tracker frame fetches go
+  through `_grab_frame` (module-level): fast POS_MSEC seek, else fall
+  back to POS_FRAMES + SEQUENTIAL decode from an earlier point
+  (ultimately frame 0) — the render's access pattern, guaranteed to work
+  for any decodable file. Random POS_MSEC seeks to deep timestamps FAIL
+  on some codec/build combos (h264_nvenc HDR-tonemapped scan copies in
+  the CUDA image returned nothing near 19.9s, silently failing a second
+  detection window's seed; the render never hit it because it decodes
+  sequentially through an ffmpeg pipe). test_grab_frame_survives_broken_
+  random_seek pins it. The
   detector path samples EVERY frame (step_frames=1): masks repainted at
   a 2-frame cadence visibly STEP/flicker at 15Hz on real footage.
   Renders (SDR + HDR) apply `_dedupe_dense` per frame: dense-track
