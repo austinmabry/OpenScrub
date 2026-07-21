@@ -87,6 +87,10 @@ Key classes/functions (locate with grep, line numbers drift):
   (`_decode_seg`: sigmoid(coeffs @ protos), crop, threshold 0.5,
   approxPolyDP) — stored on `Detection.poly` (report-additive) and
   rendered by `blur_silhouette` which masks ONLY inside the contours.
+  The seg mask is cropped to the EXPANDED detection region, not the
+  tight box — the tight crop clipped body parts the mask knew about (a
+  real dog's snout stayed unblurred at the box edge during an
+  occlusion pass).
   Seg models ALWAYS run on onnxruntime: OpenCV DNN's layer fusion
   asserts AT INFERENCE TIME on multi-output graphs on some builds
   (fuseLayers, 4.10 CUDA) — the load probe can't catch it and it killed
@@ -315,7 +319,17 @@ Key classes/functions (locate with grep, line numbers drift):
   (vscore>=0.35 ∧ IoU(vbox,cur)>=0.20): ride the anchor — but only
   while the detector gap <= 0.8s (rides bridge BLINKS; an unbounded
   ride carried a box around the frame long after the subject left —
-  the floating-blur failure). Both blind, or past a blink's length:
+  the floating-blur failure). Rides paint the LAST live silhouette
+  stretched over the ridden box (+6% for staleness), not a bare
+  rectangle — the object is visible, the detector just blinked, and a
+  block blur over a visible subject reads as "gave up". FRAGMENTS: a
+  small same-class detection (<0.33x ref_a) mostly inside the held box
+  (covered-fraction >= 0.5) is the object PEEKING past an occluder —
+  it never touches identity/ref_a/anchor, but it IS masked: the sample
+  becomes union(held box, fragment) with the fragment's silhouette
+  plus the held box as mask regions (snug on the visible part, covered
+  on the uncertain part), and it resets the loss timers because the
+  object is visibly there. Both blind, or past a blink's length:
   FREEZE the last box CLAMPED to the frame (score 0, NO stale poly —
   full-box blur) for a 0.8s grace, then end. NO nearest-distance
   fallback and NO velocity prediction, ever (both caused real

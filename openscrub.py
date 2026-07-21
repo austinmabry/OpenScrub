@@ -35,7 +35,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.60"
+VERSION = "1.0.61"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -1424,6 +1424,7 @@ def _track_person_dense(video, box, t_ref, t0, t1, det, log,
             held = False
             hold_t = 0.0        # seconds spent frozen (grace timer)
             det_gap = 0.0       # seconds since the last DETECTOR hit
+            last_poly = _poly(best)     # most recent live silhouette
             trk = _anchor_init(seed_frame, seed)
             # reference size for the size-flip guard: grows fast, shrinks
             # SLOWLY — an occlusion sliver must not drag it down, or the
@@ -1486,10 +1487,24 @@ def _track_person_dense(video, box, t_ref, t0, t1, det, log,
                 # No nearest-distance fallback, ever.
                 dets = [d for d in det.find(fr) if _cls(d) == tcls]
                 pick, bi = None, 0.0
+                frag, fcov = None, 0.0
                 for d in dets:
                     db = [float(v) for v in d[:4]]
                     ar = (db[2] - db[0]) * (db[3] - db[1]) / ref_a
                     if not 0.33 <= ar <= 3.0:
+                        if ar < 0.33:
+                            # a small same-class piece mostly inside the
+                            # held box: the object PEEKING past an
+                            # occluder — remember it for masking below
+                            ovx = (min(cur[2], db[2])
+                                   - max(cur[0], db[0]))
+                            ovy = (min(cur[3], db[3])
+                                   - max(cur[1], db[1]))
+                            da = max((db[2] - db[0])
+                                     * (db[3] - db[1]), 1e-9)
+                            fc = max(0.0, ovx) * max(0.0, ovy) / da
+                            if fc > fcov:
+                                frag, fcov = d, fc
                         continue
                     i2 = _iou(cur, db)
                     if i2 > bi:
@@ -1514,8 +1529,9 @@ def _track_person_dense(video, box, t_ref, t0, t1, det, log,
                     cur = [float(v) for v in pick[:4]]
                     na = (cur[2] - cur[0]) * (cur[3] - cur[1])
                     ref_a += (0.5 if na > ref_a else 0.05) * (na - ref_a)
+                    last_poly = _poly(pick)
                     samples.append((t2, tuple(cur), float(pick[4]),
-                                    _poly(pick), tcls))
+                                    last_poly, tcls))
                     # re-anchor EVERY confident hit: drift can never
                     # accumulate past one blink (their SAM2 refreshes its
                     # memory each frame; this is our equivalent)
@@ -1540,12 +1556,63 @@ def _track_person_dense(video, box, t_ref, t0, t1, det, log,
                     hold_t = 0.0
                     det_gap += step
                     cur = vbox
-                    samples.append((t2, tuple(cur),
-                                    round(0.1 * vscore, 3), (), tcls))
+                    # paint the LAST silhouette stretched over the ridden
+                    # box (slightly inflated for staleness) instead of a
+                    # bare rectangle — the object is still visible, the
+                    # detector just blinked, and a block-shaped blur over
+                    # a visible subject reads as "gave up"
+                    ew = 0.06 * (cur[2] - cur[0])
+                    eh = 0.06 * (cur[3] - cur[1])
+                    samples.append((t2, (cur[0] - ew, cur[1] - eh,
+                                         cur[2] + ew, cur[3] + eh),
+                                    round(0.1 * vscore, 3),
+                                    last_poly, tcls))
                     if _center_off(cur):
                         log("      track: %s leaving the frame at t=%.1fs"
                             % (tname, t2))
                         break
+                elif frag is not None and fcov >= 0.5:
+                    # the object is PARTLY visible: a small same-class
+                    # detection sits mostly inside the held box (a head
+                    # peeking past an occluder, on real footage). It must
+                    # never steal identity or resize the track — slivers
+                    # did, badly — but it MUST be masked: emit the union
+                    # of held box and fragment, masking the fragment's
+                    # own silhouette snugly plus the held box as a
+                    # region, so the visible part is covered tight and
+                    # the uncertain part stays covered.
+                    held = False
+                    hold_t = 0.0
+                    det_gap = 0.0       # the object is visibly here
+                    fb = [float(v) for v in frag[:4]]
+                    cc = (max(0.0, cur[0]), max(0.0, cur[1]),
+                          min(float(W), cur[2]), min(float(H), cur[3]))
+                    ub = (min(cc[0], fb[0]), min(cc[1], fb[1]),
+                          max(cc[2], fb[2]), max(cc[3], fb[3]))
+                    uw = max(1e-6, ub[2] - ub[0])
+                    uh = max(1e-6, ub[3] - ub[1])
+                    fpoly = _poly(frag)
+                    if fpoly:
+                        polys = [(((cc[0] - ub[0]) / uw,
+                                   (cc[1] - ub[1]) / uh),
+                                  ((cc[2] - ub[0]) / uw,
+                                   (cc[1] - ub[1]) / uh),
+                                  ((cc[2] - ub[0]) / uw,
+                                   (cc[3] - ub[1]) / uh),
+                                  ((cc[0] - ub[0]) / uw,
+                                   (cc[3] - ub[1]) / uh))]
+                        fw = max(1e-6, fb[2] - fb[0])
+                        fh = max(1e-6, fb[3] - fb[1])
+                        for pts in fpoly:
+                            polys.append(tuple(
+                                ((qx * fw + fb[0] - ub[0]) / uw,
+                                 (qy * fh + fb[1] - ub[1]) / uh)
+                                for qx, qy in pts))
+                        samples.append((t2, ub, float(frag[4]),
+                                        tuple(polys), tcls))
+                    else:
+                        samples.append((t2, ub, float(frag[4]),
+                                        (), tcls))
                 else:
                     # both the detector and the anchor are blind: freeze
                     # the last box CLAMPED to the frame for a short grace,
@@ -3696,8 +3763,17 @@ class PersonDetector(PlateDetector):
             y2i = min(self.INPUT, by + bh)
             if x2i <= x1i or y2i <= y1i:
                 continue
+            # crop the mask to the EXPANDED region the polygons are
+            # normalized to, not the tight box — the tight crop CLIPPED
+            # body parts the mask knew about (a real dog's snout stayed
+            # unblurred at the box edge during an occlusion pass)
+            px_ = int(bw * self.expand)
+            py_ = int(bh * self.expand)
+            mx1, my1 = max(0, bx - px_), max(0, by - py_)
+            mx2 = min(self.INPUT, bx + bw + px_)
+            my2 = min(self.INPUT, by + bh + py_)
             mask = np.zeros((self.INPUT, self.INPUT), np.uint8)
-            mask[y1i:y2i, x1i:x2i] = (m[y1i:y2i, x1i:x2i] > 0.5)                 .astype(np.uint8)
+            mask[my1:my2, mx1:mx2] = (m[my1:my2, mx1:mx2] > 0.5)                 .astype(np.uint8)
             # expanded box in frame coordinates (this becomes cbox)
             fx1, fy1, fx2, fy2 = x1i / s, y1i / s, x2i / s, y2i / s
             ex = (fx2 - fx1) * self.expand
