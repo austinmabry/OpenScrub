@@ -4844,12 +4844,16 @@ def run_scan(args, cb=None):
             # this window after the scan pass and blurred wherever they go
             for tb in (w.get("track") or []):
                 try:
-                    bx = (float(tb[0]) * vw, float(tb[1]) * vh,
-                          float(tb[2]) * vw, float(tb[3]) * vh)
+                    # clamp to the frame: the editor once let a drag run
+                    # past the video's edge (ny2 of 1.82 on a real job) and
+                    # the oversized seed box degraded tracking
+                    bx = [min(vw, max(0.0, float(tb[0]) * vw)),
+                          min(vh, max(0.0, float(tb[1]) * vh)),
+                          min(vw, max(0.0, float(tb[2]) * vw)),
+                          min(vh, max(0.0, float(tb[3]) * vh))]
                     tref = (float(tb[4]) * duration if len(tb) > 4
                             else (t0 + t1) / 2)
-                    track_jobs.append((t0, t1,
-                                       [max(0.0, v) for v in bx],
+                    track_jobs.append((t0, t1, bx,
                                        min(max(tref, t0), t1)))
                 except (TypeError, ValueError, IndexError):
                     continue
@@ -5605,10 +5609,13 @@ def run_scan(args, cb=None):
                 and track_det.ort is None:
             track_det = None
         if track_det is None:
-            cb.log("      tip: with a person model installed (Detection "
-                   "models panel), a drawn box containing a person, "
-                   "animal, ball or other common object gets "
-                   "detector-tight tracking")
+            cb.log("      NOTE: no person/object model is installed on "
+                   "this machine, so tracked objects fall back to the "
+                   "generic tracker — the blur will be a plain BOX that "
+                   "follows the region, not a body-shaped silhouette. "
+                   "For silhouette tracking, open Settings (gear) → "
+                   "Detection models → Person and download a model "
+                   "(e.g. YOLO11n-seg), then re-run the scan.")
         tid = max([d.track for d in detections] + [n_tracks - 1]) + 1
         step_t = 2.0 / max(fps, 1.0)
         for (tt0, tt1, tbox, tref) in track_jobs:

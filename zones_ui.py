@@ -657,8 +657,12 @@ function undoZone(){
 function hookZC(){
  const c=$("zc");
  if(c.dataset.hooked)return;c.dataset.hooked=1;
+ // clamp to the frame: pointer capture keeps reporting past the canvas
+ // edge, and a drag released below the video once stored a rect with
+ // ny2=1.82 — an off-frame seed box that degraded tracking
  const pt=e=>{const r=c.getBoundingClientRect();
-  return [(e.clientX-r.left)/r.width,(e.clientY-r.top)/r.height];};
+  return [Math.max(0,Math.min(1,(e.clientX-r.left)/r.width)),
+          Math.max(0,Math.min(1,(e.clientY-r.top)/r.height))];};
  c.addEventListener("pointerdown",e=>{
   c.setPointerCapture(e.pointerId);prime();
   const p=pt(e);
