@@ -1594,3 +1594,49 @@ def test_scan_copy_frame_verification(tmp_path):
     # acts on a MEASURED mismatch)
     ok, _, _ = openscrub._scan_copy_matches(src, str(tmp_path / "nope.mp4"))
     assert ok
+
+
+def test_grab_frame_repairs_keyframe_snapped_seek():
+    """A real box's OpenCV landed a 20.3s seek at an earlier keyframe and
+    the read SUCCEEDED — the tracker then followed the wrong moment of
+    the video with full confidence (samples 16s off; the blur 'flew
+    away'). _grab_frame must detect the wrong landing via the decoded
+    packet's PTS and walk forward to the exact requested frame."""
+    class SnapCap:
+        GOP = 250
+        def __init__(self, n):
+            self.n = n; self.pos = 0
+        def set(self, prop, val):
+            if prop == cv2.CAP_PROP_POS_MSEC:
+                want = int(round(val / 1000.0 * 30.0))
+            elif prop == cv2.CAP_PROP_POS_FRAMES:
+                want = int(val)
+            else:
+                return False
+            self.pos = (min(max(want, 0), self.n - 1) // self.GOP) * self.GOP
+            return True
+        def get(self, prop):
+            if prop == cv2.CAP_PROP_POS_MSEC:
+                return self.pos / 30.0 * 1000.0      # next frame's PTS
+            if prop == cv2.CAP_PROP_FPS:
+                return 30.0
+            return 0.0
+        def read(self):
+            if self.pos >= self.n:
+                return (False, None)
+            fr = np.full((4, 4, 3), self.pos % 251, np.uint8)
+            self.pos += 1
+            return (True, fr)
+
+    cap = SnapCap(816)
+    fr = openscrub._grab_frame(cap, 20.3, 30.0)
+    assert fr is not None
+    assert int(fr[0, 0, 0]) == int(round(20.3 * 30.0)) % 251, \
+        "must repair a keyframe-snapped landing to the exact frame"
+
+    # _seek_cap must leave the NEXT read at the requested index (this is
+    # what the scan's fast-skip and the trimmed render rely on)
+    cap = SnapCap(816)
+    assert openscrub._seek_cap(cap, 609, 30.0)
+    ok, fr = cap.read()
+    assert ok and int(fr[0, 0, 0]) == 609 % 251

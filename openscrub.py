@@ -35,7 +35,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.59"
+VERSION = "1.0.60"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -1063,12 +1063,13 @@ def smooth_dense_tracks(dets, fps, video, cum=None, win_start=0.0, cb=None):
     if cap is not None and not cap.isOpened():
         cap = None
 
+    _fps_g = (cap.get(cv2.CAP_PROP_FPS) or 30.0) if cap is not None else 30.0
+
     def _gray(t):
         if cap is None:
             return None
-        cap.set(cv2.CAP_PROP_POS_MSEC, max(t, 0.0) * 1000)
-        ok, fr = cap.read()
-        if not ok:
+        fr = _grab_frame(cap, t, _fps_g)     # verified seek (see there)
+        if fr is None:
             return None
         g = cv2.resize(cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY), None,
                        fx=SCALE, fy=SCALE)
@@ -1212,36 +1213,84 @@ def _vittrack_factory(log):
 def _grab_frame(cap, t, fps):
     """Fetch the frame at time t from an open VideoCapture, ROBUSTLY.
 
-    `cap.set(POS_MSEC)` + read is the fast path, but random-access seeks
-    to deep timestamps FAIL on some codec/build combinations (h264_nvenc
-    HDR-tonemapped copies in the CUDA image's OpenCV did exactly this —
-    every seek near 19.9s returned nothing, so a tracking window silently
-    failed to seed). The render never hit it because it decodes the file
-    SEQUENTIALLY through an ffmpeg pipe. So the fallback here mirrors that:
-    seek by FRAME INDEX (more reliable than POS_MSEC) to a point before
-    the target and decode forward — ultimately from frame 0, which is
-    guaranteed to work for any file the renderer can decode. Returns the
-    frame or None."""
+    Seeks are NEVER trusted. `cap.set(POS_MSEC/POS_FRAMES)` lies on some
+    codec/build combos: one build FAILS the read outright (h264_nvenc
+    HDR copies in the CUDA image — every deep seek returned nothing, a
+    tracking window silently failed to seed), another SUCCEEDS but lands
+    many seconds early (a real box landed a 20.3s seek at ~4s; the
+    tracker then followed the wrong moment of the video with perfect
+    confidence and the blur 'flew away' off the subject). After every
+    positioning, the decoded packet's own PTS (CAP_PROP_POS_MSEC after
+    read — it comes from the bitstream and cannot lie) is compared to
+    the request; an early landing is repaired by decoding forward, a
+    late one by seeking earlier, ultimately from frame 0 — the
+    renderer's sequential access pattern, correct on any decodable
+    file. Returns the frame or None."""
+    fps = fps or 30.0
+    target = int(round(max(t, 0.0) * fps))
+
+    def _pts_frame():
+        # index of the frame just decoded, from the reported packet PTS;
+        # -1 when the build reports nothing usable (then we trust frame
+        # arithmetic instead). POS_MSEC after read() is the NEXT frame's
+        # time on most builds, the just-read frame's on others — the ±1
+        # tolerance at the call sites absorbs the difference.
+        try:
+            ms = float(cap.get(cv2.CAP_PROP_POS_MSEC))
+        except Exception:
+            return -1
+        if ms <= 0:
+            return -1
+        return int(round(ms * fps / 1000.0)) - 1
+
+    def _roll_to(fr, got):
+        # decode forward from a verified position to the target
+        while got < target:
+            ok, f = cap.read()
+            if not ok:
+                return None
+            fr, got = f, got + 1
+        return fr
+
     cap.set(cv2.CAP_PROP_POS_MSEC, max(t, 0.0) * 1000)
     ok, fr = cap.read()
     if ok and fr is not None:
-        return fr
-    target = int(round(max(t, 0.0) * (fps or 30.0)))
-    for back in (int((fps or 30.0)), int(4 * (fps or 30.0)),
-                 int(12 * (fps or 30.0)), target):
+        got = _pts_frame()
+        if got < 0 or abs(got - target) <= 1:
+            return fr                   # verified (or unverifiable) hit
+        if got < target:
+            fr = _roll_to(fr, got)      # landed early: walk the gap
+            if fr is not None:
+                return fr
+        # landed past the target (or the walk hit EOF): try from earlier
+    for back in (int(fps), int(4 * fps), int(12 * fps), target):
         start = max(0, target - back)
         if not cap.set(cv2.CAP_PROP_POS_FRAMES, float(start)):
             continue
-        fr = None
-        for _ in range(start, target + 1):
-            ok, f = cap.read()
-            if not ok:
-                fr = None
-                break
-            fr = f
+        ok, fr = cap.read()
+        if not ok or fr is None:
+            continue
+        got = _pts_frame()
+        if got < 0:
+            got = start                 # no PTS: trust frame arithmetic
+        if got > target:
+            continue                    # snapped past: seek earlier
+        fr = _roll_to(fr, got)
         if fr is not None:
             return fr
     return None
+
+
+def _seek_cap(cap, frame_idx, fps):
+    """Position cap so the NEXT read() returns frame_idx — VERIFIED via
+    _grab_frame's PTS check (a bare cap.set can land seconds early on
+    some builds and every frame decoded after it is then mislabeled).
+    Returns False when the position cannot be reached."""
+    frame_idx = max(0, int(frame_idx))
+    if frame_idx == 0:
+        return bool(cap.set(cv2.CAP_PROP_POS_FRAMES, 0.0))
+    fps = fps or 30.0
+    return _grab_frame(cap, (frame_idx - 1) / fps, fps) is not None
 
 
 def _iou(a, b):
@@ -1878,9 +1927,8 @@ def group_persons(dets, video, cb=None):
         feats = []
         for d in best:
             t = min(max(d.last_seen, d.t_start), d.t_end)
-            cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, t) * 1000)
-            ok, fr = cap.read()
-            if not ok:
+            fr = _grab_frame(cap, t, cap.get(cv2.CAP_PROP_FPS) or 30.0)
+            if fr is None:
                 continue
             det.setInputSize((fr.shape[1], fr.shape[0]))
             _, rows = det.detect(fr)
@@ -2722,8 +2770,11 @@ def render(src, dst, detections, cum, bands, fps, pad, mode, preview,
 
     idx = 0
     if clip and clip[0] > 0.5:
-        idx = int(clip[0] * fps)
-        cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+        tgt = int(clip[0] * fps)
+        if _seek_cap(cap, tgt, fps):     # verified — a lying seek would
+            idx = tgt                    # shift the whole trimmed render
+        # unseekable: decode from 0; the undershoot guard below skips
+        # frames before the clip start one by one
     while True:
         if idx % 30 == 0 and cb.cancelled():
             cleanup_partial()
@@ -4991,12 +5042,17 @@ def run_scan(args, cb=None):
     # must be decoded sequentially — offsets accumulate — so no skip there.
     if win_start > 1.0 and not track_on:
         skip_n = max(0, int(win_start * fps) - 1)
-        cap.set(cv2.CAP_PROP_POS_FRAMES, skip_n)
-        cum.extend([(0.0, 0.0)] * skip_n)
-        bands.extend([(0.0, 0.0)] * skip_n)
-        idx = skip_n
-        cb.log(f"      fast-skip: jumped straight to {win_start:.1f}s — "
-               f"{skip_n} frame(s) before the window are not decoded")
+        if _seek_cap(cap, skip_n, fps):
+            cum.extend([(0.0, 0.0)] * skip_n)
+            bands.extend([(0.0, 0.0)] * skip_n)
+            idx = skip_n
+            cb.log(f"      fast-skip: jumped straight to {win_start:.1f}s — "
+                   f"{skip_n} frame(s) before the window are not decoded")
+        else:
+            cap.release()
+            cap = cv2.VideoCapture(args.video)  # unseekable: decode it all
+            cb.log("      fast-skip unavailable on this file — decoding "
+                   "from the start")
     while True:
         if idx % 30 == 0 and cb.cancelled():
             cap.release()
@@ -5021,15 +5077,25 @@ def run_scan(args, cb=None):
                     break
                 if nxt - t_now > 1.5:
                     # gap between windows: seek instead of decoding it
-                    bands.append((0.0, 0.0))
+                    # (verified — a lying seek would mislabel every
+                    # detection after the jump; unseekable → keep
+                    # decoding sequentially, just without scanning)
                     tgt = max(idx + 1, int(nxt * fps) - 1)
-                    cum.extend([(0.0, 0.0)] * (tgt - len(cum)))
-                    bands.extend([(0.0, 0.0)] * (tgt - len(bands)))
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, tgt)
-                    idx = tgt
-                    cb.log(f"      fast-skip: jumped {t_now:.1f}s → "
-                           f"{nxt:.1f}s (gap between windows not decoded)")
-                    continue
+                    if _seek_cap(cap, tgt, fps):
+                        bands.append((0.0, 0.0))
+                        cum.extend([(0.0, 0.0)] * (tgt - len(cum)))
+                        bands.extend([(0.0, 0.0)] * (tgt - len(bands)))
+                        idx = tgt
+                        cb.log(f"      fast-skip: jumped {t_now:.1f}s → "
+                               f"{nxt:.1f}s (gap between windows not "
+                               "decoded)")
+                        continue
+                    # jump failed and may have consumed frames: reopen at
+                    # a KNOWN position and keep decoding sequentially
+                    cap.release()
+                    cap = cv2.VideoCapture(args.video)
+                    if not _seek_cap(cap, idx + 1, fps):
+                        break
             scan_cx, scan_cy = cx, cy
             bands.append((0.0, 0.0))
             idx += 1
@@ -5443,9 +5509,9 @@ def run_scan(args, cb=None):
 
             def _visible(t, d=d, dcx=dcx, dcy=dcy, tmpl=tmpl,
                          th_=th_, tw_=tw_):
-                cap2.set(cv2.CAP_PROP_POS_MSEC, max(t, 0.0) * 1000)
-                ok, fr = cap2.read()
-                if not ok:
+                fr = _grab_frame(cap2, t,
+                                 cap2.get(cv2.CAP_PROP_FPS) or 30.0)
+                if fr is None:
                     return False
                 sm = cv2.resize(cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY), None,
                                 fx=BT_SCALE, fy=BT_SCALE)
@@ -5513,9 +5579,9 @@ def run_scan(args, cb=None):
         cap3 = _gap_cap["cap"]
 
         def _frame_small(t):
-            cap3.set(cv2.CAP_PROP_POS_MSEC, max(t, 0.0) * 1000)
-            ok, fr = cap3.read()
-            if not ok:
+            fr = _grab_frame(cap3, t,
+                             cap3.get(cv2.CAP_PROP_FPS) or 30.0)
+            if fr is None:
                 return None
             return cv2.resize(cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY), None,
                               fx=BT_SCALE, fy=BT_SCALE)

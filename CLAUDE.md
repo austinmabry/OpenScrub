@@ -327,15 +327,25 @@ Key classes/functions (locate with grep, line numbers drift):
   track ends at the frame exit instead of inheriting the other dog). Seeding
   survives bad frames: detection is retried at
   t_ref±(0.33..1.0)s inside the window, and ALL tracker frame fetches go
-  through `_grab_frame` (module-level): fast POS_MSEC seek, else fall
-  back to POS_FRAMES + SEQUENTIAL decode from an earlier point
-  (ultimately frame 0) — the render's access pattern, guaranteed to work
-  for any decodable file. Random POS_MSEC seeks to deep timestamps FAIL
-  on some codec/build combos (h264_nvenc HDR-tonemapped scan copies in
-  the CUDA image returned nothing near 19.9s, silently failing a second
-  detection window's seed; the render never hit it because it decodes
-  sequentially through an ffmpeg pipe). test_grab_frame_survives_broken_
-  random_seek pins it. The
+  through `_grab_frame` (module-level), which NEVER TRUSTS A SEEK: after
+  every cap.set the decoded packet's own PTS (CAP_PROP_POS_MSEC after
+  read — from the bitstream, can't lie) is compared to the request; an
+  early landing is repaired by decoding forward, a late one by seeking
+  earlier, ultimately frame 0 + sequential — the render's access
+  pattern, correct on any decodable file. TWO real seek pathologies
+  demanded this: (1) deep POS_MSEC seeks FAIL outright on some builds
+  (h264_nvenc HDR copies in the CUDA image returned nothing near 19.9s
+  — silently failed a window's seed); (2) on another real box seeks
+  SUCCEED but land at an earlier keyframe — a 20.3s seek landed ~16s
+  early, the tracker followed the wrong moment of the video with full
+  confidence, and the rendered blur "flew away" off the subject (report
+  samples matched the clean run's boxes at t−16.3s to 0-2px — the
+  smoking gun). `_seek_cap` (positions a cap so the NEXT read is frame
+  N, same verification) guards run_scan's fast-skip jumps, the trimmed
+  render's clip-start seek, and every other cap.set site (SFace embed
+  grabs, onset walk-back `_gray`, recall `_visible`, gap-bridge
+  `_frame_small`). test_grab_frame_survives_broken_random_seek +
+  test_grab_frame_repairs_keyframe_snapped_seek pin both pathologies. The
   detector path samples EVERY frame (step_frames=1): masks repainted at
   a 2-frame cadence visibly STEP/flicker at 15Hz on real footage.
   Renders (SDR + HDR) apply `_dedupe_dense` per frame: dense-track
