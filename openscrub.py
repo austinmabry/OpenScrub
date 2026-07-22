@@ -1281,6 +1281,20 @@ def _grab_frame(cap, t, fps):
     return None
 
 
+def _crop_hist(frame, b):
+    """HSV color histogram of a box crop (appearance fingerprint for
+    dormant-track re-acquisition), or None for degenerate crops."""
+    x1, y1 = max(0, int(b[0])), max(0, int(b[1]))
+    x2 = min(frame.shape[1], int(b[2]))
+    y2 = min(frame.shape[0], int(b[3]))
+    if x2 - x1 < 8 or y2 - y1 < 8:
+        return None
+    hsv = cv2.cvtColor(frame[y1:y2, x1:x2], cv2.COLOR_BGR2HSV)
+    h = cv2.calcHist([hsv], [0, 1], None, [16, 8], [0, 180, 0, 256])
+    cv2.normalize(h, h)
+    return h
+
+
 def _seek_cap(cap, frame_idx, fps):
     """Position cap so the NEXT read() returns frame_idx — VERIFIED via
     _grab_frame's PTS check (a bare cap.set can land seconds early on
@@ -1425,6 +1439,12 @@ def _track_person_dense(video, box, t_ref, t0, t1, det, log,
             hold_t = 0.0        # seconds spent frozen (grace timer)
             det_gap = 0.0       # seconds since the last DETECTOR hit
             last_poly = _poly(best)     # most recent live silhouette
+            watching = False    # dormant: subject hidden, no blur, but
+                                # keep scanning for its re-emergence
+            bystanders = []     # same-class objects VISIBLE while ours
+                                # was hidden — by the cannot-link
+                                # principle they can never BE it
+            ref_hist = _crop_hist(seed_frame, seed)
             trk = _anchor_init(seed_frame, seed)
             # reference size for the size-flip guard: grows fast, shrinks
             # SLOWLY — an occlusion sliver must not drag it down, or the
@@ -1459,7 +1479,7 @@ def _track_person_dense(video, box, t_ref, t0, t1, det, log,
                 # identity; it only bridges detector blinks below, and
                 # only while it still AGREES with the last detection.
                 vbox, vscore = None, 0.0
-                if trk is not None:
+                if trk is not None and not watching:
                     try:
                         sm = cv2.resize(fr, None, fx=sc2, fy=sc2)
                         okv, bb = trk.update(sm)
@@ -1486,6 +1506,57 @@ def _track_person_dense(video, box, t_ref, t0, t1, det, log,
                 # a look-alike's close-up head box, on real footage).
                 # No nearest-distance fallback, ever.
                 dets = [d for d in det.find(fr) if _cls(d) == tcls]
+                if watching:
+                    # DORMANT: the subject is hidden — paint nothing
+                    # (nothing visible can leak), but keep watching for
+                    # its re-emergence until the window edge. First keep
+                    # following the bystanders: objects that stayed
+                    # visible while ours was hidden can never BE ours.
+                    for j, bb in enumerate(bystanders):
+                        bm, bi2 = None, 0.2
+                        for d in dets:
+                            db = [float(v) for v in d[:4]]
+                            i2 = _iou(bb, db)
+                            if i2 > bi2:
+                                bm, bi2 = db, i2
+                        if bm is not None:
+                            bystanders[j] = bm
+                    cand = None
+                    for d in dets:
+                        db = [float(v) for v in d[:4]]
+                        ar = (db[2] - db[0]) * (db[3] - db[1]) / ref_a
+                        if not 0.33 <= ar <= 3.0:
+                            continue
+                        if any(_iou(db, bb) >= 0.30 for bb in bystanders):
+                            continue
+                        if ref_hist is not None:
+                            ch = _crop_hist(fr, db)
+                            if ch is not None and cv2.compareHist(
+                                    ref_hist, ch,
+                                    cv2.HISTCMP_CORREL) < 0.35:
+                                continue
+                        cand = d
+                        break
+                    if cand is not None:
+                        watching = False
+                        held = False
+                        hold_t = 0.0
+                        det_gap = 0.0
+                        cur = [float(v) for v in cand[:4]]
+                        na = (cur[2] - cur[0]) * (cur[3] - cur[1])
+                        ref_a += ((0.5 if na > ref_a else 0.05)
+                                  * (na - ref_a))
+                        last_poly = _poly(cand)
+                        nh = _crop_hist(fr, cur)
+                        if nh is not None:
+                            ref_hist = nh
+                        samples.append((t2, tuple(cur), float(cand[4]),
+                                        last_poly, tcls))
+                        trk = _anchor_init(fr, cur) or trk
+                        log("      track: %s re-acquired at t=%.1fs — "
+                            "it was hidden, coverage resumes" % (tname, t2))
+                    t = t2
+                    continue
                 pick, bi = None, 0.0
                 frag, fcov = None, 0.0
                 for d in dets:
@@ -1530,6 +1601,9 @@ def _track_person_dense(video, box, t_ref, t0, t1, det, log,
                     na = (cur[2] - cur[0]) * (cur[3] - cur[1])
                     ref_a += (0.5 if na > ref_a else 0.05) * (na - ref_a)
                     last_poly = _poly(pick)
+                    nh = _crop_hist(fr, cur)
+                    if nh is not None:
+                        ref_hist = nh
                     samples.append((t2, tuple(cur), float(pick[4]),
                                     last_poly, tcls))
                     # re-anchor EVERY confident hit: drift can never
@@ -1629,10 +1703,20 @@ def _track_person_dense(video, box, t_ref, t0, t1, det, log,
                     hold_t += step
                     det_gap += step
                     if hold_t > 0.8:
-                        log("      track: %s not seen for >0.8s at t=%.1fs "
-                            "— ending coverage (draw another box if it "
-                            "returns later)" % (tname, t2))
-                        break
+                        # hidden past a blink's length: go DORMANT
+                        # instead of ending — stop painting blur (the
+                        # subject is not visible) but keep watching this
+                        # window for its re-emergence. Every same-class
+                        # object visible RIGHT NOW is a bystander and is
+                        # barred from ever inheriting the track.
+                        watching = True
+                        bystanders = [[float(v) for v in d[:4]]
+                                      for d in dets]
+                        log("      track: %s hidden at t=%.1fs — pausing "
+                            "the blur and watching for it to reappear"
+                            % (tname, t2))
+                        t = t2
+                        continue
                     clamp = (max(0.0, cur[0]), max(0.0, cur[1]),
                              min(float(W), cur[2]), min(float(H), cur[3]))
                     samples.append((t2, clamp, 0.0, (), tcls))

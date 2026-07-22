@@ -331,7 +331,24 @@ Key classes/functions (locate with grep, line numbers drift):
   on the uncertain part), and it resets the loss timers because the
   object is visibly there. Both blind, or past a blink's length:
   FREEZE the last box CLAMPED to the frame (score 0, NO stale poly —
-  full-box blur) for a 0.8s grace, then end. NO nearest-distance
+  full-box blur) for a 0.8s grace, then go DORMANT (not end): stop
+  emitting samples (nothing visible → nothing to blur) but keep
+  scanning the window for the subject's re-emergence. Re-acquisition
+  needs a same-class detection in the 0.33-3.0x size band that passes
+  an HSV-histogram appearance check (`_crop_hist`, HISTCMP_CORREL >=
+  0.35, fingerprint refreshed on every live accept) AND is not a
+  BYSTANDER — every same-class object visible at the moment ours went
+  hidden is tracked forward by per-step best-IoU and can never inherit
+  the track (cannot-link: co-visible ⇒ different object; this is what
+  keeps the second dog out — on the real footage the dormant track
+  ignored the foreground dog for 1.5s then re-acquired the returning
+  seeded dog at 19.1s with boxes matching the known-good W2 track to
+  0px). Frame exits (center-off) still END the track. NO anticipation
+  or occluder modeling — waiting beats predicting (prediction caused
+  two real regressions); this is SAM2's occlusion recipe sized to our
+  stack: remember appearance, re-identify on re-appearance.
+  test_track_dormant_reacquisition pins gap-silence + bystander
+  exclusion + resumption. NO nearest-distance
   fallback and NO velocity prediction, ever (both caused real
   wrong-object/floating regressions). Ends early only when the box
   center leaves the frame. Two near-identical subjects: association

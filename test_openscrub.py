@@ -1640,3 +1640,47 @@ def test_grab_frame_repairs_keyframe_snapped_seek():
     assert openscrub._seek_cap(cap, 609, 30.0)
     ok, fr = cap.read()
     assert ok and int(fr[0, 0, 0]) == 609 % 251
+
+
+def test_track_dormant_reacquisition(tmp_path):
+    """A subject hidden longer than the 0.8s grace no longer ends the
+    track: it goes DORMANT (no samples — nothing visible to blur) and
+    re-acquires the SAME object when it reappears. A look-alike that
+    stayed visible while ours was hidden (a bystander) must never
+    inherit the track — the cannot-link rule."""
+    # video with the frame index encoded in a top strip so the stub
+    # detector derives time from the FRAME, not from call count
+    path = str(tmp_path / "hide.mp4")
+    w = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), 30,
+                        (640, 360))
+    rng = np.random.default_rng(7)
+    bg = rng.integers(0, 60, (360, 640, 3), np.uint8)
+    for i in range(240):
+        fr = bg.copy()
+        fr[0:12, :, :] = i
+        w.write(fr)
+    w.release()
+    SQ = (((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)),)
+
+    class StubDet:
+        def find(self, frame):
+            t = float(np.median(frame[2:10, :, 0])) / 30.0
+            dets = [(500.0, 20.0, 560.0, 80.0, 0.9, SQ)]  # bystander
+            if not 3.0 <= t <= 5.0:                 # hidden for 2s
+                x = 100.0 + t * 30.0
+                dets.append((x, 150.0, x + 60.0, 210.0, 0.95, SQ))
+            return dets
+
+    s = openscrub._track_person_dense(path, (100, 148, 200, 212), 1.0,
+                                      1.0, 7.5, StubDet(),
+                                      lambda m: None, step_frames=1)
+    assert s, "track must produce samples"
+    # 3.0-3.8s is the freeze grace (box held, by design); after it the
+    # track must go dormant and paint NOTHING while the subject is gone
+    gap = [q for q in s if 4.0 <= q[0] <= 4.8]
+    assert not gap, "no blur may be painted while the subject is hidden"
+    late = [q for q in s if q[0] >= 5.6]
+    assert late, "coverage must RESUME when the subject reappears"
+    for q in late:
+        assert q[1][0] > 200, "must re-acquire the subject, not freeze"
+        assert q[1][0] < 450, "the bystander must never inherit the track"
