@@ -343,15 +343,19 @@ Key classes/functions (locate with grep, line numbers drift):
   keeps the second dog out — on the real footage the dormant track
   ignored the foreground dog for 1.5s then re-acquired the returning
   seeded dog at 19.1s with boxes matching the known-good W2 track to
-  0px). Frame exits (center-off) still END the track. NO anticipation
+  0px). Frame exits go DORMANT too — the frame edge is just another
+  occluder (a real subject walked out of frame and returned unblurred;
+  validated on that footage: coverage resumed on her return while the
+  bystanders, one walking right up to the camera, stayed unblurred).
+  Detector-path tracks end only at window edges now; the GENERIC
+  (no-model) tracker still ends at frame exits. NO anticipation
   or occluder modeling — waiting beats predicting (prediction caused
   two real regressions); this is SAM2's occlusion recipe sized to our
   stack: remember appearance, re-identify on re-appearance.
   test_track_dormant_reacquisition pins gap-silence + bystander
   exclusion + resumption. NO nearest-distance
   fallback and NO velocity prediction, ever (both caused real
-  wrong-object/floating regressions). Ends early only when the box
-  center leaves the frame. Two near-identical subjects: association
+  wrong-object/floating regressions). Two near-identical subjects: association
   stays on the SEEDED one; an unselected look-alike is never grabbed
   (validated frame-by-frame on two-street-dog footage: full-window
   coverage through a person-occlusion at ~7s, zero wrong-dog samples,

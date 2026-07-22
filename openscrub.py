@@ -35,7 +35,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.62"
+VERSION = "1.0.63"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -1325,13 +1325,15 @@ def _track_person_dense(video, box, t_ref, t0, t1, det, log,
     silhouette polygons from -seg models), so the blur hugs the body
     instead of a drifting rectangle — no scale problems, no appearance
     drift, ever. Association keeps the lock on the SEEDED person even
-    with others in frame: each step picks the detection with the best
-    IoU against the last position (or the nearest within half a
-    box-size when overlap breaks during fast motion) — the same
-    cannot-jump reach rule the dense person tracks use. Misses FAIL
-    CLOSED: the box freezes (full-box blur, no stale silhouette) until
-    the person is re-detected or the window ends; coverage only ends
-    early when the person visibly leaves the frame.
+    with others in frame (see the guards in the loop). Misses FAIL
+    CLOSED: the box freezes (full-box blur, no stale silhouette) for a
+    0.8s grace, then the track goes DORMANT — no samples (nothing
+    visible to blur) but the window keeps being scanned, and the SAME
+    subject is re-acquired when it reappears (size band + appearance
+    fingerprint + bystander cannot-link). A frame exit is treated the
+    same way: the frame edge is just another occluder, and a subject
+    who walks out and back in is re-covered automatically. Tracks end
+    only at the window edges.
 
     Returns [(t, box, score, poly)] — or [] when no person overlaps the
     drawn box at t_ref (caller falls back to the generic tracker)."""
@@ -1346,10 +1348,6 @@ def _track_person_dense(video, box, t_ref, t0, t1, det, log,
 
     def _frame(t):
         return _grab_frame(cap, t, fps)
-
-    def _center_off(b):
-        cx, cy = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
-        return not (0.02 * W < cx < 0.98 * W and 0.02 * H < cy < 0.98 * H)
 
     def _poly(d):
         return tuple(d[5]) if len(d) > 5 and d[5] else ()
@@ -1610,10 +1608,6 @@ def _track_person_dense(video, box, t_ref, t0, t1, det, log,
                     # accumulate past one blink (their SAM2 refreshes its
                     # memory each frame; this is our equivalent)
                     trk = _anchor_init(fr, cur) or trk
-                    if _center_off(cur):
-                        log("      track: %s leaving the frame at t=%.1fs"
-                            % (tname, t2))
-                        break
                 elif (vbox is not None and vscore >= 0.35
                         and _iou(vbox, cur) >= 0.20
                         and det_gap + step <= 0.8):
@@ -1641,10 +1635,6 @@ def _track_person_dense(video, box, t_ref, t0, t1, det, log,
                                          cur[2] + ew, cur[3] + eh),
                                     round(0.1 * vscore, 3),
                                     last_poly, tcls))
-                    if _center_off(cur):
-                        log("      track: %s leaving the frame at t=%.1fs"
-                            % (tname, t2))
-                        break
                 elif frag is not None and fcov >= 0.5:
                     # the object is PARTLY visible: a small same-class
                     # detection sits mostly inside the held box (a head
@@ -1694,10 +1684,6 @@ def _track_person_dense(video, box, t_ref, t0, t1, det, log,
                     if not held:
                         held = True
                         hold_t = 0.0
-                        if _center_off(cur):
-                            log("      track: %s left the frame at t=%.1fs "
-                                "— coverage ends there" % (tname, t2))
-                            break
                         log("      track: %s lost at t=%.1fs — holding "
                             "its last box briefly" % (tname, t2))
                     hold_t += step
@@ -1719,7 +1705,10 @@ def _track_person_dense(video, box, t_ref, t0, t1, det, log,
                         continue
                     clamp = (max(0.0, cur[0]), max(0.0, cur[1]),
                              min(float(W), cur[2]), min(float(H), cur[3]))
-                    samples.append((t2, clamp, 0.0, (), tcls))
+                    # a box that slid fully off-frame clamps to nothing —
+                    # emit no sample for it (nothing visible to cover)
+                    if clamp[2] - clamp[0] >= 8 and clamp[3] - clamp[1] >= 8:
+                        samples.append((t2, clamp, 0.0, (), tcls))
                 if time.time() - _last_log >= 3.0:
                     _last_log = time.time()
                     log("        …tracking %s to t=%.1fs (%d samples)"
