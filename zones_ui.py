@@ -152,6 +152,12 @@ details .inner .full{grid-column:1/-1}
    <option>nvenc</option><option>qsv</option><option>x264</option></select></div>
   <div><label>Default redaction</label><select id="mode"><option>blur</option>
    <option>box</option><option>mosaic</option></select></div>
+  <div><label>Person cover <span title="tight = silhouette-hugging (best
+   looking). box = full detection box (hides body shape). concealed =
+   oversized gliding box that also hides height, build and walking gait
+   — use for witness/identity protection.">&#9432;</span></label>
+   <select id="coverage"><option>tight</option><option>box</option>
+   <option>concealed</option></select></div>
   <div><label>Sample interval (s)</label><input type="number" id="si" value="0.5" step="0.1" min="0.1"></div>
   <div><label>Scan trigger (px)</label><input type="number" id="st" value="60" step="5"></div>
   <div><label>Blur buffer (px)</label><input type="number" id="pad" value="8"></div>
@@ -1017,7 +1023,7 @@ async function startScan(){
    +"tracking — nothing will be detected. Start anyway?"))return;
  const o={
   engine:$("engine").value,device:$("device").value,encoder:$("encoder").value,
-  mode:$("mode").value,sample_interval:+$("si").value,scan_trigger:+$("st").value,
+  mode:$("mode").value,coverage:$("coverage").value,sample_interval:+$("si").value,scan_trigger:+$("st").value,
   pad:+$("pad").value,bridge_gap:+$("bgap").value,
   face_expand:+$("fex").value,face_threshold:+$("fthr").value,
   face_shape:$("fshape").value,detect_scale:+$("dscale").value,

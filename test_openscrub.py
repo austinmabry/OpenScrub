@@ -1726,3 +1726,83 @@ def test_encoder_ladder_prefers_nvenc_then_qsv(monkeypatch):
     monkeypatch.setattr(openscrub.subprocess, "run", fake_run)
     assert openscrub.hevc10_encoder("qsv", CB()) == "hevc_qsv"
     openscrub._HEVC10.clear()
+
+
+def test_coverage_levels_box_and_concealed():
+    """'tight' keeps silhouettes; 'box' drops them (full-box blur hides
+    body shape); 'concealed' additionally replaces each track's box with
+    the padded union of its ±0.6s neighbours so the cover glides instead
+    of bobbing — gait recognizers consume exactly the silhouette
+    sequences 'tight' produces, so witness-grade jobs must be able to
+    destroy that signal. Originals must stay untouched (the report keeps
+    tight samples so a re-render can change coverage)."""
+    SQ = (((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)),)
+    dets = []
+    for i in range(10):
+        t = i / 10.0
+        x = 100 + i * 20                     # walking right, box bobbing
+        y = 100 + (10 if i % 2 else 0)
+        dets.append(openscrub.Detection(
+            t, t + 0.08, (x, y, x + 60, y + 160), "person", "p", 0.9,
+            (0, 0), last_seen=t, dense=True, track=5, poly=SQ))
+    txt = openscrub.Detection(0, 1, (5, 5, 50, 20), "name", "x", 0.9)
+    dets.append(txt)
+
+    tight = openscrub.apply_coverage(dets, "tight")
+    assert tight is dets, "tight must be a no-op"
+
+    boxed = openscrub.apply_coverage(dets, "box")
+    assert all(not d.poly for d in boxed if d.category == "person")
+    assert dets[0].poly, "originals must keep their silhouettes"
+    assert boxed[0].cbox == dets[0].cbox, "box mode keeps positions"
+
+    conc = openscrub.apply_coverage(dets, "concealed")
+    person = [d for d in conc if d.category == "person"]
+    assert all(not d.poly for d in person)
+    # each concealed box must contain every neighbour box within 0.6s
+    for i, d in enumerate(person):
+        for j, e in enumerate(dets[:10]):
+            if abs(e.t_start - d.t_start) <= 0.6:
+                assert (d.cbox[0] <= e.cbox[0] and d.cbox[1] <= e.cbox[1]
+                        and d.cbox[2] >= e.cbox[2]
+                        and d.cbox[3] >= e.cbox[3]), \
+                    "concealed box must cover all ±0.6s neighbours"
+    # the vertical bob (10px) must vanish: consecutive concealed boxes
+    # share the same top edge through the middle of the track
+    tops = {d.cbox[1] for d in person[3:7]}
+    assert len(tops) == 1, "concealed cover must glide, not bob"
+    # non-dense text detections pass through untouched
+    assert any(d is txt for d in conc)
+
+
+def test_render_strips_source_metadata(tmp_path):
+    """A redacted file must not carry the source's GPS position, capture
+    time, or device identifiers — the render strips ALL container and
+    stream metadata (only explicit color signalling survives on HDR)."""
+    import subprocess
+    src = str(tmp_path / "meta.mp4")
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-f", "lavfi",
+                    "-i", "testsrc=size=128x128:rate=30:duration=1",
+                    "-pix_fmt", "yuv420p",
+                    "-metadata", "creation_time=2026-01-02T03:04:05Z",
+                    "-metadata", "location=+37.7749-122.4194/",
+                    "-metadata", "com.apple.quicktime.location.ISO6709="
+                                 "+37.7749-122.4194/",
+                    "-metadata", "make=TestCam", src], check=True)
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format_tags",
+         "-of", "json", src], capture_output=True, text=True).stdout
+    assert "37.7749" in probe or "TestCam" in probe, \
+        "sanity: the source must actually carry metadata"
+
+    dst = str(tmp_path / "out.mp4")
+    openscrub.render(src, dst, [], [(0.0, 0.0)] * 30, [(0.0, 0.0)] * 30,
+                     30.0, pad=8, mode="blur", preview=False,
+                     encoder="x264")
+    assert os.path.exists(dst)
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries",
+         "format_tags:stream_tags", "-of", "json", dst],
+        capture_output=True, text=True).stdout
+    for leak in ("37.7749", "TestCam", "2026-01-02"):
+        assert leak not in out, f"metadata leaked into the output: {leak}"

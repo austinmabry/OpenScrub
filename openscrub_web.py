@@ -301,6 +301,7 @@ def build_args(job, for_render=False):
             "--device", o.get("device", "auto"),
             "--encoder", o.get("encoder", "auto"),
             "--mode", o.get("mode", "blur"),
+            "--coverage", o.get("coverage", "tight"),
             "--mode-map", o.get("mode_map", ""),
             "--sample-interval", str(o.get("sample_interval", 0.5)),
             "--scan-trigger", str(o.get("scan_trigger", 60)),

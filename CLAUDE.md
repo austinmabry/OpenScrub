@@ -426,6 +426,17 @@ Key classes/functions (locate with grep, line numbers drift):
   a fresh track id, category "manual" — one review card with fan-out.
   `--categories none` = manual-only job (no engines load; report still
   gets render_state so review works).
+- Coverage levels (`apply_coverage`, render-time, `--coverage
+  tight|box|concealed`, web Advanced "Person cover"): dense person +
+  manual (tracked) samples only. tight = silhouettes (default); box =
+  polys dropped, full detection box; concealed = WITNESS-GRADE: polys
+  dropped AND each track's box becomes the ±0.6s neighbour union +12%
+  pad so the cover GLIDES instead of bobbing — body outline, build and
+  step cadence destroyed (gait recognizers consume exactly the
+  silhouette sequences tight produces — a tight blur hands them a
+  pre-segmented input). Works on COPIES: the report always keeps tight
+  samples so a re-render can change coverage. Recommend mode box with
+  concealed for identity protection.
 - Audio redaction: report-additive `audio_redactions` [{t0,t1,mode}]
   (mode mute|bleep), written by review save and PRESERVED by
   write_report (the render-end rewrite must not drop them). CLI:

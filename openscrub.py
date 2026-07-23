@@ -21,6 +21,7 @@ Usage (see README.md):
 """
 
 import argparse
+import copy
 import datetime
 import hashlib
 import json
@@ -35,7 +36,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.64"
+VERSION = "1.0.65"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -2699,6 +2700,63 @@ def _blur_silhouette_yuv10(y, u, v, x1, y1, x2, y2, mode, polys,
                  min(v.shape[0], (y2i + 1) // 2), 512, 15)
 
 
+def apply_coverage(dets, coverage, cb=None):
+    """Render-time coverage level for body-shaped redactions (dense
+    'person' and tracked-object 'manual' samples).
+
+    'tight' (default) keeps the silhouette masks — best looking, least
+    protective: body build, height, and walking gait survive, and gait
+    recognizers consume exactly the silhouette sequences it produces.
+    'box' blurs the full detection box — hides body shape, but a box
+    that bobs with every step still leaks cadence. 'concealed' is
+    witness-grade: silhouettes dropped AND each track's box becomes the
+    union of its neighbours within ±0.6s plus a 12% pad, so the cover
+    GLIDES instead of bobbing — body outline, build, and step cadence
+    are all destroyed. Returns a NEW list (originals untouched: the
+    report keeps tight samples so a re-render can change coverage)."""
+    if coverage not in ("box", "concealed"):
+        return dets
+    out, per_track = [], {}
+    for d in dets:
+        if getattr(d, "dense", False) and d.category in ("person", "manual"):
+            c = copy.copy(d)
+            c.poly = ()
+            out.append(c)
+            if coverage == "concealed" and getattr(d, "track", -1) >= 0:
+                per_track.setdefault(c.track, []).append(c)
+        else:
+            out.append(d)
+    for ds in per_track.values():
+        ds.sort(key=lambda x: x.t_start)
+        ts = [x.t_start for x in ds]
+        boxes = [x.cbox for x in ds]
+        n = len(ds)
+        lo = 0
+        new = []
+        for i in range(n):
+            while ts[i] - ts[lo] > 0.6:
+                lo += 1
+            x1 = y1 = float("inf")
+            x2 = y2 = float("-inf")
+            j = lo
+            while j < n and ts[j] - ts[i] <= 0.6:
+                b = boxes[j]
+                x1, y1 = min(x1, b[0]), min(y1, b[1])
+                x2, y2 = max(x2, b[2]), max(y2, b[3])
+                j += 1
+            px, py = 0.12 * (x2 - x1), 0.12 * (y2 - y1)
+            new.append((int(x1 - px), int(y1 - py),
+                        int(x2 + px), int(y2 + py)))
+        for x, nb in zip(ds, new):
+            x.cbox = nb
+    if cb:
+        cb.log("      coverage: %s — silhouettes replaced with %s"
+               % (coverage, "full detection boxes" if coverage == "box"
+                  else "gliding oversized boxes (body shape and walking "
+                       "gait concealed)"))
+    return out
+
+
 def _dedupe_dense(act):
     """Dense track samples are POSITION SNAPSHOTS whose spans carry a
     small grace overlap; a frame covered by TWO snapshots of the same
@@ -2762,6 +2820,11 @@ def render_hdr(src, dst, detections, cum, bands, fps, pad, mode,
          "-f", "rawvideo", "-pix_fmt", "yuv420p10le",
          "-s", f"{w}x{h}", "-r", f"{fps:.6f}", "-i", "pipe:0",
          "-i", src, "-map", "0:v:0", *amap,
+         # a redacted file must not carry the source's GPS position,
+         # capture time, or device identifiers — strip ALL container and
+         # stream metadata (the explicit color tags above are encoder
+         # flags, not metadata, so HDR signalling survives)
+         "-map_metadata", "-1", "-map_chapters", "-1",
          *vargs, *targs, *acodec, dst],
         stdin=subprocess.PIPE)
 
@@ -2931,6 +2994,10 @@ def render(src, dst, detections, cum, bands, fps, pad, mode, preview,
                "-f", "rawvideo", "-pix_fmt", "bgr24",
                "-s", f"{w}x{h}", "-r", f"{fps:.6f}", "-i", "pipe:0",
                *ain_opts, "-i", src, "-map", "0:v:0", *amap,
+               # a redacted file must not carry the source's GPS
+               # position, capture time, or device identifiers — strip
+               # ALL container and stream metadata
+               "-map_metadata", "-1", "-map_chapters", "-1",
                *vargs, "-pix_fmt", "yuv420p", *acodec, dst]
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
     else:
@@ -4207,6 +4274,7 @@ def write_report(path, args, state, output_path=None):
         "vfr_normalized": bool(getattr(args, "original_video", None)),
         "hdr_tonemapped": bool(getattr(args, "hdr_tonemapped", False)),
         "hdr_output": bool(getattr(args, "hdr_source", None)),
+        "metadata_stripped": True,   # renders pass -map_metadata -1
         "zones": getattr(args, "zones_data", None),
         "windows": getattr(args, "windows_data", None),
         "settings": _settings_dict(args),
@@ -4651,6 +4719,12 @@ def build_parser():
     ap.add_argument("--face-expand", type=float, default=0.15,
                     help="expand detected face boxes by this fraction before "
                          "the blur buffer is applied (default 0.15)")
+    ap.add_argument("--coverage", choices=["tight", "box", "concealed"],
+                    default="tight",
+                    help="person/tracked-object cover: tight = silhouette "
+                         "(best looking), box = full detection box (hides "
+                         "body shape), concealed = gliding oversized box "
+                         "(witness-grade: also hides walking gait)")
     ap.add_argument("--mode", choices=["blur", "box", "mosaic"],
                     default="blur",
                     help="default redaction style: blur (reversible-ish), "
@@ -5989,8 +6063,10 @@ def run_render(args, state, cb=None):
         cb.log("      NOTE: output trim is not yet supported on HDR output — "
                "rendering full length. Use --hdr-output sdr to trim.")
         clip = None
+    dets_r = apply_coverage(state["detections"],
+                            getattr(args, "coverage", "tight"), cb)
     if getattr(args, "hdr_source", None) and not args.preview:
-        render_hdr(args.hdr_source, dst, state["detections"], state["cum"],
+        render_hdr(args.hdr_source, dst, dets_r, state["cum"],
                    state["bands"], state["fps"], pad=args.pad, mode=args.mode,
                    encoder=args.hdr_encoder,
                    tags=getattr(args, "hdr_tags", {}),
@@ -5998,7 +6074,7 @@ def run_render(args, state, cb=None):
                    mode_map=getattr(args, "mode_map", None),
                    audio_spans=aspans, mute_tracks=mute_tracks, cb=cb)
     else:
-        render(args.video, dst, state["detections"], state["cum"],
+        render(args.video, dst, dets_r, state["cum"],
                state["bands"],
                state["fps"], pad=args.pad, mode=args.mode, preview=args.preview,
                mode_map=getattr(args, "mode_map", None),
