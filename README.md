@@ -202,11 +202,29 @@ docker run -d -p 8384:8384 \
 ```
 
 `--device /dev/dri` is what hands the container the GPU — without it
-everything still works on the CPU. On **Unraid/CasaOS** add
-`/dev/dri` as a device in the container template. The engine
-pre-flight-tests every hardware encoder with a real encode before
-trusting it and falls back loudly to CPU, so a missing driver can
-never silently break a render.
+everything still works, just on the CPU. On **Unraid/CasaOS/TrueNAS**
+add `/dev/dri` as a device in the container template (no host driver
+install needed — the image ships Intel's media driver; the host only
+needs its normal kernel i915/xe support, which every mainstream distro
+has). The engine pre-flight-tests every hardware encoder with a real
+test encode before trusting it and falls back loudly to CPU, so a
+missing driver can never silently break a render.
+
+What the Intel GPU accelerates, and how to confirm it's engaged:
+
+- **Encoding (the big win):** HDR renders and the tone-mapped scan
+  copy. Check the scan/render log for
+  `encoder: hevc_qsv 10-bit (GPU)` or `encoder: h264_qsv (GPU)` —
+  seeing `libx264/libx265 (CPU)` instead means the GPU wasn't
+  reachable (usually a missing `--device /dev/dri`).
+- **Detection models:** license-plate and person/silhouette inference
+  runs through OpenVINO (`onnxruntime, OpenVINOExecutionProvider` in
+  the log). Face detection remains CPU in this image.
+- Very new **Arc** cards may need a newer compute runtime than Debian
+  ships for iGPU inference; encoding works regardless, and inference
+  falls back to OpenVINO-on-CPU automatically.
+- Force everything to CPU for troubleshooting with `-e
+  OPENSCRUB_CPU_DNN=1` and the web UI's Advanced → encoder → `x264`.
 
 ## Install from PyPI
 
