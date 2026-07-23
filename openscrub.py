@@ -602,6 +602,7 @@ class PhiMemory:
     one differing digit (so benign numbers don't collide with MRNs)."""
 
     IMMEDIATE = {"dob", "phone", "ssn", "email", "mrn", "address",
+                 "qrcode", "screen",
                  "apikey", "ipaddr", "card", "plate", "person"}
 
     def __init__(self, threshold=82, name_sightings=2):
@@ -3786,6 +3787,51 @@ class PlateDetector:
         return res
 
 
+class QRDetector:
+    """QR / barcode region detector (built into OpenCV — zero setup).
+    A QR code in frame can encode URLs, Wi-Fi credentials, or a vCard,
+    and cameras resolve them at surprising distance — treat them like
+    plates: detect the REGION every frame and blur it. Detection only,
+    never decoded: reading the payload is not our business."""
+
+    def __init__(self, cb=None):
+        self.log = (cb.log if cb else print)
+        self.qr = cv2.QRCodeDetector()
+        try:
+            self.bar = cv2.barcode.BarcodeDetector()
+        except Exception:
+            self.bar = None
+
+    def available(self):
+        return True
+
+    def find(self, frame, scale=1.0):
+        out = []
+        for det in (self.qr, self.bar):
+            if det is None:
+                continue
+            try:
+                ok, pts = det.detectMulti(frame)
+            except Exception:
+                continue
+            if not ok or pts is None:
+                continue
+            for quad in np.asarray(pts).reshape(-1, 4, 2):
+                x1, y1 = float(quad[:, 0].min()), float(quad[:, 1].min())
+                x2, y2 = float(quad[:, 0].max()), float(quad[:, 1].max())
+                w, h = x2 - x1, y2 - y1
+                if w < 8 or h < 8 or w > frame.shape[1] * 0.9:
+                    continue          # degenerate / full-frame misfire
+                px, py = w * 0.08, h * 0.08
+                out.append((x1 - px, y1 - py, x2 + px, y2 + py, 0.9))
+        return _nms_boxes(out, 0.4)
+
+
+# COCO display classes whose CONTENT leaks (a filmed monitor or phone
+# shows everything on it): tv, laptop, cell phone
+SCREEN_CLASSES = (62, 63, 67)
+
+
 class PersonDetector(PlateDetector):
     """Full-BODY person detector: a face blur hides the face, but clothing,
     build, tattoos and gait still identify someone — the person category
@@ -3817,6 +3863,24 @@ class PersonDetector(PlateDetector):
                 self.seg = len(self.net.getUnconnectedOutLayersNames()) >= 2
         except Exception:
             self.seg = False
+
+    def find_classes(self, frame, scale=1.0, classes=SCREEN_CLASSES):
+        """Detections for OTHER COCO classes from the same loaded model
+        (e.g. tv/laptop/phone for the "screen" category) — the person
+        model is an 80-class COCO net, so extra categories are free.
+        Rows come back as (x1,y1,x2,y2,conf,poly) like find()."""
+        prev = self.want_any
+        self.want_any = True
+        try:
+            rows = self.find(frame, scale)
+        finally:
+            self.want_any = prev
+        out = []
+        for r in rows:
+            kls = int(r[6]) if len(r) > 6 else -1
+            if kls in classes:
+                out.append(r[:6] if len(r) > 5 else r[:5] + ((),))
+        return out
         # Segmentation graphs have TWO outputs, and OpenCV DNN's layer
         # fusion can assert on multi-output forward AT INFERENCE TIME
         # ('biasLayerData->outputBlobsWrappers.size() == 1 in fuseLayers',
@@ -4847,7 +4911,7 @@ def build_parser():
     ap.add_argument("--vfr", choices=["auto", "ignore"], default="auto",
                     help="auto: detect variable frame rate and normalize to "
                          "CFR before processing (default); ignore: skip check")
-    ap.add_argument("--categories", default="name,dob,phone,ssn,email,address,card,apikey,ipaddr,plate,face,person")
+    ap.add_argument("--categories", default="name,dob,phone,ssn,email,address,card,apikey,ipaddr,plate,face,person,qrcode,screen")
     return ap
 
 
@@ -5012,7 +5076,8 @@ def run_scan(args, cb=None):
     # OCR output into detect_phi. Load ONLY what the selected categories
     # actually need — a faces-only job must not pay for PaddleOCR (seconds
     # of startup + 2-3 GB of RAM) or spaCy.
-    text_cats = cats - {"face", "plate", "person"}
+    text_cats = cats - {"face", "plate", "person", "qrcode", "screen",
+                        "anytext"}
 
     cb.log(f"[1/4] OCR engine   (openscrub v{VERSION})")
     if text_cats:
@@ -5054,7 +5119,8 @@ def run_scan(args, cb=None):
     personer = (PersonDetector(cb,
                                model_path=getattr(args, "person_model", None),
                                thresh=getattr(args, "person_threshold", 0.5))
-                if "person" in cats else None)
+                if ("person" in cats or "screen" in cats) else None)
+    qrer = QRDetector(cb) if "qrcode" in cats else None
     detect_scale = float(getattr(args, "detect_scale", 1.0) or 1.0)
     if args.ignore_regions:
         cb.log(f"      ignore regions: {len(args.ignore_regions)}")
@@ -5457,6 +5523,53 @@ def run_scan(args, cb=None):
                     "person", "person", round(bconf, 3), (cx, cy),
                     dense=True, poly=bpoly))
                 dense_now.append((bx1, by1, bx2, by2))
+        # per-frame QR/barcode detection: the code region is blurred, the
+        # payload is never decoded. Built into OpenCV — always available.
+        if (qrer is not None and "qrcode" in cats
+                and idx % max(1, dense_stride) == 0):
+            qhold = 0.3 * max(1, dense_stride) / fps
+            _qsc = _scope_at(t_now)
+            _qzr = _qsc.get("qrcode")
+            for (qx1, qy1, qx2, qy2, qconf) in (
+                    qrer.find(frame, detect_scale) if "qrcode" in _qsc
+                    else []):
+                if _qzr and not in_any_zone((qx1, qy1, qx2, qy2), _qzr):
+                    continue
+                if in_ignore_region((qx1, qy1, qx2, qy2),
+                                    args.ignore_regions):
+                    continue
+                raw.append(Detection(
+                    t_now, t_now + qhold,
+                    (int(qx1 - cx), int(qy1 - cy),
+                     int(qx2 - cx), int(qy2 - cy)),
+                    "qrcode", "qr/barcode", round(qconf, 3), (cx, cy),
+                    dense=True))
+                dense_now.append((qx1, qy1, qx2, qy2))
+        # per-frame screen detection (tv/laptop/phone from the same COCO
+        # person model): a filmed display leaks everything shown on it.
+        # INERT without a person model, exactly like person/plates.
+        if (personer is not None and personer.available()
+                and "screen" in cats and idx % max(1, dense_stride) == 0):
+            shold = 0.3 * max(1, dense_stride) / fps
+            _ssc = _scope_at(t_now)
+            _szr = _ssc.get("screen")
+            for det_row in (
+                    personer.find_classes(frame, detect_scale)
+                    if "screen" in _ssc else []):
+                sx1, sy1, sx2, sy2, sconf = det_row[:5]
+                spoly = det_row[5] if len(det_row) > 5 else ()
+                if _szr and not in_any_zone((sx1, sy1, sx2, sy2), _szr):
+                    continue
+                if in_ignore_region((sx1, sy1, sx2, sy2),
+                                    args.ignore_regions):
+                    continue
+                raw.append(Detection(
+                    t_now, t_now + shold,
+                    (int(sx1 - cx), int(sy1 - cy),
+                     int(sx2 - cx), int(sy2 - cy)),
+                    "screen", "screen", round(sconf, 3), (cx, cy),
+                    dense=True, poly=spoly))
+                dense_now.append((sx1, sy1, sx2, sy2))
         moved = abs(cx - scan_cx) + abs(cy - scan_cy)
         step_eff, trig_eff = step, args.scan_trigger
         if adapt:

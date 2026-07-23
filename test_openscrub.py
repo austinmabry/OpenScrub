@@ -1806,3 +1806,49 @@ def test_render_strips_source_metadata(tmp_path):
         capture_output=True, text=True).stdout
     for leak in ("37.7749", "TestCam", "2026-01-02"):
         assert leak not in out, f"metadata leaked into the output: {leak}"
+
+
+def test_qrcode_detection_and_category():
+    """A QR code in frame can encode URLs/credentials — the qrcode
+    category detects the REGION (never decodes the payload) and it must
+    be found on a clean synthetic frame."""
+    try:
+        import qrcode as qrlib                     # test-only dependency
+        img = np.array(qrlib.make("https://example.com/secret").convert(
+            "RGB"))[:, :, ::-1]
+    except ImportError:
+        # build a QR with OpenCV's own encoder if the lib is absent
+        enc = cv2.QRCodeEncoder.create()
+        img = enc.encode("https://example.com/secret")
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    qr = cv2.resize(img, (240, 240), interpolation=cv2.INTER_NEAREST)
+    frame = np.full((720, 1280, 3), 200, np.uint8)
+    frame[100:340, 400:640] = qr
+
+    det = openscrub.QRDetector()
+    found = det.find(frame)
+    assert found, "must detect the QR region"
+    x1, y1, x2, y2 = found[0][:4]
+    assert x1 < 640 and x2 > 400 and y1 < 340 and y2 > 100, \
+        "detection must overlap the QR placement"
+    # category wiring: qrcode is a default, immediate, non-text category
+    assert "qrcode" in openscrub.PhiMemory.IMMEDIATE
+
+
+def test_person_detector_find_classes_filter():
+    """find_classes must return only the requested COCO classes (the
+    'screen' category = tv/laptop/phone from the same person model) and
+    restore the detector's person-only mode afterwards."""
+    class Stub(openscrub.PersonDetector):
+        def __init__(self):                 # no model load
+            self.want_any = False
+            self.seg = False
+        def find(self, frame, scale=1.0):
+            assert self.want_any, "find_classes must decode every class"
+            return [(0, 0, 10, 10, 0.9, (), 62),      # tv
+                    (20, 0, 30, 10, 0.9, (), 0),      # person
+                    (40, 0, 50, 10, 0.8, (), 67)]     # cell phone
+    s = Stub()
+    rows = s.find_classes(None)
+    assert len(rows) == 2 and all(len(r) == 6 for r in rows)
+    assert s.want_any is False, "person-only mode must be restored"
