@@ -1912,3 +1912,35 @@ def test_head_box_from_person_detection():
     assert hb2 == (100 + .22 * 200, 100, 300 - .22 * 200, 100 + .24 * 400)
     # degenerate input
     assert openscrub._head_box((0, 0, 8, 10, 0.9)) is None
+
+
+def test_tiled_find_adds_small_detections():
+    """On high-res frames, tiling runs the detector on overlapping
+    slices in ADDITION to the full frame: boxes come back offset to
+    frame coordinates, tails (poly/cls) survive, duplicates NMS-merge,
+    and a low ratio or mode 'off' skips slicing entirely."""
+    frame = np.zeros((2160, 3840, 3), np.uint8)
+    calls = []
+
+    def find(img):
+        calls.append(img.shape[:2])
+        if img.shape[0] == 2160:                 # full frame: sees nothing
+            return []
+        # each tile call "detects" a tiny object at tile-local (10,10)
+        return [(10.0, 10.0, 40.0, 40.0, 0.9, ((0.1, 0.1),), 7)]
+
+    rows = openscrub._maybe_tiled(find, frame, 640, "auto")
+    assert len(calls) >= 5, "full frame + a tile grid must run"
+    assert rows, "tile detections must surface"
+    assert any(r[0] > 1000 for r in rows), \
+        "tile boxes must be offset back to frame coordinates"
+    assert rows[0][5] == ((0.1, 0.1),) and rows[0][6] == 7, \
+        "row tails (poly, cls) must survive tiling"
+
+    calls.clear()
+    small = np.zeros((720, 1280, 3), np.uint8)
+    openscrub._maybe_tiled(find, small, 640, "auto")
+    assert calls == [(720, 1280)], "low ratio must skip slicing"
+    calls.clear()
+    openscrub._maybe_tiled(find, frame, 640, "off")
+    assert calls == [(2160, 3840)], "mode off must skip slicing"

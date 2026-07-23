@@ -143,6 +143,13 @@ Key classes/functions (locate with grep, line numbers drift):
   default (`--face-shape`, deface-style; blur_region/_blur_yuv10 take
   shape=), and `mosaic` is a real pixelation now (region-relative tiles),
   not a silent alias of blur.
+- Tiled detection (`_maybe_tiled`, `--tile auto|on|off`): when the
+  frame long side >= 2.6x the YOLO input (4K vs 640), plates/person/
+  screen ALSO scan an overlapping 2x2 (3x3 at >=5.2x) tile grid; boxes
+  offset back, tail-preserving NMS (polys are box-normalized so they
+  survive). Full-frame pass always runs — tiling only ADDS. Faces skip
+  it (YuNet runs at native res). Person tracking (`_track_person_dense`)
+  does NOT tile — per-frame cost.
 - Head blur (`--face-heads`, web Advanced "cover turned heads"):
   `_head_box(row)` derives a head region from every person detection —
   silhouette top-32% bbox when a -seg poly exists, top-centre box slice

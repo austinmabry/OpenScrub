@@ -1283,6 +1283,40 @@ def _grab_frame(cap, t, fps):
     return None
 
 
+def _maybe_tiled(find_fn, frame, input_size, mode):
+    """SAHI-style slicing for small objects. A 640-input model squeezes
+    a 4K frame down 6x, so a 40px face/plate becomes a 7px smudge it
+    cannot see. When the frame's long side is >=2.6x the model input
+    (mode "auto"; "on" forces, "off" disables), run the detector on an
+    overlapping tile grid IN ADDITION to the full frame, offset the
+    boxes back, and NMS-merge preserving row tails (poly/cls — polys
+    are box-normalized so they survive the offset untouched). The
+    full-frame pass always runs first: tiling can only ADD detections,
+    never lose one."""
+    h, w = frame.shape[:2]
+    ratio = max(w, h) / max(1, input_size)
+    rows = [tuple(r) for r in find_fn(frame)]
+    if mode == "off" or (mode == "auto" and ratio < 2.6) or ratio < 1.2:
+        return rows
+    n = 3 if ratio >= 5.2 else 2
+    th, tw = h // n, w // n
+    oy, ox = int(th * 0.15), int(tw * 0.15)
+    for gy in range(n):
+        for gx in range(n):
+            x1, y1 = max(0, gx * tw - ox), max(0, gy * th - oy)
+            x2 = min(w, (gx + 1) * tw + ox)
+            y2 = min(h, (gy + 1) * th + oy)
+            for r in find_fn(frame[y1:y2, x1:x2]):
+                rows.append((r[0] + x1, r[1] + y1,
+                             r[2] + x1, r[3] + y1) + tuple(r[4:]))
+    rows.sort(key=lambda r: -float(r[4]))
+    keep = []
+    for r in rows:
+        if all(_iou(r[:4], k[:4]) < 0.55 for k in keep):
+            keep.append(r)
+    return keep
+
+
 def _head_box(row):
     """Head region from a person detection: with a silhouette, the bbox
     of the contour's top 32% (works across poses); else the top-centre
@@ -4797,6 +4831,11 @@ def build_parser():
                          "HDR (10-bit HEVC, PQ/HLG preserved); 'sdr' "
                          "tone-maps the output to SDR BT.709. SDR input "
                          "always renders SDR — output matches the source.")
+    ap.add_argument("--tile", choices=["auto", "on", "off"],
+                    default="auto",
+                    help="tiled detection for small objects on high-res "
+                         "frames (auto: engages when the frame is >=2.6x "
+                         "the model input)")
     ap.add_argument("--face-heads", action="store_true",
                     help="also cover TURNED heads: derive a head region "
                          "from every person detection (needs a person "
@@ -5439,6 +5478,15 @@ def run_scan(args, cb=None):
     dense_faces = "face" in cats or bool(getattr(args, "dense_faces", False))
     args.dense_faces = dense_faces   # keep camera-mode/report paths in sync
     dense_stride = max(1, int(getattr(args, "dense_face_stride", 1) or 1))
+    tile_mode = getattr(args, "tile", "auto") or "auto"
+    if tile_mode != "off" and (plater or personer):
+        _insz = max((det.INPUT for det in (plater, personer) if det),
+                    default=640)
+        if vw and max(vw, vh) / _insz >= 2.6 or tile_mode == "on":
+            cb.log("      tiled detection: frame %dpx vs model input %d — "
+                   "plates/person/screens also scan an overlapping tile "
+                   "grid (small objects; full-frame pass still runs)"
+                   % (max(vw, vh), _insz))
     # per-window zones: face/plate gating rects are looked up by time in the
     # frame loop via _zones_at(t_now), not fixed once here.
     any_face_zone = any(zp and zp.get("face") for _, _, _, zp in windows_px)
@@ -5560,8 +5608,9 @@ def run_scan(args, cb=None):
             _psc = _scope_at(t_now)
             _pzr = _psc.get("plate")
             for (px1, py1, px2, py2, pconf) in (
-                    plater.find(frame, detect_scale) if "plate" in _psc
-                    else []):
+                    _maybe_tiled(lambda f: plater.find(f, detect_scale),
+                                 frame, plater.INPUT, tile_mode)
+                    if "plate" in _psc else []):
                 if _pzr and not in_any_zone((px1, py1, px2, py2), _pzr):
                     continue
                 if in_ignore_region((px1, py1, px2, py2),
@@ -5582,8 +5631,10 @@ def run_scan(args, cb=None):
             bhold = 0.3 * max(1, dense_stride) / fps
             _bsc = _scope_at(t_now)
             _bzr = _bsc.get("person")
-            person_rows = (personer.find(frame, detect_scale)
-                           if "person" in _bsc else [])
+            person_rows = (_maybe_tiled(
+                lambda fr_: personer.find(fr_, detect_scale),
+                frame, personer.INPUT, tile_mode)
+                if "person" in _bsc else [])
             for det_row in person_rows:
                 bx1, by1, bx2, by2, bconf = det_row[:5]
                 bpoly = det_row[5] if len(det_row) > 5 else ()
@@ -5630,7 +5681,9 @@ def run_scan(args, cb=None):
             _ssc = _scope_at(t_now)
             _szr = _ssc.get("screen")
             for det_row in (
-                    personer.find_classes(frame, detect_scale)
+                    _maybe_tiled(
+                        lambda fr_: personer.find_classes(fr_, detect_scale),
+                        frame, personer.INPUT, tile_mode)
                     if "screen" in _ssc else []):
                 sx1, sy1, sx2, sy2, sconf = det_row[:5]
                 spoly = det_row[5] if len(det_row) > 5 else ()
@@ -5660,7 +5713,9 @@ def run_scan(args, cb=None):
             if "face" in _hsc:
                 _hzr = _hsc.get("face")
                 if person_rows is None:
-                    person_rows = personer.find(frame, detect_scale)
+                    person_rows = _maybe_tiled(
+                        lambda fr_: personer.find(fr_, detect_scale),
+                        frame, personer.INPUT, tile_mode)
                 hhold = 0.3 * max(1, dense_stride) / fps
                 for row in person_rows:
                     hb = _head_box(row)
