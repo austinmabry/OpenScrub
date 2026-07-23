@@ -4595,6 +4595,145 @@ def _settings_dict(args):
     return out
 
 
+_SPEECH_CHECKS = (
+    ("ssn", lambda s: RE_SSN.search(s)),
+    ("phone", lambda s: RE_PHONE.search(s)),
+    ("email", lambda s: RE_EMAIL.search(s)),
+    ("card", lambda s: (m := RE_CARD.search(s))
+        and _luhn_ok(re.sub(r"\D", "", m.group()))),
+    ("dob", lambda s: RE_DATE.search(s)),
+    ("ipaddr", lambda s: RE_IP.search(s)),
+    ("bank", lambda s: (m := RE_IBAN.search(s)) and _iban_ok(m.group())),
+    ("crypto", lambda s: RE_ETH.search(s) or RE_BECH32.search(s)),
+)
+
+
+def _speech_suggestions(words, cats, nlp=None, custom_res=()):
+    """Pure (unit-tested): whisper word stream [(start, end, token)] ->
+    spoken-PII suggestions [{t0, t1, category, text}]. The transcript is
+    scanned with the SAME battle-tested patterns the visual text engine
+    uses, restricted to the job's selected categories; matches map back
+    to word timestamps with a ±0.35s pad, and adjacent same-category
+    matches merge. Suggestions only — the human decides in review."""
+    if not words:
+        return []
+    text = ""
+    idx = []                       # char -> word index
+    for i, (_, _, tok) in enumerate(words):
+        idx.extend([i] * len(tok))
+        text += tok
+    out = []
+
+    def add(a, b, cat, snip):
+        wi = idx[max(0, min(a, len(idx) - 1))]
+        wj = idx[max(0, min(b - 1, len(idx) - 1))]
+        out.append({"t0": round(max(0.0, words[wi][0] - 0.35), 2),
+                    "t1": round(words[wj][1] + 0.35, 2),
+                    "category": cat, "text": snip.strip()[:80]})
+
+    # regex windows: scan a sliding join so matches can span tokens
+    for cat, check in _SPEECH_CHECKS:
+        if cat not in cats:
+            continue
+        pos = 0
+        while pos < len(text):
+            m = check(text[pos:])
+            if not m:
+                break
+            s, e = pos + m.start(), pos + m.end()
+            add(s, e, cat, text[s:e])
+            pos = e
+    for cid, cre in custom_res:
+        if cid not in cats:
+            continue
+        pos = 0
+        while pos < len(text):
+            m = cre.search(text[pos:])
+            if not m:
+                break
+            s, e = pos + m.start(), pos + m.end()
+            add(s, e, cid, text[s:e])
+            pos = e
+    if "name" in cats and nlp is not None:
+        try:
+            for ent in nlp(text).ents:
+                if ent.label_ == "PERSON":
+                    add(ent.start_char, ent.end_char, "name", ent.text)
+        except Exception:
+            pass
+    # merge same-category spans that touch (within 0.6s)
+    out.sort(key=lambda s: (s["category"], s["t0"]))
+    merged = []
+    for s in out:
+        p = merged[-1] if merged else None
+        if (p and p["category"] == s["category"]
+                and s["t0"] - p["t1"] <= 0.6):
+            p["t1"] = max(p["t1"], s["t1"])
+            if s["text"] not in p["text"]:
+                p["text"] = (p["text"] + " … " + s["text"])[:120]
+        else:
+            merged.append(dict(s))
+    merged.sort(key=lambda s: s["t0"])
+    return merged
+
+
+def transcribe_audio_pii(video, cats, cb, model_size="base", nlp=None,
+                         custom_res=()):
+    """Fully LOCAL speech-to-PII: extract the audio, transcribe with
+    faster-whisper (word timestamps, VAD), and run the text engine's
+    patterns over the transcript. Spoken names, numbers and addresses
+    leak PII no matter how good the visual blur is. Returns suggestion
+    dicts; [] (with a loud note) when faster-whisper is not installed
+    or the file has no audio. Nothing leaves the machine."""
+    try:
+        from faster_whisper import WhisperModel
+    except ImportError:
+        cb.log("      spoken-PII: faster-whisper is not installed — "
+               "`pip install faster-whisper` enables local speech "
+               "transcription (the Docker images include it)")
+        return []
+    if not probe_has_audio(video):
+        cb.log("      spoken-PII: no audio track — skipped")
+        return []
+    import tempfile
+    wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
+    try:
+        p = subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-i", video,
+             "-vn", "-ac", "1", "-ar", "16000", wav],
+            capture_output=True, text=True)
+        if p.returncode != 0:
+            cb.log("      spoken-PII: audio extraction failed — skipped")
+            return []
+        cb.log(f"      spoken-PII: transcribing locally (whisper "
+               f"{model_size}, CPU)…")
+        model = WhisperModel(
+            model_size, device="cpu", compute_type="int8",
+            download_root=os.path.join(_model_dir(), "whisper"))
+        segments, _info = model.transcribe(
+            wav, word_timestamps=True, vad_filter=True)
+        words = []
+        for seg in segments:
+            for wd in (seg.words or []):
+                words.append((float(wd.start), float(wd.end), wd.word))
+        sugg = _speech_suggestions(words, cats, nlp=nlp,
+                                   custom_res=custom_res)
+        cb.log("      spoken-PII: %d word(s) transcribed, %d suggested "
+               "span(s)" % (len(words), len(sugg)))
+        for s in sugg[:12]:
+            cb.log("        %.1f-%.1fs  %-8s  %s"
+                   % (s["t0"], s["t1"], s["category"], s["text"]))
+        return sugg
+    except Exception as e:
+        cb.log(f"      spoken-PII: transcription failed ({e}) — skipped")
+        return []
+    finally:
+        try:
+            os.remove(wav)
+        except OSError:
+            pass
+
+
 def write_report(path, args, state, output_path=None):
     prov = {
         "tool": "openscrub", "version": VERSION,
@@ -4632,6 +4771,8 @@ def write_report(path, args, state, output_path=None):
     if aspans:
         doc["audio_redactions"] = [
             {"t0": a, "t1": b, "mode": m} for a, b, m in aspans]
+    if state.get("audio_suggestions"):
+        doc["audio_suggestions"] = state["audio_suggestions"]
     with open(path, "w", encoding="utf-8") as f:
         json.dump(doc, f, indent=1)
     try:
@@ -5141,6 +5282,18 @@ def build_parser():
     ap.add_argument("--clip-end", type=float, default=0.0,
                     help="output trim: drop everything after this second "
                          "(0 = keep to the end)")
+    ap.add_argument("--audio-pii", action="store_true",
+                    help="transcribe the audio LOCALLY (faster-whisper) "
+                         "and suggest mute spans for spoken PII in the "
+                         "selected categories — suggestions appear in "
+                         "review and the report; nothing leaves the "
+                         "machine")
+    ap.add_argument("--audio-pii-model", default="base",
+                    help="whisper model size for --audio-pii "
+                         "(tiny/base/small; larger = slower + better)")
+    ap.add_argument("--audio-pii-apply", action="store_true",
+                    help="apply the spoken-PII suggestions as MUTE spans "
+                         "automatically instead of waiting for review")
     ap.add_argument("--audio-redact", default="",
                     help="time spans to silence in the OUTPUT's audio track, "
                          "e.g. '12.5-19.0,84-90'. Spoken names and numbers "
@@ -6503,8 +6656,18 @@ def run_scan(args, cb=None):
         cb.log("      top recalled strings (check for false positives): "
                + ", ".join(f"'{k}'x{v}" for k, v in top))
 
+    audio_sugg = []
+    if getattr(args, "audio_pii", False):
+        # spoken names/numbers/addresses leak PII no matter how good the
+        # visual blur is — transcribe locally and suggest mute spans
+        audio_sugg = transcribe_audio_pii(
+            getattr(args, "original_video", None) or args.video, cats, cb,
+            model_size=getattr(args, "audio_pii_model", "base") or "base",
+            nlp=getattr(namer, "nlp", None) if namer else None,
+            custom_res=custom_res)
+
     return {"fps": fps, "cum": cum, "bands": bands, "detections": detections,
-            "zdropped": zdropped,
+            "zdropped": zdropped, "audio_suggestions": audio_sugg,
             "input_sha256": sha256_file(args.video),
             "stats": {"scans": n_scans, "raw_hits": len(raw),
                       "regions": len(detections), "recalls": n_recalled,
@@ -6518,6 +6681,14 @@ def run_render(args, state, cb=None):
         "_preview.mp4" if args.preview else "_redacted.mp4")
     cb.log(f"[4/4] Rendering -> {dst}")
     aspans = getattr(args, "audio_spans", None)
+    if getattr(args, "audio_pii_apply", False):
+        sugg = state.get("audio_suggestions") or []
+        if sugg:
+            aspans = list(aspans or []) + [
+                (s["t0"], s["t1"], "mute") for s in sugg]
+            cb.log("      spoken-PII: %d suggested span(s) applied as "
+                   "mute (--audio-pii-apply)" % len(sugg))
+            args.audio_spans = aspans
     mt = (getattr(args, "mute_audio_tracks", "") or "").strip()
     mute_tracks = ("all" if mt == "all"
                    else tuple(int(x) for x in mt.split(",") if x.strip()))
@@ -6577,6 +6748,12 @@ def run_pipeline(args, cb=None):
     if getattr(args, "from_report", None):
         cb.log(f"[1/2] Loading detections from {args.from_report}")
         dets, rstate, prov = load_report(args.from_report)
+        try:
+            with open(args.from_report, encoding="utf-8") as _f:
+                rstate["audio_suggestions"] = (
+                    json.load(_f).get("audio_suggestions") or [])
+        except Exception:
+            pass
         # audio redactions ride in the report (the web review writes them
         # there); CLI --audio-redact, when given, wins
         if not getattr(args, "audio_spans", None):

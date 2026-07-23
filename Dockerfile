@@ -38,6 +38,9 @@ WORKDIR /src
 # ---- heavy dependency layer: rebuilds ONLY when requirements.txt changes
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt \
+ # faster-whisper: local speech transcription for spoken-PII
+ # suggestions (fully offline)
+ && pip install --no-cache-dir faster-whisper \
  # spaCy NER for name detection, baked in with its model
  && python -m spacy download en_core_web_sm
 

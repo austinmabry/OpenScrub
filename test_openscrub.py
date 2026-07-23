@@ -1988,3 +1988,37 @@ def test_structured_recognizers_checksums():
     assert cats.count("bank") == 2, cats       # IBAN + routing
     assert cats.count("crypto") == 2, cats     # ETH + BTC
     assert cats.count("passport") == 1, cats
+
+
+def test_speech_suggestions_from_word_stream():
+    """Pure spoken-PII mapping: whisper words -> suggestion spans with
+    padded timestamps, category filtering, and same-category merging.
+    Suggestions only exist for the job's selected categories."""
+    words = [(0.0, 0.3, " call"), (0.35, 0.5, " me"), (0.55, 0.7, " at"),
+             (0.75, 1.6, " 555-867-5309"), (2.0, 2.2, " thanks"),
+             (3.0, 3.4, " SSN"), (3.5, 4.4, " 123-45-6789")]
+    sugg = openscrub._speech_suggestions(words, {"phone", "ssn"})
+    cats = sorted(s["category"] for s in sugg)
+    assert cats == ["phone", "ssn"], sugg
+    ph = next(s for s in sugg if s["category"] == "phone")
+    assert ph["t0"] <= 0.75 - 0.3 and ph["t1"] >= 1.6 + 0.3, \
+        "span must pad the matched words"
+    assert "555" in ph["text"]
+    # unselected categories yield nothing
+    assert openscrub._speech_suggestions(words, {"email"}) == []
+    assert openscrub._speech_suggestions([], {"phone"}) == []
+
+    # spoken names via NER (stub nlp shaped like spaCy's API)
+    class Ent:
+        label_ = "PERSON"
+        def __init__(self, s, e, t):
+            self.start_char, self.end_char, self.text = s, e, t
+    class Doc:
+        def __init__(self, text):
+            i = text.find("Maria Gonzalez")
+            self.ents = [Ent(i, i + 14, "Maria Gonzalez")] if i >= 0 else []
+    nwords = [(0.0, 0.4, " ask"), (0.5, 0.8, " for"),
+              (0.9, 1.4, " Maria"), (1.45, 2.1, " Gonzalez")]
+    ns = openscrub._speech_suggestions(nwords, {"name"}, nlp=Doc)
+    assert len(ns) == 1 and ns[0]["category"] == "name"
+    assert ns[0]["t0"] <= 0.6 and ns[0]["t1"] >= 2.4

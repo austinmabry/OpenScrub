@@ -88,6 +88,11 @@ consoles) — but the engine is general-purpose.
   color-converted). Prefer compatibility instead? One toggle tone-maps the
   output to SDR properly — no washed-out colors either way. SDR sources
   always render SDR: output matches the source.
+- **Spoken-PII suggestions** — optional local transcription
+  (faster-whisper, included in the Docker images) finds spoken names,
+  phone numbers, SSNs and account numbers and suggests mute spans in
+  review, each with the transcript snippet — approve per item or all at
+  once. Nothing ever leaves your machine.
 - **Audit trail** — each run produces a report with SHA-256 hashes of input
   and output for provenance.
 

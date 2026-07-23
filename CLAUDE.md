@@ -492,6 +492,23 @@ Key classes/functions (locate with grep, line numbers drift):
   pre-segmented input). Works on COPIES: the report always keeps tight
   samples so a re-render can change coverage. Recommend mode box with
   concealed for identity protection.
+- Spoken-PII (`--audio-pii`, web Advanced "detect spoken PII"):
+  `transcribe_audio_pii` extracts mono 16k audio, transcribes with
+  faster-whisper (OPTIONAL pip dep, baked into all three Docker images;
+  word timestamps + VAD, whisper model cached under
+  _model_dir()/whisper, size via --audio-pii-model default "base") and
+  `_speech_suggestions` (pure, unit-tested) runs the text engine's
+  checksum/regex patterns + spaCy PERSON ents over the transcript,
+  restricted to the job's selected cats. Matches map to word times
+  ±0.35s, same-category spans within 0.6s merge. Output is
+  SUGGESTIONS: state/report-additive `audio_suggestions`
+  [{t0,t1,category,text}], surfaced in the review box-editor's audio
+  section (renderAudioSugg/applyAudioSugg — Add per item or Add all →
+  normal audio_redactions save path); `--audio-pii-apply` merges them
+  as mute spans without review (CLI/batch). Nothing leaves the
+  machine; missing faster-whisper logs a loud install hint. Validated
+  on real news footage (accurate transcript; correctly zero
+  suggestions when nothing sensitive is spoken).
 - Audio redaction: report-additive `audio_redactions` [{t0,t1,mode}]
   (mode mute|bleep), written by review save and PRESERVED by
   write_report (the render-end rewrite must not drop them). CLI:

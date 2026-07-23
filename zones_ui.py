@@ -182,6 +182,10 @@ details .inner .full{grid-column:1/-1}
     person detection (needs a person model) — covers the BACK of a turned
     head, which face detectors can't see"><input type="checkbox"
     id="faceheads"> cover turned heads</label>
+   <label style="display:inline" title="Transcribe the audio LOCALLY
+    (whisper) and suggest mute spans for spoken names/numbers — review
+    before applying; nothing leaves this machine"><input type="checkbox"
+    id="audiopii"> detect spoken PII</label>
    <label style="display:inline"><input type="checkbox" id="skiprev"> skip review</label>
    <label style="display:inline"><input type="checkbox" id="nomem"> disable memory</label>
    <label style="display:inline"><input type="checkbox" id="pmode"> preview mode</label>
@@ -1042,7 +1046,8 @@ async function startScan(){
   hdr_output:$("hdrout").value,codec:$("vcodec").value,
   out_format:$("outfmt").value,
   allow_names:$("allow").value,extra_names:$("extra").value,
-  dense_faces:$("densefaces").checked,face_heads:$("faceheads").checked,skip_review:$("skiprev").checked,
+  dense_faces:$("densefaces").checked,face_heads:$("faceheads").checked,
+  audio_pii:$("audiopii").checked,skip_review:$("skiprev").checked,
   no_memory:$("nomem").checked,preview_mode:$("pmode").checked,
   draw_scores:$("drawscores").checked,
   use_zones:false,           // zones travel inside the windows now

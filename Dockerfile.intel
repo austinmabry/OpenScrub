@@ -60,6 +60,9 @@ COPY requirements.txt ./
 RUN grep -viE '^onnxruntime' requirements.txt > /tmp/req.noort \
  && pip install --no-cache-dir -r /tmp/req.noort \
  && pip install --no-cache-dir onnxruntime-openvino \
+ # faster-whisper: local speech transcription for spoken-PII
+ # suggestions (fully offline)
+ && pip install --no-cache-dir faster-whisper \
  # spaCy NER for name detection, baked in with its model
  && python -m spacy download en_core_web_sm \
  # fail the build if the OpenVINO provider didn't register — an image

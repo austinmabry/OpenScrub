@@ -72,6 +72,8 @@ RUN grep -viE '^(opencv|numpy|onnxruntime)' requirements.txt > /tmp/req.nocv \
       paddlepaddle-gpu==3.2.2 \
       -i https://www.paddlepaddle.org.cn/packages/stable/cu126/ \
       --extra-index-url https://pypi.org/simple \
+ # faster-whisper: local speech transcription (CPU int8 — fine)
+ && pip install --no-cache-dir faster-whisper \
  # NOTE: no pip cuDNN here — the cudnn-runtime base image ships the
  # matched version; a second, newer pip copy caused CUDNN error 5003
  # (EXECUTION_FAILED) at the first Paddle-GPU inference.

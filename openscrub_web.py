@@ -356,6 +356,8 @@ def build_args(job, for_render=False):
         argv.append("--dense-faces")
     if o.get("face_heads"):
         argv.append("--face-heads")
+    if o.get("audio_pii"):
+        argv.append("--audio-pii")
     if o.get("draw_scores"):
         argv.append("--draw-scores")
     # unified Scan Setup jobs: stacked detection windows (fractions of
@@ -1345,7 +1347,40 @@ FOOT_HTML = """<footer style="text-align:center;color:#9ca3af;font-size:12px;pad
 OpenScrub v%%VERSION%% <span id="upd"></span>· <a href="license" style="color:#94a3b8">Apache-2.0 license</a>
 · best-effort redaction — always review output before sharing PII</footer>"""
 
-APP_JS = """const CATDN={mrn:"regex",person:"person (full body)",manual:"tracked object",qrcode:"QR / barcode",screen:"screen (tv/laptop/phone)",anytext:"all text",bank:"bank number",crypto:"crypto address",passport:"passport / MRZ"};   // display names — ids are a compat surface
+APP_JS = """function renderAudioSugg(){
+ const el=document.getElementById("beASugg");
+ if(!el)return;
+ const sg=BE.audioSugg||[];
+ if(!sg.length){el.style.display="none";el.innerHTML="";return;}
+ el.style.display="block";
+ let h='<div style="font-size:12px;color:#f59e0b;margin-bottom:3px">'
+  +'&#127908; Spoken PII heard in the audio (local transcription) — '
+  +'review each, then Add to mute it:</div>';
+ sg.forEach((s,i)=>{
+  const used=(BE.audio||[]).some(a=>Math.abs(a.t0-s.t0)<0.05&&Math.abs(a.t1-s.t1)<0.05);
+  h+='<div style="font-size:12px;padding:2px 0">'
+   +(used?'<span style="color:#4ade80">&#10003; added</span> '
+     :'<button class="tog" style="font-size:11px;padding:1px 7px" '
+      +'onclick="applyAudioSugg('+i+')">Add</button> ')
+   +s.t0.toFixed(1)+'&ndash;'+s.t1.toFixed(1)+'s '
+   +'<b>'+(CATDN[s.category]||s.category)+'</b> '
+   +'<span style="color:#94a3b8">&ldquo;'
+   +String(s.text||"").replace(/[<>&]/g,"")+'&rdquo;</span></div>';
+ });
+ h+='<div style="margin-top:3px"><button class="tog" style="font-size:11px" '
+  +'onclick="applyAudioSugg(-1)">Add all</button></div>';
+ el.innerHTML=h;
+}
+function applyAudioSugg(i){
+ const sg=BE.audioSugg||[];
+ const list=(i<0)?sg:[sg[i]].filter(Boolean);
+ for(const s of list){
+  if(!(BE.audio||[]).some(a=>Math.abs(a.t0-s.t0)<0.05&&Math.abs(a.t1-s.t1)<0.05))
+   BE.audio.push({t0:s.t0,t1:s.t1,mode:"mute"});
+ }
+ renderAudioSugg();beTLDraw();
+}
+const CATDN={mrn:"regex",person:"person (full body)",manual:"tracked object",qrcode:"QR / barcode",screen:"screen (tv/laptop/phone)",anytext:"all text",bank:"bank number",crypto:"crypto address",passport:"passport / MRZ"};   // display names — ids are a compat surface
 async function refreshModelPanel(){
  // always visible: model choice lives on the settings page now, so users
  // can set up face/plate models before ticking the categories on a job
@@ -1539,6 +1574,7 @@ async function loadBoxEdit(fromReview){
     <option value="bleep">bleep</option></select>
    <button class="tog" id="beMute" onclick="beMuteMode()">&#128263; Audio span</button>
    <button class="danger" id="beARm" style="display:none" onclick="beAudioRm()">Delete span</button></div>
+  <div id="beASugg" style="display:none;margin-top:6px"></div>
   <div class="row" style="margin-top:6px">
    <button class="tog" id="beAdd" onclick="beAddMode()">&#65291; Add box</button>
    <button class="tog" id="beTrk" onclick="beTrackMode()">&#8857; Track object</button>
@@ -1581,6 +1617,8 @@ async function tlInit(){
   }
   BE.tlspans=Object.values(per);
   BE.audio=(doc.audio_redactions||[]).map(s=>({t0:s.t0,t1:s.t1,mode:s.mode||"mute"}));
+  BE.audioSugg=doc.audio_suggestions||[];
+  renderAudioSugg();
  }catch(e){BE.tlspans=[];}
  beTLDraw();
 }
