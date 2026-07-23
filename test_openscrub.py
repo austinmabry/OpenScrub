@@ -1892,3 +1892,23 @@ def test_inpaint_mode_and_mosaic_floor():
     cols = f2[10, :, 0].astype(int)
     runs = sum(1 for i in range(1, 28) if cols[i] != cols[i - 1])
     assert runs <= 6, "6px+ tiles must destroy 1px stripes"
+
+
+def test_head_box_from_person_detection():
+    """--face-heads derives a head region from person detections so a
+    TURNED head (invisible to face detectors) is still covered. With a
+    silhouette the head comes from the contour's top; without one, from
+    the top-centre of the box."""
+    # silhouette: a person whose head is offset to the right of the box
+    poly = ((( .55, .00), (.75, .00), (.75, .18), (.62, .30),
+             (.20, .35), (.10, 1.0), (.90, 1.0), (.80, .40)),)
+    hb = openscrub._head_box((100, 100, 300, 500, 0.9, poly))
+    assert hb is not None
+    hx1, hy1, hx2, hy2 = hb
+    assert hx1 >= 100 + 0.15 * 200, "head bbox must follow the contour"
+    assert hy1 <= 102 and hy2 < 350
+    # box-only fallback: top-centre slice
+    hb2 = openscrub._head_box((100, 100, 300, 500, 0.9))
+    assert hb2 == (100 + .22 * 200, 100, 300 - .22 * 200, 100 + .24 * 400)
+    # degenerate input
+    assert openscrub._head_box((0, 0, 8, 10, 0.9)) is None

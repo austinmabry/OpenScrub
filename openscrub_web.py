@@ -354,6 +354,8 @@ def build_args(job, for_render=False):
         argv.append("--preview")
     if o.get("dense_faces"):
         argv.append("--dense-faces")
+    if o.get("face_heads"):
+        argv.append("--face-heads")
     if o.get("draw_scores"):
         argv.append("--draw-scores")
     # unified Scan Setup jobs: stacked detection windows (fractions of

@@ -1283,6 +1283,30 @@ def _grab_frame(cap, t, fps):
     return None
 
 
+def _head_box(row):
+    """Head region from a person detection: with a silhouette, the bbox
+    of the contour's top 32% (works across poses); else the top-centre
+    slice of the box (upright assumption). Face detectors cannot see
+    the BACK of a turned head — hair, ears and head shape identify
+    people anyway — so the head category unions this in with faces.
+    Returns (x1, y1, x2, y2) or None for degenerate inputs."""
+    x1, y1, x2, y2 = [float(v) for v in row[:4]]
+    w, h = x2 - x1, y2 - y1
+    if w < 12 or h < 24:
+        return None
+    polys = row[5] if len(row) > 5 else ()
+    if polys:
+        pts = [(qx, qy) for pp in polys for qx, qy in pp if qy <= 0.32]
+        if len(pts) >= 3:
+            xs = [p[0] for p in pts]
+            ys = [p[1] for p in pts]
+            hx1, hx2 = x1 + min(xs) * w, x1 + max(xs) * w
+            hy1, hy2 = y1 + min(ys) * h, y1 + max(ys) * h
+            if hx2 - hx1 >= 8 and hy2 - hy1 >= 8:
+                return (hx1, hy1, hx2, min(y2, hy2 + 0.06 * h))
+    return (x1 + 0.22 * w, y1, x2 - 0.22 * w, y1 + 0.24 * h)
+
+
 def _crop_hist(frame, b):
     """HSV color histogram of a box crop (appearance fingerprint for
     dormant-track re-acquisition), or None for degenerate crops."""
@@ -4773,6 +4797,11 @@ def build_parser():
                          "HDR (10-bit HEVC, PQ/HLG preserved); 'sdr' "
                          "tone-maps the output to SDR BT.709. SDR input "
                          "always renders SDR — output matches the source.")
+    ap.add_argument("--face-heads", action="store_true",
+                    help="also cover TURNED heads: derive a head region "
+                         "from every person detection (needs a person "
+                         "model) and union it into the face category — "
+                         "hair and head shape identify people too")
     ap.add_argument("--dense-faces", action="store_true",
                     help="run the face detector on EVERY frame (not just at "
                          "scan intervals) so fast-moving faces stay covered. "
@@ -5161,7 +5190,9 @@ def run_scan(args, cb=None):
     personer = (PersonDetector(cb,
                                model_path=getattr(args, "person_model", None),
                                thresh=getattr(args, "person_threshold", 0.5))
-                if ("person" in cats or "screen" in cats) else None)
+                if ("person" in cats or "screen" in cats
+                    or (getattr(args, "face_heads", False)
+                        and "face" in cats)) else None)
     qrer = QRDetector(cb) if "qrcode" in cats else None
     detect_scale = float(getattr(args, "detect_scale", 1.0) or 1.0)
     if args.ignore_regions:
@@ -5489,6 +5520,8 @@ def run_scan(args, cb=None):
                             fx=BT_SCALE, fy=BT_SCALE) if bt_on else None)
         if idx % max(1, dense_stride) == 0:
             dense_now = []      # latest dense boxes, drawn on the preview
+        face_now = []           # this frame's face boxes (head dedupe)
+        person_rows = None      # person inference shared with head-blur
         # dense face detection: find faces on THIS frame at their true screen
         # position, independent of the OCR scan cadence — per-frame
         # re-detection (not tracking), so a face moving fast across the frame
@@ -5517,6 +5550,7 @@ def run_scan(args, cb=None):
                     "face", "face", round(conf, 3), (cx, cy),
                     dense=True))
                 dense_now.append((fx1, fy1, fx2, fy2))
+                face_now.append((fx1, fy1, fx2, fy2))
         # per-frame license-plate detection: plates on dashcam/CCTV footage move
         # fast, so (like dense faces) we re-detect every frame at the true
         # position rather than tracking. Only runs if a plate model is loaded.
@@ -5548,9 +5582,9 @@ def run_scan(args, cb=None):
             bhold = 0.3 * max(1, dense_stride) / fps
             _bsc = _scope_at(t_now)
             _bzr = _bsc.get("person")
-            for det_row in (
-                    personer.find(frame, detect_scale) if "person" in _bsc
-                    else []):
+            person_rows = (personer.find(frame, detect_scale)
+                           if "person" in _bsc else [])
+            for det_row in person_rows:
                 bx1, by1, bx2, by2, bconf = det_row[:5]
                 bpoly = det_row[5] if len(det_row) > 5 else ()
                 if _bzr and not in_any_zone((bx1, by1, bx2, by2), _bzr):
@@ -5612,6 +5646,44 @@ def run_scan(args, cb=None):
                     "screen", "screen", round(sconf, 3), (cx, cy),
                     dense=True, poly=spoly))
                 dense_now.append((sx1, sy1, sx2, sy2))
+        # head blur: face detectors can't see the BACK of a turned head,
+        # but hair/ears/head-shape identify people anyway. With
+        # --face-heads on and a person model loaded, derive a head
+        # region from every person detection and add it to the face
+        # category — skipping heads that already contain a live face
+        # detection (no doubled cards). Union-only: can never LOSE a
+        # face the detector found.
+        if (getattr(args, "face_heads", False) and "face" in cats
+                and personer is not None and personer.available()
+                and idx % max(1, dense_stride) == 0):
+            _hsc = _scope_at(t_now)
+            if "face" in _hsc:
+                _hzr = _hsc.get("face")
+                if person_rows is None:
+                    person_rows = personer.find(frame, detect_scale)
+                hhold = 0.3 * max(1, dense_stride) / fps
+                for row in person_rows:
+                    hb = _head_box(row)
+                    if hb is None:
+                        continue
+                    hx1, hy1, hx2, hy2 = hb
+                    if any(hx1 <= (f0 + f2) / 2 <= hx2
+                           and hy1 <= (f1 + f3) / 2 <= hy2
+                           for f0, f1, f2, f3 in face_now):
+                        continue        # a real face already covers this
+                    if _hzr and not in_any_zone((hx1, hy1, hx2, hy2),
+                                                _hzr):
+                        continue
+                    if in_ignore_region((hx1, hy1, hx2, hy2),
+                                        args.ignore_regions):
+                        continue
+                    raw.append(Detection(
+                        t_now, t_now + hhold,
+                        (int(hx1 - cx), int(hy1 - cy),
+                         int(hx2 - cx), int(hy2 - cy)),
+                        "face", "head", round(float(row[4]), 3),
+                        (cx, cy), dense=True))
+                    dense_now.append((hx1, hy1, hx2, hy2))
         moved = abs(cx - scan_cx) + abs(cy - scan_cy)
         step_eff, trig_eff = step, args.scan_trigger
         if adapt:

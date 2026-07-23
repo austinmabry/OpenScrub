@@ -143,6 +143,15 @@ Key classes/functions (locate with grep, line numbers drift):
   default (`--face-shape`, deface-style; blur_region/_blur_yuv10 take
   shape=), and `mosaic` is a real pixelation now (region-relative tiles),
   not a silent alias of blur.
+- Head blur (`--face-heads`, web Advanced "cover turned heads"):
+  `_head_box(row)` derives a head region from every person detection —
+  silhouette top-32% bbox when a -seg poly exists, top-centre box slice
+  otherwise — and emits it as a dense FACE-category sample (text
+  "head"), skipping heads that already contain a live face detection.
+  Union-only (can never lose a real face), needs a person model
+  (personer loads for face_heads too), rides the normal dense-face
+  track machinery. Validated e2e on real footage (204 head samples
+  beside 339 face samples on turned-away subjects).
 - Scroll tracking + safety bands require TEXT categories: they exist to
   cover unscanned text, and on real-world video the tracker reads camera/
   subject motion as scrolling (edge-band smears, drifting boxes). Face/
