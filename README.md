@@ -141,6 +141,26 @@ faces are stationary or scroll with the page rather than moving rapidly
 across the frame. In all cases this is a **best-effort assistive tool:
 review the output before publishing.**
 
+## Choosing a redaction mode
+
+Not all redactions are equally irreversible. Modern ML can partially
+reverse weak pixelation and sometimes deblur faces — especially with
+many video frames of the same region to average across. OpenScrub's
+modes, strongest first:
+
+1. **box** — solid fill. Nothing to recover. Recommended for text.
+2. **inpaint** — the region is reconstructed from its surroundings, as
+   if the object was never there. Retains nothing of the original;
+   looks cleaner than a box.
+3. **mosaic** — pixelation with tiles that scale with the region
+   (floor 6px). Strong for faces; prefer box/inpaint for text.
+4. **blur** — Gaussian blur with a kernel that scales with the region.
+   Best looking; weakest against determined reconstruction.
+
+Set the default in Advanced → "Default redaction", or per category via
+the mode dropdown on each category row. Safety bands always use the
+strongest mode any category selected.
+
 ## Install with Docker (recommended)
 
 The most complete OpenScrub install: Tesseract, FFmpeg, spaCy NER, and

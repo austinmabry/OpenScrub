@@ -151,7 +151,7 @@ details .inner .full{grid-column:1/-1}
   <div><label>Encoder</label><select id="encoder"><option>auto</option>
    <option>nvenc</option><option>qsv</option><option>x264</option></select></div>
   <div><label>Default redaction</label><select id="mode"><option>blur</option>
-   <option>box</option><option>mosaic</option></select></div>
+   <option>box</option><option>mosaic</option><option>inpaint</option></select></div>
   <div><label>Person cover <span title="tight = silhouette-hugging (best
    looking). box = full detection box (hides body shape). concealed =
    oversized gliding box that also hides height, build and walking gait
@@ -612,7 +612,8 @@ function renderCats(){
    +'<option value="">default</option>'
    +'<option '+(S.mm[c]==="blur"?"selected":"")+'>blur</option>'
    +'<option '+(S.mm[c]==="box"?"selected":"")+'>box</option>'
-   +'<option '+(S.mm[c]==="mosaic"?"selected":"")+'>mosaic</option></select>'
+   +'<option '+(S.mm[c]==="mosaic"?"selected":"")+'>mosaic</option>'
+   +'<option '+(S.mm[c]==="inpaint"?"selected":"")+'>inpaint</option></select>'
    +'</div>';
  }
  const nTrk=(w.track||[]).length;

@@ -2235,6 +2235,39 @@ def merge_detections(dets, hold, scans=None, bridge_gap=4.0, fuzz=None,
 # Render
 # ----------------------------------------------------------------------------
 
+def _inpaint_fill(img, x1, y1, x2, y2):
+    """Region fill for mode "inpaint": reconstruct the area from its
+    surroundings (cv2 Telea) on a context-padded crop, so the object
+    looks like it was never there. Unlike blur/mosaic the result
+    retains NOTHING of the original pixels — it cannot be reversed by
+    deblurring/depixelation attacks. Accepts 8-bit BGR frames and
+    10-bit single-channel planes (HDR path: inpainted content is
+    synthetic anyway, so the 8-bit round-trip inside the region loses
+    nothing that matters; untouched pixels are never touched)."""
+    h, w = img.shape[:2]
+    pw, ph = max(16, (x2 - x1) // 2), max(16, (y2 - y1) // 2)
+    cx1, cy1 = max(0, x1 - pw), max(0, y1 - ph)
+    cx2, cy2 = min(w, x2 + pw), min(h, y2 + ph)
+    crop = img[cy1:cy2, cx1:cx2]
+    ten_bit = crop.dtype == np.uint16
+    work = ((np.clip(crop, 0, 1023) >> 2).astype(np.uint8)
+            if ten_bit else crop)
+    mask = np.zeros(work.shape[:2], np.uint8)
+    mask[y1 - cy1:y2 - cy1, x1 - cx1:x2 - cx1] = 255
+    # inpainting cost grows with area — halve very large crops
+    if max(work.shape[:2]) > 720:
+        s = 720.0 / max(work.shape[:2])
+        sm = cv2.resize(work, None, fx=s, fy=s)
+        mk = cv2.resize(mask, (sm.shape[1], sm.shape[0]),
+                        interpolation=cv2.INTER_NEAREST)
+        fill = cv2.inpaint(sm, mk, 3, cv2.INPAINT_TELEA)
+        fill = cv2.resize(fill, (work.shape[1], work.shape[0]))
+    else:
+        fill = cv2.inpaint(work, mask, 3, cv2.INPAINT_TELEA)
+    out = fill[y1 - cy1:y2 - cy1, x1 - cx1:x2 - cx1]
+    return (out.astype(np.uint16) << 2) if ten_bit else out
+
+
 def blur_region(frame, x1, y1, x2, y2, mode, shape="rect"):
     h, w = frame.shape[:2]
     x1 = max(0, int(x1)); y1 = max(0, int(y1))
@@ -2244,11 +2277,13 @@ def blur_region(frame, x1, y1, x2, y2, mode, shape="rect"):
     roi = frame[y1:y2, x1:x2]
     if mode == "box":
         filled = np.zeros_like(roi)
+    elif mode == "inpaint":
+        filled = _inpaint_fill(frame, x1, y1, x2, y2)
     elif mode == "mosaic":
         # fragment size scales with the region (~14 tiles across) so small
         # and large faces pixelate consistently — deface sizes fragments in
         # absolute pixels and its users ask for exactly this (issue #60)
-        fw = max(2, (x2 - x1) // 14)
+        fw = max(6, (x2 - x1) // 14)
         small = cv2.resize(roi, (max(1, (x2 - x1) // fw),
                                  max(1, (y2 - y1) // fw)),
                            interpolation=cv2.INTER_LINEAR)
@@ -2324,8 +2359,10 @@ def blur_silhouette(frame, x1, y1, x2, y2, mode, polys, poly_box,
     roi = frame[y1i:y2i, x1i:x2i]
     if mode == "box":
         filled = np.zeros_like(roi)
+    elif mode == "inpaint":
+        filled = _inpaint_fill(frame, x1i, y1i, x2i, y2i)
     elif mode == "mosaic":
-        fw = max(2, rw // 14)
+        fw = max(6, rw // 14)
         small = cv2.resize(roi, (max(1, rw // fw), max(1, rh // fw)),
                            interpolation=cv2.INTER_LINEAR)
         filled = cv2.resize(small, (rw, rh), interpolation=cv2.INTER_NEAREST)
@@ -2598,8 +2635,10 @@ def _blur_yuv10(y, u, v, x1, y1, x2, y2, mode, shape="rect"):
         roi = plane[py1:py2, px1:px2]
         if mode == "box":
             filled = np.full_like(roi, black)
+        elif mode == "inpaint":
+            filled = _inpaint_fill(plane, px1, py1, px2, py2)
         elif mode == "mosaic":
-            fw = max(2, (px2 - px1) // 14)
+            fw = max(6, (px2 - px1) // 14)
             small = cv2.resize(roi, (max(1, (px2 - px1) // fw),
                                      max(1, (py2 - py1) // fw)),
                                interpolation=cv2.INTER_LINEAR)
@@ -2676,8 +2715,10 @@ def _blur_silhouette_yuv10(y, u, v, x1, y1, x2, y2, mode, polys,
         roi = plane[py1:py2, px1:px2]
         if mode == "box":
             filled = np.full_like(roi, black)
+        elif mode == "inpaint":
+            filled = _inpaint_fill(plane, px1, py1, px2, py2)
         elif mode == "mosaic":
-            fw = max(2, (px2 - px1) // 14)
+            fw = max(6, (px2 - px1) // 14)
             small = cv2.resize(roi, (max(1, (px2 - px1) // fw),
                                      max(1, (py2 - py1) // fw)),
                                interpolation=cv2.INTER_LINEAR)
@@ -2888,8 +2929,8 @@ def render_hdr(src, dst, detections, cum, bands, fps, pad, mode,
 
         bx, by = bands[min(idx, len(bands) - 1)]
         vals = set(mode_map.values()) | {mode}
-        band_mode = ("box" if "box" in vals else
-                     "mosaic" if "mosaic" in vals else "blur")
+        band_mode = ("box" if ("box" in vals or "inpaint" in vals)
+                     else "mosaic" if "mosaic" in vals else "blur")
         def band(x1, y1_, x2, y2_):
             _blur_yuv10(y, u, v, x1, y1_, x2, y2_, band_mode)
         if by < -2:
@@ -3098,8 +3139,8 @@ def render(src, dst, detections, cum, bands, fps, pad, mode, preview,
         # 2. safety bands: unscanned content that scrolled into view
         bx, by = bands[min(idx, len(bands) - 1)]
         vals = set(mode_map.values()) | {mode}
-        band_mode = ("box" if "box" in vals else
-                     "mosaic" if "mosaic" in vals else "blur")  # never weaker
+        band_mode = ("box" if ("box" in vals or "inpaint" in vals)
+                     else "mosaic" if "mosaic" in vals else "blur")  # never weaker
         def band(x1, y1, x2, y2):
             if preview:
                 cv2.rectangle(frame, (int(x1), int(y1)), (int(x2 - 1), int(y2 - 1)), (0, 165, 255), 2)
@@ -4789,7 +4830,8 @@ def build_parser():
                          "(best looking), box = full detection box (hides "
                          "body shape), concealed = gliding oversized box "
                          "(witness-grade: also hides walking gait)")
-    ap.add_argument("--mode", choices=["blur", "box", "mosaic"],
+    ap.add_argument("--mode", choices=["blur", "box", "mosaic",
+                                       "inpaint"],
                     default="blur",
                     help="default redaction style: blur (reversible-ish), "
                          "box (solid black, irreversible), or mosaic "
@@ -4927,13 +4969,13 @@ def _prep_args(args, parser):
     mm = {}
     raw_mm = getattr(args, "mode_map", "") or ""
     if isinstance(raw_mm, dict):
-        mm = {k: v for k, v in raw_mm.items() if v in ("blur", "box", "mosaic")}
+        mm = {k: v for k, v in raw_mm.items() if v in ("blur", "box", "mosaic", "inpaint")}
     elif raw_mm:
         for pair in str(raw_mm).replace(";", ",").split(","):
             if "=" in pair:
                 k, v = pair.split("=", 1)
                 k, v = k.strip().lower(), v.strip().lower()
-                if v in ("blur", "box", "mosaic"):
+                if v in ("blur", "box", "mosaic", "inpaint"):
                     mm[k] = v
     args.mode_map = mm
     args.zones_data = None

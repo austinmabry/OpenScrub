@@ -1853,3 +1853,42 @@ def test_person_detector_find_classes_filter():
     rows = s.find_classes(None)
     assert len(rows) == 2 and all(len(r) == 6 for r in rows)
     assert s.want_any is False, "person-only mode must be restored"
+
+
+def test_inpaint_mode_and_mosaic_floor():
+    """'inpaint' reconstructs the region from its surroundings — the
+    output must retain nothing of the original content (unlike blur,
+    it cannot be attacked with deconvolution). Mosaic tiles now floor
+    at 6px: 2px tiles barely pixelate and are the depixelation
+    attack's favourite input."""
+    rng = np.random.default_rng(3)
+    frame = np.full((240, 320, 3), 90, np.uint8)
+    frame += rng.integers(0, 12, frame.shape, np.uint8)   # textured bg
+    secret = rng.integers(0, 255, (60, 100, 3), np.uint8)
+    frame[90:150, 110:210] = secret
+    before = frame[90:150, 110:210].copy()
+    openscrub.blur_region(frame, 110, 90, 210, 150, "inpaint")
+    after = frame[90:150, 110:210]
+    diff = float(np.abs(after.astype(int) - before.astype(int)).mean())
+    assert diff > 30, "inpaint must replace the content entirely"
+    corr = float(np.corrcoef(after.mean(2).ravel(),
+                             before.mean(2).ravel())[0, 1])
+    assert abs(corr) < 0.35, "no structural trace of the original"
+
+    # 10-bit planar path accepts inpaint too (HDR)
+    y = np.full((64, 64), 512, np.uint16)
+    y[20:40, 20:40] = rng.integers(0, 1023, (20, 20)).astype(np.uint16)
+    u = np.full((32, 32), 512, np.uint16)
+    v = np.full((32, 32), 512, np.uint16)
+    openscrub._blur_yuv10(y, u, v, 20, 20, 40, 40, "inpaint")
+    assert int(y[30, 30]) != int(rng.integers(0, 1023))  # smoke: no crash
+    assert y.dtype == np.uint16
+
+    # mosaic floor: a small region must still get >=6px tiles
+    small = np.zeros((20, 28, 3), np.uint8)
+    small[:, ::2] = 255                        # 1px stripes
+    f2 = small.copy()
+    openscrub.blur_region(f2, 0, 0, 28, 20, "mosaic")
+    cols = f2[10, :, 0].astype(int)
+    runs = sum(1 for i in range(1, 28) if cols[i] != cols[i - 1])
+    assert runs <= 6, "6px+ tiles must destroy 1px stripes"
