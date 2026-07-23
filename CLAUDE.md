@@ -125,6 +125,19 @@ Key classes/functions (locate with grep, line numbers drift):
   EMPTY and the category is inactive without a pattern (empty must map to
   `mrn_re=None`, never `re.compile("")` — that matches every word).
   `RE_MRN_DEFAULT` survives only as the documented example.
+- Structured recognizers (Presidio-style, CHECKSUM-gated, selectable
+  but NOT in the CLI default list): `bank` = IBAN (mod-97 + ISO country
+  gate) / US ABA routing (weight checksum, leading-digit gate, not-SSN
+  guard) / SWIFT-BIC (real ISO-3166 country code + a digit required);
+  `crypto` = BTC legacy (FULL Base58Check double-sha256) / bech32 / ETH;
+  `passport` = MRZ lines (unspaced uppercase runs with >=4 '<'
+  fillers). Word-loop order: card -> bank -> crypto -> passport ->
+  apikey (crypto/IBAN strings match the generic apikey pattern, so they
+  must be checked FIRST). detect_phi emits them always; run_scan's
+  `d.category in cats` filter keeps them inert unless selected. GLiNER
+  NER was evaluated and DEFERRED: a faithful no-torch ONNX pipeline for
+  its span/prompt scheme is high-risk to hand-roll; spaCy + heuristics
+  stay, revisit when an official ONNX runtime exists.
 - `PhiMemory`, `detect_phi` and other `phi`-named INTERNAL identifiers
   keep their names (report/API compatibility — do not rename). But ALL
   user-facing text — UI labels, tooltips, log lines, CLI help, README —

@@ -1959,3 +1959,32 @@ def test_decode_db_text_regions():
     assert sc > 0.85
     assert x1 < 100 and x2 > 600, "box must scale to frame coords"
     assert y1 < 200 and y2 > 280, "unclip pad must expand the region"
+
+
+def test_structured_recognizers_checksums():
+    """bank/crypto/passport recognizers are CHECKSUM-gated: a match must
+    verify (IBAN mod-97, ABA weights, Base58Check) — patterns alone
+    would flood text with false positives."""
+    assert openscrub._iban_ok("GB82WEST12345698765432")
+    assert not openscrub._iban_ok("GB82WEST12345698765431")
+    assert openscrub._aba_ok("021000021")          # real Fed routing
+    assert not openscrub._aba_ok("021000022")
+    assert openscrub._btc_ok("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa")
+    assert not openscrub._btc_ok("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNb")
+    assert openscrub._mrz_ok("P<UTOERIKSSON<<ANNA<MARIA<<<<<<<<<<<<<<<<<<<")
+    assert not openscrub._mrz_ok("HELLOWORLDHELLOWORLD")
+
+    words = [
+        ("GB82WEST12345698765432", (0, 0, 100, 10), 0.9),
+        ("021000021", (0, 20, 100, 30), 0.9),
+        ("0x52908400098527886E0F7030069857D2E4169EE7", (0, 40, 100, 50), 0.9),
+        ("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", (0, 60, 100, 70), 0.9),
+        ("P<UTOERIKSSON<<ANNA<MARIA<<<<<<<<<<<<<<<<<<<", (0, 80, 100, 90), 0.9),
+        ("armadillo", (0, 100, 100, 110), 0.9),
+        ("123456789", (0, 120, 100, 130), 0.9),   # fails ABA checksum
+    ]
+    dets = openscrub.detect_phi(words, [], 0.0, (0, 0), None, None)
+    cats = sorted(d.category for d in dets)
+    assert cats.count("bank") == 2, cats       # IBAN + routing
+    assert cats.count("crypto") == 2, cats     # ETH + BTC
+    assert cats.count("passport") == 1, cats

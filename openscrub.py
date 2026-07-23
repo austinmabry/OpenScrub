@@ -269,6 +269,75 @@ RE_DATE = re.compile(
 )
 RE_PHONE = re.compile(r"\(?\b\d{3}\)?[-. ]\d{3}[-. ]\d{4}\b")
 RE_SSN = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
+# --- structured-PII recognizers (Presidio-style: pattern + CHECKSUM, so
+# a match is near-certain, never a lucky number). All three categories
+# are selectable but NOT in the CLI default list.
+RE_IBAN = re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b")
+RE_ROUTING = re.compile(r"\b\d{9}\b")
+RE_SWIFT = re.compile(r"\b[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?\b")
+RE_BTC = re.compile(r"\b[13][a-km-zA-HJ-NP-Z1-9]{25,34}\b")
+RE_BECH32 = re.compile(r"\b(?:bc1|tb1)[ac-hj-np-z02-9]{25,60}\b")
+RE_ETH = re.compile(r"\b0x[a-fA-F0-9]{40}\b")
+# machine-readable zone lines (passports/ID cards): long unspaced
+# uppercase runs with the telltale "<" fillers
+RE_MRZ = re.compile(r"[A-Z0-9<]{24,}")
+# ISO-3166 alpha-2 codes — SWIFT positions 5-6 must be a real country,
+# which is what separates a BIC from any 8-letter CAPS word
+_ISO_CC = set(("AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD"
+               " BE BF BG BH BI BJ BL BM BN BO BQ BR BS BT BV BW BY BZ CA"
+               " CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ DE"
+               " DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR GA"
+               " GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY HK"
+               " HM HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE JM JO JP"
+               " KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK LR LS LT"
+               " LU LV LY MA MC MD ME MF MG MH MK ML MM MN MO MP MQ MR MS"
+               " MT MU MV MW MX MY MZ NA NC NE NF NG NI NL NO NP NR NU NZ"
+               " OM PA PE PF PG PH PK PL PM PN PR PS PT PW PY QA RE RO RS"
+               " RU RW SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST"
+               " SV SX SY SZ TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW"
+               " TZ UA UG UM US UY UZ VA VC VE VG VI VN VU WF WS YE YT ZA"
+               " ZM ZW").split())
+
+
+def _iban_ok(s):
+    """IBAN mod-97 == 1 (ISO 13616) — near-zero false positives."""
+    s = s.upper()
+    if s[:2] not in _ISO_CC:
+        return False
+    r = s[4:] + s[:4]
+    n = "".join(str(int(c, 36)) for c in r)
+    return int(n) % 97 == 1
+
+
+def _aba_ok(d):
+    """US bank routing number checksum (ABA)."""
+    if len(d) != 9 or not d.isdigit():
+        return False
+    w = (3, 7, 1, 3, 7, 1, 3, 7, 1)
+    return sum(int(c) * x for c, x in zip(d, w)) % 10 == 0 and d[0] in "01123"
+
+
+_B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+
+def _btc_ok(s):
+    """Base58Check: decode + double-sha256 checksum — a legacy BTC
+    address either verifies exactly or it is not an address."""
+    n = 0
+    for c in s:
+        i = _B58.find(c)
+        if i < 0:
+            return False
+        n = n * 58 + i
+    raw = n.to_bytes(25, "big")
+    chk = hashlib.sha256(hashlib.sha256(raw[:-4]).digest()).digest()[:4]
+    return raw[-4:] == chk
+
+
+def _mrz_ok(s):
+    """MRZ heuristic: unspaced uppercase run with several '<' fillers
+    and a plausible document-line shape."""
+    return len(s) >= 20 and s.count("<") >= 4 and not s.strip("<").isdigit()
 RE_EMAIL = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.]+\b")
 # API keys / tokens / secrets: common pref'd shapes + long high-entropy blobs.
 RE_APIKEY = re.compile(r"""(?x)
@@ -676,6 +745,22 @@ def detect_phi(words, lines, t, offset, namer, mrn_re, custom_res=()):
         m_card = RE_CARD.search(txt)
         if m_card and _luhn_ok(re.sub(r"\D", "", m_card.group())):
             add(box, "card", txt, conf)
+        elif (m_ib := RE_IBAN.search(txt)) and _iban_ok(m_ib.group()):
+            add(box, "bank", txt, conf)
+        elif (m_rt := RE_ROUTING.fullmatch(txt.strip(".,:;()")) or
+              RE_ROUTING.search(txt)) and _aba_ok(m_rt.group()) \
+                and not RE_SSN.search(txt):
+            add(box, "bank", txt, conf)
+        elif (m_sw := RE_SWIFT.fullmatch(txt.strip(".,:;()"))) \
+                and m_sw.group()[4:6] in _ISO_CC \
+                and any(ch.isdigit() for ch in m_sw.group()[6:]):
+            add(box, "bank", txt, conf)
+        elif RE_ETH.search(txt) or RE_BECH32.search(txt) \
+                or ((m_bt := RE_BTC.search(txt))
+                    and _btc_ok(m_bt.group())):
+            add(box, "crypto", txt, conf)
+        elif (m_mz := RE_MRZ.search(txt)) and _mrz_ok(m_mz.group()):
+            add(box, "passport", txt, conf)
         elif RE_APIKEY.search(txt) or RE_APIKEY_GENERIC.search(txt):
             add(box, "apikey", txt, conf)
         elif RE_IP.search(txt):
