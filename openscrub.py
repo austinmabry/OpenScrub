@@ -35,7 +35,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.63"
+VERSION = "1.0.64"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -2438,9 +2438,45 @@ class Callbacks:
         return False
 
 
+def _ort_session(path):
+    """onnxruntime session on the best available hardware: CUDA (the
+    :cuda image) > OpenVINO (the :intel image — AUTO targets the
+    iGPU/Arc and falls back to CPU) > CPU. OPENSCRUB_CPU_DNN=1 forces
+    CPU. CPU is always listed last so onnxruntime can fall back
+    per-node if GPU init fails at runtime — a driver mismatch degrades
+    to CPU instead of killing the job."""
+    import onnxruntime as ort
+    avail = ort.get_available_providers()
+    force_cpu = os.environ.get("OPENSCRUB_CPU_DNN") == "1"
+    gpu = ([] if force_cpu else
+           [p for p in ("CUDAExecutionProvider", "OpenVINOExecutionProvider")
+            if p in avail])
+    if "OpenVINOExecutionProvider" in gpu:
+        withopts = [("OpenVINOExecutionProvider",
+                     {"device_type": "AUTO:GPU,CPU"})
+                    if p == "OpenVINOExecutionProvider" else p
+                    for p in gpu] + ["CPUExecutionProvider"]
+        try:
+            return ort.InferenceSession(path, providers=withopts)
+        except Exception:
+            pass    # device-option drift across ORT versions: retry plain
+    return ort.InferenceSession(path, providers=gpu
+                                + ["CPUExecutionProvider"])
+
+
+_ENC_LADDERS = {"auto": ["h264_nvenc", "h264_qsv"],
+                "nvenc": ["h264_nvenc"],
+                "qsv": ["h264_qsv"],
+                "x264": []}
+
+
 def nvenc_available(encoder_pref, cb):
-    """Pick the video encoder. Pre-flight tests NVENC with a tiny encode so
-    we fail fast instead of discovering a broken NVENC after a full render."""
+    """Pick the video encoder — GPU ladder with CPU fallback. NVENC
+    (NVIDIA) is tried first, then QSV (Intel iGPU/Arc — the :intel
+    Docker image). Every candidate must pass a tiny REAL test encode
+    before being trusted, so we fail fast instead of discovering a
+    broken encoder after a full render; no working GPU encoder →
+    libx264 (CPU)."""
     if encoder_pref == "x264":
         return "libx264"
     if not shutil.which("ffmpeg"):
@@ -2451,26 +2487,33 @@ def nvenc_available(encoder_pref, cb):
             capture_output=True, text=True, timeout=15).stdout
     except Exception:
         listed = ""
-    if "h264_nvenc" not in listed:
-        cb.log("      note: h264_nvenc not present in this ffmpeg build — using libx264.\n"
-               "            Install a full build (e.g. `winget install Gyan.FFmpeg`) for GPU encoding.")
+    ladder = _ENC_LADDERS.get(encoder_pref, _ENC_LADDERS["auto"])
+    present = [e for e in ladder if e in listed]
+    if not present:
+        cb.log("      note: no GPU encoder (%s) in this ffmpeg build — "
+               "using libx264.\n"
+               "            Install a full build (e.g. `winget install "
+               "Gyan.FFmpeg`) for GPU encoding." % "/".join(ladder))
         return "libx264"
-    try:
-        # 30 frames: NVENC buffers frames internally (B-frames/lookahead),
-        # so a too-short test can emit zero packets on a WORKING encoder
-        test = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-loglevel", "error",
-             "-f", "lavfi", "-i", "color=black:s=256x256:r=30", "-t", "1",
-             "-c:v", "h264_nvenc", "-f", "null", "-"],
-            capture_output=True, text=True, timeout=60)
-        if test.returncode == 0:
-            return "h264_nvenc"
-        err = (test.stderr or "").strip() or "(no error output)"
-        cb.log("      note: h264_nvenc failed its test encode — using libx264. ffmpeg said:")
-        for line in err.splitlines()[-12:]:
-            cb.log(f"            {line}")
-    except Exception as e:
-        cb.log(f"      note: NVENC test errored ({e}) — using libx264")
+    for enc in present:
+        try:
+            # 30 frames: GPU encoders buffer frames internally (B-frames/
+            # lookahead), so a too-short test can emit zero packets on a
+            # WORKING encoder
+            test = subprocess.run(
+                ["ffmpeg", "-hide_banner", "-loglevel", "error",
+                 "-f", "lavfi", "-i", "color=black:s=256x256:r=30",
+                 "-t", "1", "-c:v", enc, "-f", "null", "-"],
+                capture_output=True, text=True, timeout=60)
+            if test.returncode == 0:
+                return enc
+            err = (test.stderr or "").strip() or "(no error output)"
+            cb.log(f"      note: {enc} failed its test encode — trying the "
+                   "next encoder. ffmpeg said:")
+            for line in err.splitlines()[-12:]:
+                cb.log(f"            {line}")
+        except Exception as e:
+            cb.log(f"      note: {enc} test errored ({e})")
     return "libx264"
 
 
@@ -2482,13 +2525,16 @@ def hevc10_encoder(encoder="auto", cb=None):
     machine can actually run (verified with a real test encode) — needed to
     PRESERVE HDR output. encoder="x264" (the CPU choice) skips the GPU."""
     cb = cb or Callbacks()
-    order = ["libx265"] if encoder == "x264" else ["hevc_nvenc", "libx265"]
+    order = {"x264": ["libx265"],
+             "nvenc": ["hevc_nvenc", "libx265"],
+             "qsv": ["hevc_qsv", "libx265"]}.get(
+        encoder, ["hevc_nvenc", "hevc_qsv", "libx265"])
     key = tuple(order)
     if key in _HEVC10:
         return _HEVC10[key]
     found = None
     for enc in order:
-        pixfmt = "p010le" if enc == "hevc_nvenc" else "yuv420p10le"
+        pixfmt = "yuv420p10le" if enc == "libx265" else "p010le"
         try:
             t = subprocess.run(
                 ["ffmpeg", "-hide_banner", "-loglevel", "error",
@@ -2690,7 +2736,7 @@ def render_hdr(src, dst, detections, cum, bands, fps, pad, mode,
     total = int(meta.get(cv2.CAP_PROP_FRAME_COUNT))
     meta.release()
     cb.log(f"      encoder: {encoder} 10-bit"
-           + (" (GPU)" if encoder == "hevc_nvenc" else " (CPU)"))
+           + (" (GPU)" if encoder.endswith(("_nvenc", "_qsv")) else " (CPU)"))
 
     dec = subprocess.Popen(
         ["ffmpeg", "-loglevel", "error", "-i", src,
@@ -2699,9 +2745,13 @@ def render_hdr(src, dst, detections, cum, bands, fps, pad, mode,
         bufsize=w * h * 6)
     vargs = (["-c:v", "hevc_nvenc", "-preset", "p4", "-cq", "19",
               "-profile:v", "main10", "-pix_fmt", "p010le"]
-             if encoder == "hevc_nvenc"
-             else ["-c:v", "libx265", "-crf", "18", "-preset", "fast",
-                   "-pix_fmt", "yuv420p10le"])
+             if encoder == "hevc_nvenc" else
+             ["-c:v", "hevc_qsv", "-preset", "medium",
+              "-global_quality", "19", "-profile:v", "main10",
+              "-pix_fmt", "p010le"]
+             if encoder == "hevc_qsv" else
+             ["-c:v", "libx265", "-crf", "18", "-preset", "fast",
+              "-pix_fmt", "yuv420p10le"])
     targs = [a for kv in (tags or {}).items() for a in kv]
     if os.path.splitext(dst)[1].lower() in (".mp4", ".mov"):
         targs += ["-tag:v", "hvc1"]          # QuickTime/Apple compatibility
@@ -2837,16 +2887,23 @@ def render(src, dst, detections, cum, bands, fps, pad, mode, preview,
             codec = henc
     if codec:
         cb.log(f"      encoder: {codec}"
-               + (" (GPU)" if codec.endswith("_nvenc") else " (CPU)"))
+               + (" (GPU)" if codec.endswith(("_nvenc", "_qsv"))
+                  else " (CPU)"))
         if codec == "h264_nvenc":
             vargs = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "19"]
         elif codec == "hevc_nvenc":
             vargs = ["-c:v", "hevc_nvenc", "-preset", "p4", "-cq", "19"]
+        elif codec == "h264_qsv":
+            vargs = ["-c:v", "h264_qsv", "-preset", "medium",
+                     "-global_quality", "19"]
+        elif codec == "hevc_qsv":
+            vargs = ["-c:v", "hevc_qsv", "-preset", "medium",
+                     "-global_quality", "19"]
         elif codec == "libx265":
             vargs = ["-c:v", "libx265", "-crf", "20", "-preset", "fast"]
         else:
             vargs = ["-c:v", "libx264", "-crf", "18", "-preset", "fast"]
-        if codec in ("hevc_nvenc", "libx265") \
+        if codec in ("hevc_nvenc", "hevc_qsv", "libx265") \
                 and os.path.splitext(dst)[1].lower() in (".mp4", ".mov"):
             vargs += ["-tag:v", "hvc1"]      # QuickTime/Apple compatibility
         # output trim ("keep bookends"): only [cs, ce] of the video reaches
@@ -3511,12 +3568,7 @@ class PlateDetector:
             # CUDA init fails at runtime, so a cuDNN mismatch degrades to CPU
             # rather than killing the job. OPENSCRUB_CPU_DNN=1 forces CPU, the
             # same escape hatch the OpenCV DNN path honours.
-            avail = ort.get_available_providers()
-            force_cpu = os.environ.get("OPENSCRUB_CPU_DNN") == "1"
-            providers = (["CUDAExecutionProvider", "CPUExecutionProvider"]
-                         if ("CUDAExecutionProvider" in avail and not force_cpu)
-                         else ["CPUExecutionProvider"])
-            sess = ort.InferenceSession(found, providers=providers)
+            sess = _ort_session(found)
             self.ort = sess
             self._ort_in = sess.get_inputs()[0].name
             self._ort_out = [o.name for o in sess.get_outputs()]
@@ -3708,14 +3760,7 @@ class PersonDetector(PlateDetector):
         if self.seg and self.ort is None and self.net is not None:
             try:
                 import onnxruntime as ort
-                avail = ort.get_available_providers()
-                force_cpu = os.environ.get("OPENSCRUB_CPU_DNN") == "1"
-                providers = (["CUDAExecutionProvider", "CPUExecutionProvider"]
-                             if ("CUDAExecutionProvider" in avail
-                                 and not force_cpu)
-                             else ["CPUExecutionProvider"])
-                sess = ort.InferenceSession(self.model_path,
-                                            providers=providers)
+                sess = _ort_session(self.model_path)
                 self.ort = sess
                 self._ort_in = sess.get_inputs()[0].name
                 self._ort_out = [o.name for o in sess.get_outputs()]
@@ -4400,8 +4445,11 @@ def normalize_vfr(args, cb):
 
     codec = nvenc_available(getattr(args, "encoder", "auto"), cb)
     sdr_vargs = ((["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "18"]
-                  if codec == "h264_nvenc"
-                  else ["-c:v", "libx264", "-crf", "18", "-preset", "fast"])
+                  if codec == "h264_nvenc" else
+                  ["-c:v", "h264_qsv", "-preset", "medium",
+                   "-global_quality", "18"]
+                  if codec == "h264_qsv" else
+                  ["-c:v", "libx264", "-crf", "18", "-preset", "fast"])
                  + ["-pix_fmt", "yuv420p"])
     if is_vfr:
         cb.log(f"      input is VFR (avg {avg:.2f} fps) — normalizing to CFR "
@@ -4423,7 +4471,7 @@ def normalize_vfr(args, cb):
     henc = hevc10_encoder(getattr(args, "encoder", "auto"), cb) if want_hdr \
         else None
     if want_hdr and henc is None:
-        cb.log("      NOTE: no 10-bit HEVC encoder available (GPU NVENC or "
+        cb.log("      NOTE: no 10-bit HEVC encoder available (GPU NVENC/QSV or "
                "libx265) — HDR cannot be preserved; output will be "
                "tone-mapped SDR instead.")
         want_hdr = False
@@ -4440,9 +4488,13 @@ def normalize_vfr(args, cb):
             else:
                 hv = (["-c:v", "hevc_nvenc", "-preset", "p4", "-cq", "18",
                        "-profile:v", "main10", "-pix_fmt", "p010le"]
-                      if henc == "hevc_nvenc"
-                      else ["-c:v", "libx265", "-crf", "18", "-preset",
-                            "fast", "-pix_fmt", "yuv420p10le"])
+                      if henc == "hevc_nvenc" else
+                      ["-c:v", "hevc_qsv", "-preset", "medium",
+                       "-global_quality", "18", "-profile:v", "main10",
+                       "-pix_fmt", "p010le"]
+                      if henc == "hevc_qsv" else
+                      ["-c:v", "libx265", "-crf", "18", "-preset",
+                       "fast", "-pix_fmt", "yuv420p10le"])
                 keep = [a for kv in color_tags(src0).items() for a in kv]
                 _encode(src0, hdr_src, cfr=True, tonemap=False,
                         vargs=hv, extra=keep + ["-tag:v", "hvc1"])
@@ -4523,8 +4575,10 @@ def build_parser():
     ap.add_argument("--engine", choices=["auto", "paddle", "tesseract"], default="auto")
     ap.add_argument("--device", choices=["auto", "cpu", "gpu"], default="auto",
                     help="PaddleOCR compute device (default: gpu if available)")
-    ap.add_argument("--encoder", choices=["auto", "nvenc", "x264"], default="auto",
-                    help="video encoder: auto = NVENC (GPU) if available, else libx264")
+    ap.add_argument("--encoder", choices=["auto", "nvenc", "qsv", "x264"],
+                    default="auto",
+                    help="video encoder: auto = NVENC then QSV (GPU) if "
+                         "available, else libx264 (CPU)")
     ap.add_argument("--no-ner", action="store_true", help="disable spaCy NER")
     ap.add_argument("--heuristic-names", choices=["auto", "on", "off"], default="auto",
                     help="capitalized-pair fallback: auto = on when NER unavailable")

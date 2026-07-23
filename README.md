@@ -190,6 +190,24 @@ GPU features engage automatically (the OCR engine picks the CUDA build,
 and the render's NVENC test selects hardware encoding). Note the GPU
 image is several GB.
 
+**Intel GPU build** (`:intel` / `:<version>-intel`) — Quick Sync
+hardware encoding (fast HDR renders on any Gen 9+ iGPU or Arc card)
+plus ONNX model inference through OpenVINO:
+
+```
+docker run -d -p 8384:8384 \
+  --device /dev/dri:/dev/dri \
+  -v openscrub_data:/root/.local/share/OpenScrub \
+  pharmhero/openscrub:intel
+```
+
+`--device /dev/dri` is what hands the container the GPU — without it
+everything still works on the CPU. On **Unraid/CasaOS** add
+`/dev/dri` as a device in the container template. The engine
+pre-flight-tests every hardware encoder with a real encode before
+trusting it and falls back loudly to CPU, so a missing driver can
+never silently break a render.
+
 ## Install from PyPI
 
 ```

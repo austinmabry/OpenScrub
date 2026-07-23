@@ -18,6 +18,7 @@ target is Windows 10 + NVIDIA RTX 3060.
 | `windows/` | Native Windows packaging: `openscrub.spec` (PyInstaller, two branded exes), `installer.iss` (Inno Setup → Program Files), `build_installer.bat` (runs both; attach output exe to the GitHub release). Build on Windows only. |
 | `install.py` | Windows-friendly installer (deps, GPU OCR, shortcut, `--with-plates`). |
 | `docker/` | `Dockerfile.opencv-cuda` builds the CUDA-OpenCV base image (rare, via opencv-cuda-base.yml); `Dockerfile.cuda` FROMs it (base published to ghcr; bump the FROM tag only when the base is rebuilt). |
+| `Dockerfile.intel` | `:intel` image (amd64): Debian non-free iHD media driver + libmfx/libvpl for QSV encode, `onnxruntime-openvino` replacing stock onnxruntime (build asserts the provider registered). Needs `--device /dev/dri`; everything falls back loudly to CPU without it. |
 | `plate_models.json` | Curated license-plate model registry (see PLATES.md). |
 | `face_models.json` | Curated optional face-model registry (CenterFace/SCRFD); built-in YuNet needs no file. Ships everywhere plate_models.json does (wheel, sdist, Dockerfiles, PyInstaller spec, updater pin-carry). |
 | `person_models.json` | Curated person-model registry (YOLOv10 ONNX from onnx-community on HF, AGPL — download-only, never bundled; hashes PRE-pinned, validated at authoring). Ships everywhere plate_models.json does. |
@@ -440,6 +441,16 @@ Key classes/functions (locate with grep, line numbers drift):
   downloads, the TOFU-pinned registry (per-user copy seeded from the
   packaged one; new release models merge in, pins never overwritten),
   web jobs/certs/zones. Folder deploys keep writing next to the code.
+
+Encoders are a pre-flight-tested LADDER (`nvenc_available`: h264_nvenc
+→ h264_qsv → libx264; `hevc10_encoder`: hevc_nvenc → hevc_qsv →
+libx265; `--encoder auto|nvenc|qsv|x264`) — every GPU rung must pass a
+tiny real test encode before being trusted, so a missing driver
+degrades loudly to CPU. All four vargs sites (render, render_hdr,
+normalize_vfr sdr copy + VFR-HDR intermediate) carry qsv branches.
+onnxruntime sessions come from `_ort_session`: CUDA > OpenVINO
+(AUTO:GPU,CPU device, with a plain-provider retry for option-name
+drift) > CPU; `OPENSCRUB_CPU_DNN=1` forces CPU.
 
 OpenCV DNN device: the stock opencv-python wheel is CPU-only, so face
 detection (YuNet/SCRFD/CenterFace) + SFace grouping run on the CPU.

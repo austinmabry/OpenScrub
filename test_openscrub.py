@@ -1684,3 +1684,45 @@ def test_track_dormant_reacquisition(tmp_path):
     for q in late:
         assert q[1][0] > 200, "must re-acquire the subject, not freeze"
         assert q[1][0] < 450, "the bystander must never inherit the track"
+
+
+def test_encoder_ladder_prefers_nvenc_then_qsv(monkeypatch):
+    """The encoder pick is a pre-flight-tested ladder: NVENC first, QSV
+    (the :intel image) second, libx264 as the CPU floor. Every GPU rung
+    must pass a real test encode before being trusted."""
+    class R:
+        def __init__(self, out="", rc=0):
+            self.stdout, self.stderr, self.returncode = out, "", rc
+
+    def fake_run(cmd, **kw):
+        if "-encoders" in cmd:
+            return R(out="h264_qsv hevc_qsv libx264 libx265")
+        return R(rc=0)          # every test encode succeeds
+
+    logs = []
+    class CB:
+        def log(self, m): logs.append(m)
+
+    monkeypatch.setattr(openscrub.subprocess, "run", fake_run)
+    monkeypatch.setattr(openscrub.shutil, "which", lambda n: "/usr/bin/" + n)
+    # no NVENC in the build -> QSV wins on auto
+    assert openscrub.nvenc_available("auto", CB()) == "h264_qsv"
+    # explicit CPU preference skips the GPU entirely
+    assert openscrub.nvenc_available("x264", CB()) == "libx264"
+    # nvenc preference with no nvenc present -> CPU, with a loud note
+    assert openscrub.nvenc_available("nvenc", CB()) == "libx264"
+    assert any("no GPU encoder" in m for m in logs)
+
+    # a QSV rung that FAILS its test encode must fall through to CPU
+    def fake_run_fail(cmd, **kw):
+        if "-encoders" in cmd:
+            return R(out="h264_qsv libx264")
+        return R(rc=1)
+    monkeypatch.setattr(openscrub.subprocess, "run", fake_run_fail)
+    assert openscrub.nvenc_available("auto", CB()) == "libx264"
+
+    # 10-bit HEVC ladder honours the qsv preference and caches per-order
+    openscrub._HEVC10.clear()
+    monkeypatch.setattr(openscrub.subprocess, "run", fake_run)
+    assert openscrub.hevc10_encoder("qsv", CB()) == "hevc_qsv"
+    openscrub._HEVC10.clear()

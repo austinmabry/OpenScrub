@@ -149,7 +149,7 @@ details .inner .full{grid-column:1/-1}
   <div><label>OCR device</label><select id="device"><option>auto</option>
    <option>cpu</option><option>gpu</option></select></div>
   <div><label>Encoder</label><select id="encoder"><option>auto</option>
-   <option>nvenc</option><option>x264</option></select></div>
+   <option>nvenc</option><option>qsv</option><option>x264</option></select></div>
   <div><label>Default redaction</label><select id="mode"><option>blur</option>
    <option>box</option><option>mosaic</option></select></div>
   <div><label>Sample interval (s)</label><input type="number" id="si" value="0.5" step="0.1" min="0.1"></div>

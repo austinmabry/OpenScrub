@@ -1,0 +1,88 @@
+# OpenScrub server image for INTEL GPUs — Quick Sync iGPUs (Gen 9+) and
+# Arc discrete cards. Hardware H.264/HEVC encoding via QSV/VAAPI (fast
+# HDR renders and scan copies) + ONNX inference through the OpenVINO
+# execution provider (plates + person/seg models on the iGPU).
+#
+#     docker run -d -p 8384:8384 \
+#       --device /dev/dri:/dev/dri \
+#       -v openscrub_data:/root/.local/share/OpenScrub \
+#       ghcr.io/austinmabry/openscrub:intel        # or pharmhero/openscrub:intel
+#
+# --device /dev/dri is REQUIRED for GPU use — without it the container
+# still works but everything runs on the CPU (the engine pre-flight
+# tests every encoder with a real test encode and falls back loudly,
+# never silently). On Unraid/CasaOS add the device in the template.
+#
+# Notes:
+# - The iHD media driver covers Gen 9 (Skylake) through Arc. Very new
+#   Arc cards may want a newer compute runtime than Debian ships for
+#   OpenVINO GPU inference; encoding works regardless, and inference
+#   falls back to OpenVINO-on-CPU (still faster than stock CPU ORT).
+# - Same layout as the CPU image otherwise: data lives in the mounted
+#   volume, the container is disposable, in-app updater disabled.
+#
+# LAYER ORDER MATTERS: heavy dependencies install BEFORE the app code is
+# copied, so a release that only changes code rebuilds (and users only
+# re-download) the small app layers at the bottom.
+
+FROM python:3.12-slim
+
+# Debian's non-free component carries the Intel iHD media driver; the
+# QSV stack is libva -> iHD driver, dispatched from ffmpeg through
+# libmfx (Gen 9-11) / libmfx-gen + libvpl (Gen 12+/Arc). intel-opencl-icd
+# is the compute runtime OpenVINO uses to run inference on the iGPU.
+RUN sed -i 's/Components: main/Components: main contrib non-free non-free-firmware/' \
+      /etc/apt/sources.list.d/debian.sources \
+ && apt-get update \
+ && apt-get dist-upgrade -y \
+ && apt-get install -y --no-install-recommends tesseract-ocr ffmpeg \
+      intel-media-va-driver-non-free libmfx1 libmfx-gen1.2 libvpl2 \
+      libva-drm2 intel-opencl-icd vainfo \
+ && rm -rf /var/lib/apt/lists/* \
+ && pip install --no-cache-dir --upgrade pip setuptools wheel
+
+ENV LIBVA_DRIVER_NAME=iHD
+
+WORKDIR /src
+
+# ---- heavy dependency layer: rebuilds ONLY when requirements.txt changes.
+# onnxruntime-openvino REPLACES the stock onnxruntime wheel: same API,
+# adds the OpenVINOExecutionProvider the engine prefers when present
+# (AUTO device: iGPU/Arc when available, CPU otherwise).
+COPY requirements.txt ./
+RUN grep -viE '^onnxruntime' requirements.txt > /tmp/req.noort \
+ && pip install --no-cache-dir -r /tmp/req.noort \
+ && pip install --no-cache-dir onnxruntime-openvino \
+ # spaCy NER for name detection, baked in with its model
+ && python -m spacy download en_core_web_sm \
+ # fail the build if the OpenVINO provider didn't register — an image
+ # tagged :intel that silently ran plain CPU would defeat its purpose
+ && python -c "import onnxruntime as ort; \
+provs = ort.get_available_providers(); \
+assert 'OpenVINOExecutionProvider' in provs, \
+('onnxruntime OpenVINO provider missing: %r' % provs); \
+print('onnxruntime', ort.__version__, '| providers', provs)"
+
+# ---- app layers: tiny, change every release
+COPY pyproject.toml README.md LICENSE NOTICE plate_models.json face_models.json person_models.json ./
+COPY openscrub.py openscrub_web.py openscrub_setup.py openscrub_update.py \
+     openscrub_vault.py zones_ui.py install.py test_openscrub.py ./
+COPY assets/openscrub.ico assets/
+RUN pip install --no-cache-dir --no-deps . \
+ # pre-fetch the face/track models so first run works offline; _fetch_model
+ # retries the flaky LFS media host and verifies the pinned sha256
+ && mkdir -p /root/.openscrub/models \
+ && python -c "import openscrub; \
+openscrub._fetch_model(openscrub.YUNET_URL, \
+'/root/.openscrub/models/face_detection_yunet_2023mar.onnx', \
+sha256=openscrub.YUNET_SHA256, tries=8, delay=15, log_fn=print); \
+openscrub._fetch_model(openscrub.SFACE_URL, \
+'/root/.openscrub/models/face_recognition_sface_2021dec.onnx', \
+sha256=openscrub.SFACE_SHA256, tries=8, delay=15, log_fn=print); \
+openscrub._fetch_model(openscrub.VITTRACK_URL, \
+'/root/.openscrub/models/object_tracking_vittrack_2023sep.onnx', \
+sha256=openscrub.VITTRACK_SHA256, tries=8, delay=15, log_fn=print)"
+
+EXPOSE 8384
+VOLUME ["/root/.local/share/OpenScrub"]
+CMD ["openscrub-web", "--host", "0.0.0.0"]
