@@ -602,7 +602,7 @@ class PhiMemory:
     one differing digit (so benign numbers don't collide with MRNs)."""
 
     IMMEDIATE = {"dob", "phone", "ssn", "email", "mrn", "address",
-                 "qrcode", "screen",
+                 "qrcode", "screen", "anytext",
                  "apikey", "ipaddr", "card", "plate", "person"}
 
     def __init__(self, threshold=82, name_sightings=2):
@@ -3246,6 +3246,10 @@ SFACE_URL = ("https://media.githubusercontent.com/media/opencv/opencv_zoo/"
              "face_recognition_sface_2021dec.onnx")
 # sha256 of the authentic files, matching the upstream Git-LFS object ids —
 # every download is verified against these before it is trusted (fail closed)
+PPDET_URL = ("https://huggingface.co/PaddlePaddle/PP-OCRv5_mobile_det_onnx/"
+             "resolve/main/inference.onnx")
+PPDET_SHA256 = ("a431985659dc921974177a95adcfbb90"
+                "fd9e51989a5e04d70d0b75f597b6e61d")
 YUNET_SHA256 = "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4"
 SFACE_SHA256 = "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79"
 
@@ -3924,6 +3928,86 @@ class QRDetector:
                 px, py = w * 0.08, h * 0.08
                 out.append((x1 - px, y1 - py, x2 + px, y2 + py, 0.9))
         return _nms_boxes(out, 0.4)
+
+
+def _decode_db(prob, w, h, nw, nh, thresh=0.3, box_thresh=0.5):
+    """Pure DB-head decode (unit-tested): probability map -> text-region
+    boxes in frame coords. Contours on the thresholded map are scored
+    by their MEAN probability; boxes are unclipped outward by ~55% of
+    the short side because DB is trained on SHRUNK text kernels — the
+    pad restores full glyph coverage (over-cover beats a clipped
+    ascender, fail closed)."""
+    bitmap = (prob > thresh).astype(np.uint8)
+    cnts, _ = cv2.findContours(bitmap, cv2.RETR_LIST,
+                               cv2.CHAIN_APPROX_SIMPLE)
+    sx, sy = w / float(nw), h / float(nh)
+    out = []
+    for c_ in cnts:
+        if cv2.contourArea(c_) < 9:
+            continue
+        mask = np.zeros_like(bitmap)
+        cv2.drawContours(mask, [c_], -1, 1, -1)
+        score = float((prob * mask).sum() / max(1, int(mask.sum())))
+        if score < box_thresh:
+            continue
+        x, y, bw, bh = cv2.boundingRect(c_)
+        pad = int(round(0.55 * min(bw, bh))) + 1
+        out.append(((x - pad) * sx, (y - pad) * sy,
+                    (x + bw + pad) * sx, (y + bh + pad) * sy,
+                    round(score, 3)))
+    return out
+
+
+class TextRegionDetector:
+    """Scene-text region detector — the "anytext" category. Finds text
+    REGIONS in the wild (street signs, name badges, papers on a desk,
+    whiteboards, handwriting) WITHOUT reading them: you don't need to
+    know what a badge says to know it should be blurred, and detection
+    works where OCR cannot. PP-OCRv5 mobile det, official PaddlePaddle
+    ONNX export (Apache-2.0), auto-downloaded (~4.8MB) and sha256-pinned
+    exactly like YuNet — zero setup."""
+
+    def __init__(self, cb=None, thresh=0.3, box_thresh=0.5):
+        self.log = (cb.log if cb else print)
+        self.thresh, self.box_thresh = float(thresh), float(box_thresh)
+        self.sess = None
+        self._in = None
+        try:
+            path = os.path.join(_model_dir(),
+                                "text_detection_ppocrv5_mobile.onnx")
+            if not os.path.exists(path) or os.path.getsize(path) < 10000:
+                self.log("      downloading text-region model "
+                         "(~4.8 MB, one time)…")
+                _fetch_model(PPDET_URL, path, sha256=PPDET_SHA256,
+                             log_fn=self.log)
+            self.sess = _ort_session(path)
+            self._in = self.sess.get_inputs()[0].name
+            self.log("      all-text detector: PP-OCRv5 det loaded "
+                     "(text regions are blurred, never read)")
+        except Exception as e:
+            self.log("      all-text detector unavailable (%s) — the "
+                     "anytext category is INACTIVE this run" % e)
+            self.sess = None
+
+    def available(self):
+        return self.sess is not None
+
+    def find(self, frame, scale=1.0):
+        if self.sess is None:
+            return []
+        h, w = frame.shape[:2]
+        s = 960.0 / max(h, w) if max(h, w) > 960 else 1.0
+        nh = max(32, int(round(h * s / 32)) * 32)
+        nw = max(32, int(round(w * s / 32)) * 32)
+        img = cv2.resize(frame, (nw, nh)).astype(np.float32) / 255.0
+        img = ((img[:, :, ::-1] - (0.485, 0.456, 0.406))
+               / (0.229, 0.224, 0.225))
+        blob = img.transpose(2, 0, 1)[None].astype(np.float32)
+        try:
+            prob = self.sess.run(None, {self._in: blob})[0][0, 0]
+        except Exception:
+            return []
+        return _decode_db(prob, w, h, nw, nh, self.thresh, self.box_thresh)
 
 
 # COCO display classes whose CONTENT leaks (a filmed monitor or phone
@@ -5233,6 +5317,7 @@ def run_scan(args, cb=None):
                     or (getattr(args, "face_heads", False)
                         and "face" in cats)) else None)
     qrer = QRDetector(cb) if "qrcode" in cats else None
+    texter = TextRegionDetector(cb) if "anytext" in cats else None
     detect_scale = float(getattr(args, "detect_scale", 1.0) or 1.0)
     if args.ignore_regions:
         cb.log(f"      ignore regions: {len(args.ignore_regions)}")
@@ -5699,6 +5784,31 @@ def run_scan(args, cb=None):
                     "screen", "screen", round(sconf, 3), (cx, cy),
                     dense=True, poly=spoly))
                 dense_now.append((sx1, sy1, sx2, sy2))
+        # per-frame ALL-TEXT detection: any readable text region in the
+        # wild (signs, badges, papers, whiteboards, handwriting) is
+        # blurred without being read. Dense like plates — scene text
+        # moves with the camera.
+        if (texter is not None and texter.available()
+                and "anytext" in cats
+                and idx % max(1, dense_stride) == 0):
+            thold = 0.3 * max(1, dense_stride) / fps
+            _tsc = _scope_at(t_now)
+            _tzr = _tsc.get("anytext")
+            for (tx1, ty1, tx2, ty2, tconf) in (
+                    texter.find(frame, detect_scale)
+                    if "anytext" in _tsc else []):
+                if _tzr and not in_any_zone((tx1, ty1, tx2, ty2), _tzr):
+                    continue
+                if in_ignore_region((tx1, ty1, tx2, ty2),
+                                    args.ignore_regions):
+                    continue
+                raw.append(Detection(
+                    t_now, t_now + thold,
+                    (int(tx1 - cx), int(ty1 - cy),
+                     int(tx2 - cx), int(ty2 - cy)),
+                    "anytext", "text region", round(tconf, 3),
+                    (cx, cy), dense=True))
+                dense_now.append((tx1, ty1, tx2, ty2))
         # head blur: face detectors can't see the BACK of a turned head,
         # but hair/ears/head-shape identify people anyway. With
         # --face-heads on and a person model loaded, derive a head

@@ -1944,3 +1944,18 @@ def test_tiled_find_adds_small_detections():
     calls.clear()
     openscrub._maybe_tiled(find, frame, 640, "off")
     assert calls == [(2160, 3840)], "mode off must skip slicing"
+
+
+def test_decode_db_text_regions():
+    """Pure DB decode: contours on the thresholded probability map,
+    scored by mean probability, unclipped outward (DB trains on shrunk
+    kernels — the pad restores full glyph coverage)."""
+    prob = np.zeros((96, 160), np.float32)
+    prob[20:28, 10:60] = 0.9              # a confident text line
+    prob[60:64, 100:120] = 0.35           # low-score noise blob
+    out = openscrub._decode_db(prob, w=1600, h=960, nw=160, nh=96)
+    assert len(out) == 1, "low-score blobs must be rejected"
+    x1, y1, x2, y2, sc = out[0]
+    assert sc > 0.85
+    assert x1 < 100 and x2 > 600, "box must scale to frame coords"
+    assert y1 < 200 and y2 > 280, "unclip pad must expand the region"

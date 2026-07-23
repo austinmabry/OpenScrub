@@ -248,9 +248,11 @@ const CATS={name:"#3b82f6",dob:"#22c55e",phone:"#f59e0b",ssn:"#ef4444",
             email:"#14b8a6",address:"#f97316",card:"#db2777",
             apikey:"#0891b2",ipaddr:"#65a30d",plate:"#7c3aed",
             person:"#0ea5e9",qrcode:"#a16207",screen:"#475569",
+            anytext:"#84cc16",
             face:"#ec4899",
             ignore:"#334155",trackobj:"#eab308"};
 const DN={person:"person (full body)",qrcode:"QR / barcode",
+          anytext:"all text (blur every text region)",
           screen:"screens (tv/laptop/phone)",ignore:"ignore (never blur)",
           trackobj:"track object (blur it)"};
 const RULER=24,WROW=20,AROW=34;

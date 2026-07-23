@@ -143,6 +143,17 @@ Key classes/functions (locate with grep, line numbers drift):
   default (`--face-shape`, deface-style; blur_region/_blur_yuv10 take
   shape=), and `mosaic` is a real pixelation now (region-relative tiles),
   not a silent alias of blur.
+- `TextRegionDetector` — "anytext" category ("all text" in the UI,
+  NOT in the CLI default list — it blurs EVERY text region, opt-in per
+  job): PP-OCRv5 mobile det, OFFICIAL PaddlePaddle ONNX from HF
+  (Apache-2.0, ~4.8MB), auto-downloaded + sha256-pinned (PPDET_URL/
+  PPDET_SHA256) like YuNet, prefetched in all three Docker images.
+  Finds text REGIONS in the wild (signs, badges, papers, handwriting)
+  without reading them — works where OCR can't. `_decode_db` is pure/
+  unit-tested: prob map -> contours scored by MEAN prob (>=0.5) ->
+  boundingRect + 55%-of-short-side unclip pad (DB trains on SHRUNK
+  kernels; the pad restores glyph coverage, fail closed). Dense like
+  plates; IMMEDIATE; runs at 960px long side, /32-aligned.
 - Tiled detection (`_maybe_tiled`, `--tile auto|on|off`): when the
   frame long side >= 2.6x the YOLO input (4K vs 640), plates/person/
   screen ALSO scan an overlapping 2x2 (3x3 at >=5.2x) tile grid; boxes

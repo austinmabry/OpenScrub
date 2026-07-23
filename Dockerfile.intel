@@ -88,7 +88,10 @@ openscrub._fetch_model(openscrub.SFACE_URL, \
 sha256=openscrub.SFACE_SHA256, tries=8, delay=15, log_fn=print); \
 openscrub._fetch_model(openscrub.VITTRACK_URL, \
 '/root/.openscrub/models/object_tracking_vittrack_2023sep.onnx', \
-sha256=openscrub.VITTRACK_SHA256, tries=8, delay=15, log_fn=print)"
+sha256=openscrub.VITTRACK_SHA256, tries=8, delay=15, log_fn=print); \
+openscrub._fetch_model(openscrub.PPDET_URL, \
+'/root/.openscrub/models/text_detection_ppocrv5_mobile.onnx', \
+sha256=openscrub.PPDET_SHA256, tries=8, delay=15, log_fn=print)"
 
 EXPOSE 8384
 VOLUME ["/root/.local/share/OpenScrub"]
