@@ -1232,7 +1232,8 @@ def test_person_detector_class_filter_and_registry():
     # defaults (CLI-only via --categories mrn + --mrn-regex)
     parser = openscrub.build_parser()
     cats = parser.get_default("categories").split(",")
-    assert "person" in cats and "mrn" not in cats and len(cats) == 12
+    assert "person" in cats and "mrn" not in cats and len(cats) == 14
+    assert "qrcode" in cats and "screen" in cats
 
 
 def test_person_silhouette_decode_and_render(tmp_path):

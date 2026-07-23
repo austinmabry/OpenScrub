@@ -1,7 +1,7 @@
 # CLAUDE.md — OpenScrub
 
 OpenScrub is a local, GPU-accelerated video redaction tool: it detects and
-blurs PII (faces, names, SSNs, addresses, license plates, full-body person blur — 12 default categories) in
+blurs PII (faces, names, SSNs, addresses, license plates, full-body person blur, QR/barcodes, screens — 14 default categories) in
 videos and screen recordings, with a human-review step before anything is
 trusted. Apache-2.0. Python 3.10+. Runs on Windows/Linux; primary dev/deploy
 target is Windows 10 + NVIDIA RTX 3060.
@@ -173,6 +173,15 @@ Key classes/functions (locate with grep, line numbers drift):
   review shows ONE card per person, best-confidence thumbnail, one
   decision for all appearances. Ungrouped tracks stay person=-1 with
   per-track cards.
+- `QRDetector` — "qrcode" category: cv2 QRCodeDetector + BarcodeDetector,
+  built-in/zero-setup, dense per-frame like plates; detects the REGION
+  and never decodes the payload (E2E test renders a moving QR
+  undecodable). `screen` category: tv/laptop/phone (COCO 62/63/67) via
+  `PersonDetector.find_classes` on the SAME loaded person model
+  (want_any toggle + class filter, person-only restored) — INERT
+  without a person model. Both IMMEDIATE; `text_cats` subtracts
+  face/plate/person/qrcode/screen/anytext so visual-only jobs load no
+  OCR.
 - Intake normalization (`normalize_vfr`): VFR input → CFR (`probe_vfr`);
   HDR input (`probe_hdr`: PQ/HLG transfer or BT.2020 10-bit) → tone-mapped
   SDR copy (zscale/tonemap, loud NOTE if ffmpeg lacks them) that the SCAN
@@ -536,10 +545,10 @@ defined — there was a real UnboundLocalError from ordering once.
   serve time in `index()` — never hardcode a version in PAGE again (the
   v4.2.0 footer went stale once already). Updates need a server restart.
 
-## The 12-category alignment rule (easy to break!)
+## The 14-category alignment rule (easy to break!)
 
-The category list (12 now) exists in TWO places that must stay identical:
-1. `openscrub.py` — argparse default `"name,dob,phone,ssn,email,address,card,apikey,ipaddr,plate,face,person"`
+The category list (14 now) exists in TWO places that must stay identical:
+1. `openscrub.py` — argparse default `"name,dob,phone,ssn,email,address,card,apikey,ipaddr,plate,face,person,qrcode,screen"`
    ("mrn" is RETIRED from the defaults and from the whole UI — regex
    detection is custom-categories only now. The engine machinery stays:
    CLI `--categories ...,mrn --mrn-regex PAT` still works, review CATDN
@@ -552,7 +561,7 @@ The category list (12 now) exists in TWO places that must stay identical:
 When adding a category, update both + the `IMMEDIATE` set if it needs
 no confirmation delay. Verify alignment:
 `grep -o 'name,dob[^"]*' openscrub.py` vs the CATS map keys. In the
-CATS map `person` sits BEFORE the `face:"#ec4899"` anchor — customs still
+CATS map `person`/`qrcode`/`screen` sit BEFORE the `face:"#ec4899"` anchor — customs still
 land right after face.
 
 USER-DEFINED categories (custom_categories.json in the data root) are
