@@ -25,7 +25,14 @@
 # copied, so a release that only changes code rebuilds (and users only
 # re-download) the small app layers at the bottom.
 
-FROM python:3.12-slim
+# PINNED to bookworm (not the floating python:3.12-slim, which moved to
+# trixie and broke the first build): trixie DROPPED libmfx1 (the legacy
+# QSV runtime for Gen 9-11 iGPUs — most of the home-server fleet) and
+# intel-opencl-icd (the compute runtime OpenVINO needs for iGPU
+# inference). Bookworm ships both, and its ffmpeg is built against
+# libmfx (verified: libavcodec59 depends on it), so the QSV encoders
+# are present. Revisit when trixie regains an Intel compute runtime.
+FROM python:3.12-slim-bookworm
 
 # Debian's non-free component carries the Intel iHD media driver; the
 # QSV stack is libva -> iHD driver, dispatched from ffmpeg through
