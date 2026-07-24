@@ -1687,6 +1687,77 @@ def test_track_dormant_reacquisition(tmp_path):
         assert q[1][0] < 450, "the bystander must never inherit the track"
 
 
+def test_track_person_lookalike_veto(tmp_path):
+    """A PERSON track must not be stolen by a differently-dressed
+    look-alike who crosses in front — the exact reported failure (a
+    tracked child in blue, a child in a pink two-piece walked past, and
+    the blur jumped to the wrong child). The torso-band clothing
+    histogram is the identity cue: the seeded subject is BLUE, the
+    look-alike RED, and the look-alike overlaps the subject's frozen box
+    with high IoU while the subject is briefly occluded — geometry alone
+    would grab it, so only the appearance veto keeps the track honest.
+    The veto is PERSON-ONLY, so a re-render on an animal is unaffected
+    (test_track_dormant_reacquisition covers the geometry-only path)."""
+    path = str(tmp_path / "cross.mp4")
+    w = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), 30,
+                        (640, 360))
+    rng = np.random.default_rng(3)
+    bg = rng.integers(0, 40, (360, 360, 3), np.uint8)  # dark, low-sat
+    SQ = (((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)),)
+    BLUE = (255, 0, 0)          # BGR — the seeded subject's clothing
+    RED = (0, 0, 255)           # BGR — the look-alike's clothing
+
+    def xB(t):                  # look-alike sweeps right -> left
+        return int(260 - 137.5 * (t - 2.0))
+
+    for i in range(240):
+        t = i / 30.0
+        fr = np.zeros((360, 640, 3), np.uint8)
+        fr[:, :360] = bg
+        fr[0:12, :, :] = i      # frame-index strip -> stub derives time
+        if not 2.5 <= t <= 3.1:                 # subject hidden 0.6s
+            cv2.rectangle(fr, (150, 150), (210, 310), BLUE, -1)
+        if 2.0 <= t <= 3.6:                     # look-alike crossing
+            x = xB(t)
+            cv2.rectangle(fr, (x, 150), (x + 60, 310), RED, -1)
+        w.write(fr)
+    w.release()
+
+    class StubDet:
+        def find(self, frame):
+            t = float(np.median(frame[2:10, 20, 0])) / 30.0
+            dets = []
+            if not 2.5 <= t <= 3.1:
+                dets.append((150.0, 150.0, 210.0, 310.0, 0.95, SQ))
+            if 2.0 <= t <= 3.6:
+                x = float(xB(t))
+                dets.append((x, 150.0, x + 60.0, 310.0, 0.92, SQ))
+            return dets
+
+    logs = []
+    s = openscrub._track_person_dense(path, (150, 148, 210, 312), 1.0,
+                                      1.0, 5.0, StubDet(),
+                                      logs.append, step_frames=1)
+    assert s, "track must produce samples"
+    # the veto must actually FIRE at the crossing (proves the mechanism,
+    # not just that geometry happened to hold)
+    assert any("rejected a look-alike" in m for m in logs), \
+        "the appearance veto should reject the crossing look-alike"
+    # the look-alike exits to the far left (x -> ~40); the track must
+    # NEVER follow it there
+    for q in s:
+        if q[0] >= 2.5:
+            cx = (q[1][0] + q[1][2]) / 2.0
+            assert cx > 110, (
+                "the track followed the look-alike left to x=%.0f at "
+                "t=%.2fs — identity was stolen" % (cx, q[0]))
+    # and coverage must RESUME on the real (blue) subject after it
+    # reappears at x~150
+    back = [q for q in s if q[0] >= 3.3
+            and 140 <= (q[1][0] + q[1][2]) / 2.0 <= 220 and q[2] > 0.05]
+    assert back, "coverage must resume on the real subject after the pass"
+
+
 def test_encoder_ladder_prefers_nvenc_then_qsv(monkeypatch):
     """The encoder pick is a pre-flight-tested ladder: NVENC first, QSV
     (the :intel image) second, libx264 as the CPU floor. Every GPU rung

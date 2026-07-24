@@ -36,7 +36,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.66"
+VERSION = "1.0.67"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -1426,16 +1426,36 @@ def _head_box(row):
     return (x1 + 0.22 * w, y1, x2 - 0.22 * w, y1 + 0.24 * h)
 
 
-def _crop_hist(frame, b):
-    """HSV color histogram of a box crop (appearance fingerprint for
-    dormant-track re-acquisition), or None for degenerate crops."""
+def _crop_hist(frame, b, polys=()):
+    """Appearance fingerprint for tracking identity: HSV histogram of
+    the TORSO BAND (silhouette mask ∩ 15-55% height — the clothing
+    zone), or None for degenerate crops. Full-box and even full-
+    silhouette histograms fail on skin-dominated subjects (two children
+    in swimwear measured 0.66-0.87 correlation ACROSS people); the
+    torso band separates them (same person 0.88+, different people
+    0.46-0.62 on the real footage that caught a live identity swap)."""
     x1, y1 = max(0, int(b[0])), max(0, int(b[1]))
     x2 = min(frame.shape[1], int(b[2]))
     y2 = min(frame.shape[0], int(b[3]))
     if x2 - x1 < 8 or y2 - y1 < 8:
         return None
-    hsv = cv2.cvtColor(frame[y1:y2, x1:x2], cv2.COLOR_BGR2HSV)
-    h = cv2.calcHist([hsv], [0, 1], None, [16, 8], [0, 180, 0, 256])
+    roi = frame[y1:y2, x1:x2]
+    rh, rw = roi.shape[:2]
+    mask = np.zeros((rh, rw), np.uint8)
+    for pts in polys or ():
+        arr = np.array([[int(qx * rw), int(qy * rh)] for qx, qy in pts],
+                       np.int32)
+        if len(arr) >= 3:
+            cv2.fillPoly(mask, [arr], 255)
+    if not mask.any():
+        mask[:] = 255
+    tm = mask.copy()
+    tm[:int(rh * 0.15)] = 0
+    tm[int(rh * 0.55):] = 0
+    if int(tm.sum()) < 255 * 64:      # band degenerate: whole mask
+        tm = mask
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    h = cv2.calcHist([hsv], [0, 1], tm, [16, 8], [0, 180, 0, 256])
     cv2.normalize(h, h)
     return h
 
@@ -1545,6 +1565,17 @@ def _track_person_dense(video, box, t_ref, t0, t1, det, log,
             return []
         t_ref = seed_t
         tcls = _cls(best)
+        # The torso-band clothing histogram is a stable identity cue for
+        # PEOPLE (same person measures 0.88+ across seconds, a different
+        # child 0.46-0.62 — it caught a live child-to-child track theft).
+        # It is NOT stable for animals/objects: a dog has no "torso
+        # clothing", so its band is just fur that shifts with pose and
+        # scale and dips below the veto threshold on a legitimate partial
+        # occlusion or a walk up to the lens — the appearance veto then
+        # wrongly froze the SAME dog's recovery. So appearance identity
+        # is PERSON-ONLY (COCO class 0); animals/objects fall back to the
+        # geometry + bystander cannot-link guards that were validated.
+        appid = (tcls == 0)
         tname = (COCO_NAMES[tcls] if 0 <= tcls < len(COCO_NAMES)
                  else "object")
         log("      track: %s detected under the drawn box — following "
@@ -1587,7 +1618,8 @@ def _track_person_dense(video, box, t_ref, t0, t1, det, log,
             bystanders = []     # same-class objects VISIBLE while ours
                                 # was hidden — by the cannot-link
                                 # principle they can never BE it
-            ref_hist = _crop_hist(seed_frame, seed)
+            ref_hist = _crop_hist(seed_frame, seed, _poly(best)) \
+                if appid else None
             trk = _anchor_init(seed_frame, seed)
             # reference size for the size-flip guard: grows fast, shrinks
             # SLOWLY — an occlusion sliver must not drag it down, or the
@@ -1673,10 +1705,10 @@ def _track_person_dense(video, box, t_ref, t0, t1, det, log,
                         if any(_iou(db, bb) >= 0.30 for bb in bystanders):
                             continue
                         if ref_hist is not None:
-                            ch = _crop_hist(fr, db)
+                            ch = _crop_hist(fr, db, _poly(d))
                             if ch is not None and cv2.compareHist(
                                     ref_hist, ch,
-                                    cv2.HISTCMP_CORREL) < 0.35:
+                                    cv2.HISTCMP_CORREL) < 0.55:
                                 continue
                         cand = d
                         break
@@ -1690,9 +1722,10 @@ def _track_person_dense(video, box, t_ref, t0, t1, det, log,
                         ref_a += ((0.5 if na > ref_a else 0.05)
                                   * (na - ref_a))
                         last_poly = _poly(cand)
-                        nh = _crop_hist(fr, cur)
-                        if nh is not None:
-                            ref_hist = nh
+                        if appid:
+                            nh = _crop_hist(fr, cur, last_poly)
+                            if nh is not None:
+                                ref_hist = nh
                         samples.append((t2, tuple(cur), float(cand[4]),
                                         last_poly, tcls))
                         trk = _anchor_init(fr, cur) or trk
@@ -1702,6 +1735,7 @@ def _track_person_dense(video, box, t_ref, t0, t1, det, log,
                     continue
                 pick, bi = None, 0.0
                 frag, fcov = None, 0.0
+                n_rivals = 0
                 for d in dets:
                     db = [float(v) for v in d[:4]]
                     ar = (db[2] - db[0]) * (db[3] - db[1]) / ref_a
@@ -1721,6 +1755,8 @@ def _track_person_dense(video, box, t_ref, t0, t1, det, log,
                                 frag, fcov = d, fc
                         continue
                     i2 = _iou(cur, db)
+                    if i2 >= 0.10:
+                        n_rivals += 1
                     if i2 > bi:
                         pick, bi = d, i2
                 if bi < 0.10:
@@ -1736,6 +1772,44 @@ def _track_person_dense(video, box, t_ref, t0, t1, det, log,
                                           and vscore >= 0.35
                                           and _iou(pb, vbox) >= 0.25):
                         pick = None
+                # APPEARANCE veto on EVERY accept (PERSON tracks only —
+                # ref_hist is None otherwise; see `appid`). A crossing
+                # between similar-sized people is decided by IoU alone,
+                # and on real footage a walking child stole the track
+                # GRADUALLY — each frame overlapped the previous box, no
+                # rival was visible, and every mixed accept re-painted
+                # the fingerprint toward the thief. Two defenses: the
+                # fingerprint is a SLOW EMA (below) that a 1s crossing
+                # cannot repaint, and every accept must resemble it —
+                # torso-band histogram correlation >= 0.55 (same person
+                # measures 0.88+ across seconds, a different child
+                # 0.46-0.62), tightened to 0.65 when the accept is
+                # discontinuous, contested, weak, or a sudden size jump.
+                #   The veto fires WHILE HELD too: the theft's decisive
+                # moment is the held/frozen recovery, when the real
+                # subject is occluded and the look-alike is the only
+                # candidate overlapping the frozen box — skipping the
+                # veto there let the pink-suited child be grabbed during
+                # recovery (the exact reported swap). This is safe
+                # because it is PERSON-ONLY: an animal/object (no stable
+                # torso clothing) never runs it, so a dog's legitimate
+                # scale/pose change on recovery is judged by geometry +
+                # bystander cannot-link, not appearance.
+                if pick is not None and ref_hist is not None:
+                    pb2 = [float(v) for v in pick[:4]]
+                    pna = (pb2[2] - pb2[0]) * (pb2[3] - pb2[1])
+                    cna = max((cur[2] - cur[0]) * (cur[3] - cur[1]), 1e-9)
+                    strict = (det_gap > 0 or n_rivals >= 2 or bi < 0.5
+                              or pna > 1.5 * cna)
+                    ch = _crop_hist(fr, pb2, _poly(pick))
+                    if ch is not None and cv2.compareHist(
+                            ref_hist, ch, cv2.HISTCMP_CORREL) \
+                            < (0.65 if strict else 0.55):
+                        if not held:
+                            log("      track: rejected a look-alike at "
+                                "t=%.1fs (appearance mismatch) — the "
+                                "%s is hidden or obscured" % (t2, tname))
+                        pick = None
                 if pick is not None:
                     held = False
                     hold_t = 0.0
@@ -1744,9 +1818,17 @@ def _track_person_dense(video, box, t_ref, t0, t1, det, log,
                     na = (cur[2] - cur[0]) * (cur[3] - cur[1])
                     ref_a += (0.5 if na > ref_a else 0.05) * (na - ref_a)
                     last_poly = _poly(pick)
-                    nh = _crop_hist(fr, cur)
+                    nh = _crop_hist(fr, cur, last_poly) if appid else None
                     if nh is not None:
-                        ref_hist = nh
+                        if ref_hist is None:
+                            ref_hist = nh
+                        else:
+                            # SLOW blend: identity memory must outlive a
+                            # crossing — full replacement let mixed
+                            # occlusion crops repaint it in under a
+                            # second (the gradual-capture failure)
+                            ref_hist = ref_hist * 0.9 + nh * 0.1
+                            cv2.normalize(ref_hist, ref_hist)
                     samples.append((t2, tuple(cur), float(pick[4]),
                                     last_poly, tcls))
                     # re-anchor EVERY confident hit: drift can never

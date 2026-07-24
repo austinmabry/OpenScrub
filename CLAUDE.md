@@ -390,9 +390,8 @@ Key classes/functions (locate with grep, line numbers drift):
   full-box blur) for a 0.8s grace, then go DORMANT (not end): stop
   emitting samples (nothing visible → nothing to blur) but keep
   scanning the window for the subject's re-emergence. Re-acquisition
-  needs a same-class detection in the 0.33-3.0x size band that passes
-  an HSV-histogram appearance check (`_crop_hist`, HISTCMP_CORREL >=
-  0.35, fingerprint refreshed on every live accept) AND is not a
+  needs a same-class detection in the 0.33-3.0x size band that (for
+  PEOPLE) passes the torso-band appearance check below AND is not a
   BYSTANDER — every same-class object visible at the moment ours went
   hidden is tracked forward by per-step best-IoU and can never inherit
   the track (cannot-link: co-visible ⇒ different object; this is what
@@ -403,6 +402,35 @@ Key classes/functions (locate with grep, line numbers drift):
   occluder (a real subject walked out of frame and returned unblurred;
   validated on that footage: coverage resumed on her return while the
   bystanders, one walking right up to the camera, stayed unblurred).
+  APPEARANCE IDENTITY (PERSON-ONLY, `appid = tcls == 0`): geometry
+  alone let a live crossing steal a PERSON track — a child in blue was
+  tracked, a child in a pink two-piece walked in front, and because her
+  detection overlapped the frozen box with high IoU the blur jumped to
+  her (the reported swap; each mixed accept also re-painted the
+  fingerprint toward the thief, so it happened GRADUALLY with no single
+  hand-off frame to catch). Fix: `_crop_hist(frame, box, polys)` is a
+  TORSO-BAND HSV histogram — the silhouette mask ∩ 15-55% of box height,
+  i.e. the clothing zone. Full-box and even full-silhouette histograms
+  fail on skin-dominated swimwear subjects (two children measured
+  0.66-0.87 CROSS-person); the torso band separates them (same person
+  0.88+, different children 0.46-0.62). Every accept must match the
+  seeded fingerprint (HISTCMP_CORREL ≥ 0.55, tightened to 0.65 when the
+  accept is discontinuous/contested/weak/a sudden size jump), and it
+  fires WHILE HELD too (the theft's decisive moment is the frozen
+  recovery, when the real subject is occluded and the look-alike is the
+  only overlapping candidate). The fingerprint is a SLOW EMA
+  (0.9·ref + 0.1·new, re-normalized) so a ~1s crossing cannot repaint
+  identity memory. It is PERSON-ONLY because a torso-clothing histogram
+  is not a stable cue for animals/objects — a dog has no clothing, its
+  band is fur that shifts with pose and scale and dips below the veto
+  threshold on a legitimate partial occlusion or a walk up to the lens
+  (the veto once wrongly froze the SAME dog's recovery). For non-person
+  classes `ref_hist` stays None, every appearance guard skips, and
+  recovery is judged purely by the size band + IoU + suspicious-handoff
+  + bystander cannot-link — the byte-identical validated geometry path
+  (dog W1/EXT/W2 sample counts unchanged; the 7s occlusion re-acquisition
+  even improved 16→21 live dets). test_track_person_lookalike_veto pins
+  the person swap (blue subject, red look-alike crossing).
   Detector-path tracks end only at window edges now; the GENERIC
   (no-model) tracker still ends at frame exits. NO anticipation
   or occluder modeling — waiting beats predicting (prediction caused
