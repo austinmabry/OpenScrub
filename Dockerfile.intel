@@ -59,10 +59,17 @@ WORKDIR /src
 COPY requirements.txt ./
 RUN grep -viE '^onnxruntime' requirements.txt > /tmp/req.noort \
  && pip install --no-cache-dir -r /tmp/req.noort \
- && pip install --no-cache-dir onnxruntime-openvino \
  # faster-whisper: local speech transcription for spoken-PII
  # suggestions (fully offline)
  && pip install --no-cache-dir faster-whisper \
+ # faster-whisper depends on STOCK onnxruntime, whose files land in the
+ # same onnxruntime/ package dir and CLOBBER the OpenVINO provider (it
+ # broke the v1.0.65 build the day stock 1.27 released). Evict any
+ # stock wheel and install onnxruntime-openvino LAST so its files win
+ # unconditionally — the assert below is the backstop.
+ && (pip uninstall -y onnxruntime || true) \
+ && pip install --no-cache-dir --force-reinstall --no-deps \
+      onnxruntime-openvino \
  # spaCy NER for name detection, baked in with its model
  && python -m spacy download en_core_web_sm \
  # fail the build if the OpenVINO provider didn't register — an image

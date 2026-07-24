@@ -72,8 +72,15 @@ RUN grep -viE '^(opencv|numpy|onnxruntime)' requirements.txt > /tmp/req.nocv \
       paddlepaddle-gpu==3.2.2 \
       -i https://www.paddlepaddle.org.cn/packages/stable/cu126/ \
       --extra-index-url https://pypi.org/simple \
- # faster-whisper: local speech transcription (CPU int8 — fine)
+ # faster-whisper: local speech transcription (CPU int8 — fine).
+ # Its STOCK onnxruntime dependency would clobber onnxruntime-gpu's
+ # provider files (same-package overwrite — it killed the :intel image
+ # when stock 1.27 released), so evict stock and re-lay the GPU wheel
+ # LAST; the CUDA-provider assert below is the backstop.
  && pip install --no-cache-dir faster-whisper \
+ && (pip uninstall -y onnxruntime || true) \
+ && pip install --no-cache-dir --force-reinstall --no-deps \
+      onnxruntime-gpu \
  # NOTE: no pip cuDNN here — the cudnn-runtime base image ships the
  # matched version; a second, newer pip copy caused CUDNN error 5003
  # (EXECUTION_FAILED) at the first Paddle-GPU inference.
