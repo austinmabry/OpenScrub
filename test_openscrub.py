@@ -2022,3 +2022,24 @@ def test_speech_suggestions_from_word_stream():
     ns = openscrub._speech_suggestions(nwords, {"name"}, nlp=Doc)
     assert len(ns) == 1 and ns[0]["category"] == "name"
     assert ns[0]["t0"] <= 0.6 and ns[0]["t1"] >= 2.4
+
+
+def test_person_seg_migration_lives_in_init():
+    """The seg-to-onnxruntime migration must run at LOAD TIME as the
+    tail of PersonDetector.__init__. In v1.0.65 a method insertion
+    orphaned it into dead code after another method's return —
+    syntactically valid, never executed — and on the CUDA image's
+    OpenCV 4.10 (whose multi-output forward asserts in fuseLayers)
+    silhouettes silently degraded to boxes and the tracked-object
+    detector path failed over to the generic tracker."""
+    import inspect
+    src = inspect.getsource(openscrub.PersonDetector.__init__)
+    assert "moved " in src and "onnxruntime" in src, \
+        "the seg migration block must live inside __init__"
+    # and behaviourally: a 2-output model must come out ort-backed
+    sp = os.environ.get("OPENSCRUB_TEST_SEG_MODEL")
+    if sp and os.path.exists(sp):
+        det = openscrub.PersonDetector(model_path=sp, thresh=0.5)
+        if det.seg:
+            assert det.ort is not None and det.net is None, \
+                "seg models must ALWAYS run on onnxruntime"

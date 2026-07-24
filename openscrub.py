@@ -36,7 +36,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.65"
+VERSION = "1.0.66"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -4131,6 +4131,37 @@ class PersonDetector(PlateDetector):
                 self.seg = len(self.net.getUnconnectedOutLayersNames()) >= 2
         except Exception:
             self.seg = False
+        # Segmentation graphs have TWO outputs, and OpenCV DNN's layer
+        # fusion can assert on multi-output forward AT INFERENCE TIME
+        # ('biasLayerData->outputBlobsWrappers.size() == 1 in fuseLayers',
+        # seen on the 4.10 CUDA build) — a failure the load-time probe
+        # cannot catch and that used to kill the whole scan. Segmentation
+        # therefore ALWAYS runs on onnxruntime (a hard dep; GPU build in
+        # the CUDA image), rebuilding the session from the resolved path.
+        # REGRESSION NOTE: this block is the TAIL OF __init__ — a method
+        # inserted between the probe above and this block once orphaned
+        # it into dead code and silently broke silhouettes on the CUDA
+        # image (v1.0.65). test_person_seg_migration_lives_in_init pins
+        # its location.
+        if self.seg and self.ort is None and self.net is not None:
+            try:
+                sess = _ort_session(self.model_path)
+                self.ort = sess
+                self._ort_in = sess.get_inputs()[0].name
+                self._ort_out = [o.name for o in sess.get_outputs()]
+                self.net = None
+                self.log("      person detector: segmentation model moved "
+                         "to onnxruntime (%s) — OpenCV DNN multi-output "
+                         "inference is unreliable"
+                         % sess.get_providers()[0])
+            except Exception as e:
+                self.seg = False
+                self.log("      person detector: could not open the "
+                         "segmentation model with onnxruntime (%s) — "
+                         "falling back to BOX masks via OpenCV DNN." % e)
+        if self.seg:
+            self.log("      person detector: segmentation model — masking "
+                     "body silhouettes, not boxes")
 
     def find_classes(self, frame, scale=1.0, classes=SCREEN_CLASSES):
         """Detections for OTHER COCO classes from the same loaded model
@@ -4149,33 +4180,6 @@ class PersonDetector(PlateDetector):
             if kls in classes:
                 out.append(r[:6] if len(r) > 5 else r[:5] + ((),))
         return out
-        # Segmentation graphs have TWO outputs, and OpenCV DNN's layer
-        # fusion can assert on multi-output forward AT INFERENCE TIME
-        # ('biasLayerData->outputBlobsWrappers.size() == 1 in fuseLayers',
-        # seen on the 4.10 CUDA build) — a failure the load-time probe
-        # cannot catch and that used to kill the whole scan. Segmentation
-        # therefore ALWAYS runs on onnxruntime (a hard dep; GPU build in
-        # the CUDA image), rebuilding the session from the resolved path.
-        if self.seg and self.ort is None and self.net is not None:
-            try:
-                import onnxruntime as ort
-                sess = _ort_session(self.model_path)
-                self.ort = sess
-                self._ort_in = sess.get_inputs()[0].name
-                self._ort_out = [o.name for o in sess.get_outputs()]
-                self.net = None
-                self.log("      person detector: segmentation model moved "
-                         "to onnxruntime (%s) — OpenCV DNN multi-output "
-                         "inference is unreliable"
-                         % sess.get_providers()[0])
-            except Exception as e:
-                self.seg = False
-                self.log("      person detector: could not open the "
-                         "segmentation model with onnxruntime (%s) — "
-                         "falling back to BOX masks via OpenCV DNN." % e)
-        if self.seg:
-            self.log("      person detector: segmentation model — masking "
-                     "body silhouettes, not boxes")
 
     def find(self, frame, detect_scale=1.0):
         """-> [(x1,y1,x2,y2,conf[,polys])] — 6th element (silhouette
