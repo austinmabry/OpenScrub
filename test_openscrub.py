@@ -1758,6 +1758,77 @@ def test_track_person_lookalike_veto(tmp_path):
     assert back, "coverage must resume on the real subject after the pass"
 
 
+def test_track_person_size_jump_handoff(tmp_path):
+    """A LARGER foreground look-alike whose box ENGULFS the small tracked
+    person must not steal the track — the reported end-of-clip swap. The
+    real failure: a pink-suited child stepped in front, her detection was
+    2.67x the tracked box in ONE frame (IoU 0.37), and her skin-heavy
+    torso scraped PAST the 0.65 appearance veto at 0.71, so appearance
+    alone let her through. The size-jump guard is the backstop — a jump
+    that big needs a same-PERSON-grade match (>= 0.80), which the
+    look-alike fails. Here the look-alike's torso is tuned to correlate
+    ~0.70 with the subject: enough to pass the base veto, not the 0.80
+    gate, so this test FAILS if the size guard is removed."""
+    path = str(tmp_path / "engulf.mp4")
+    w = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), 30,
+                        (640, 360))
+    SQ = (((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)),)
+    BLUE = (255, 0, 0)
+    RED = (0, 0, 255)
+    A = (300, 200, 360, 320)                # small subject (60x120)
+    B = (280, 160, 380, 355)                # engulfing look-alike (2.7x)
+
+    def paint_lookalike(fr):
+        cv2.rectangle(fr, (B[0], B[1]), (B[2], B[3]), BLUE, -1)
+        h = B[3] - B[1]
+        b0, b1 = int(B[1] + 0.15 * h), int(B[1] + 0.55 * h)
+        # lower half of the torso band red -> torso hist ~0.70 vs the
+        # all-blue subject (passes 0.65, fails 0.80)
+        cv2.rectangle(fr, (B[0], int(b0 + 0.5 * (b1 - b0))),
+                      (B[2], b1), RED, -1)
+
+    for i in range(150):
+        t = i / 30.0
+        fr = np.zeros((360, 640, 3), np.uint8)
+        fr[0:12, :, :] = i
+        if 2.5 <= t <= 4.0:                 # look-alike present late
+            paint_lookalike(fr)
+        if t < 2.9:                         # subject visible, then hidden
+            cv2.rectangle(fr, (A[0], A[1]), (A[2], A[3]), BLUE, -1)
+        w.write(fr)
+    w.release()
+
+    class StubDet:
+        def find(self, frame):
+            t = float(np.median(frame[2:10, 20, 0])) / 30.0
+            dets = []
+            if t < 2.9:
+                dets.append((float(A[0]), float(A[1]), float(A[2]),
+                             float(A[3]), 0.95, SQ))
+            if 2.5 <= t <= 4.0:
+                dets.append((float(B[0]), float(B[1]), float(B[2]),
+                             float(B[3]), 0.95, SQ))
+            return dets
+
+    logs = []
+    s = openscrub._track_person_dense(path, A, 1.0, 1.0, 4.5,
+                                      StubDet(), logs.append,
+                                      step_frames=1)
+    assert s, "track must produce samples"
+    assert any("size jump" in m for m in logs), \
+        "the size-jump guard should refuse the engulfing look-alike"
+    a_area = (A[2] - A[0]) * (A[3] - A[1])
+    b_area = (B[2] - B[0]) * (B[3] - B[1])
+    # once the subject is hidden the track must FREEZE near the subject's
+    # box, never adopt the 2.7x look-alike box
+    for q in s:
+        if q[0] >= 3.0:
+            area = (q[1][2] - q[1][0]) * (q[1][3] - q[1][1])
+            assert area < 0.5 * (a_area + b_area), (
+                "track grew to the look-alike's box (area=%.0f) at "
+                "t=%.2fs — the larger person was grabbed" % (area, q[0]))
+
+
 def test_encoder_ladder_prefers_nvenc_then_qsv(monkeypatch):
     """The encoder pick is a pre-flight-tested ladder: NVENC first, QSV
     (the :intel image) second, libx264 as the CPU floor. Every GPU rung

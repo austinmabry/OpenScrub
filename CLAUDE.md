@@ -360,10 +360,28 @@ Key classes/functions (locate with grep, line numbers drift):
   vs the current box AND area within 0.33-3.0x of `ref_a`, a slow-shrink
   size EMA (grow α=0.5, shrink α=0.05 — an occlusion sliver must not
   drag it down or the full-size re-appearance gets rejected; ended a
-  real track mid-window). SUSPICIOUS-HANDOFF guard: weak overlap
-  (IoU<0.30) AND much larger (>1.8x ref_a) needs anchor confirmation
-  (vscore>=0.35 ∧ IoU(det,vbox)>=0.25) — the classic look-alike-slides-
-  past handoff at a frame exit. The anchor itself is SANITY-CHECKED: a
+  real track mid-window). SIZE-JUMP HANDOFF guard: a same-class
+  detection much LARGER than our object (>1.8x — measured vs BOTH the
+  current box AND ref_a, since ref_a grows while the subject is close
+  and later understates the jump) is a size handoff at ANY overlap: a
+  look-alike sliding past at weak overlap, OR a larger FOREGROUND person
+  whose box ENGULFS the small tracked subject at moderate overlap. The
+  end-of-clip swap the user hit: a pink-suit child stepped in front, her
+  detection was 2.67x the tracked box in ONE frame at IoU 0.37 (just
+  past the old IoU<0.30 gate), and her skin-heavy torso scraped PAST the
+  0.65 appearance veto at 0.71. A subject can't triple in size in
+  1/30s, so a jump that big needs POSITIVE proof it is still ours. For a
+  PERSON that proof is a same-PERSON-grade torso match (>=0.80 — the gap
+  between the subject's own 0.94+ and the look-alike's 0.71); the anchor
+  is NOT allowed to authorize it because VitTrack DRIFTS onto the larger
+  look-alike and would rubber-stamp the handoff (it confirmed the pink
+  child). Only for non-person tracks (no fingerprint) does the anchor
+  decide (vscore>=0.35 ∧ IoU(det,vbox)>=0.25). Fail-closed: no proof ⇒
+  refuse the pick and freeze on the last true position. The dormant
+  re-acquisition applies the same rule — a >1.8x-larger candidate needs
+  0.80, not the base 0.55. test_track_person_size_jump_handoff pins it
+  (a 2.7x look-alike torso-tuned to 0.70: passes the veto, fails 0.80).
+  The anchor is ALSO SANITY-CHECKED: a
   vbox outside the same 0.33-3.0x size band has DRIFTED and is
   discarded (on real footage it ballooned to a near-frame box over the
   second dog after the subject left and "confirmed" the wrong handoff).

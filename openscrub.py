@@ -1706,9 +1706,15 @@ def _track_person_dense(video, box, t_ref, t0, t1, det, log,
                             continue
                         if ref_hist is not None:
                             ch = _crop_hist(fr, db, _poly(d))
+                            # a much larger candidate (par > 1.8) demands a
+                            # same-PERSON-grade match (0.80), not the base
+                            # 0.55 — else a larger foreground look-alike
+                            # re-acquires a dormant track (the pink-suit
+                            # child scored 0.71, over 0.55 but under 0.80)
+                            thr = 0.80 if ar > 1.8 else 0.55
                             if ch is not None and cv2.compareHist(
                                     ref_hist, ch,
-                                    cv2.HISTCMP_CORREL) < 0.55:
+                                    cv2.HISTCMP_CORREL) < thr:
                                 continue
                         cand = d
                         break
@@ -1761,17 +1767,58 @@ def _track_person_dense(video, box, t_ref, t0, t1, det, log,
                         pick, bi = d, i2
                 if bi < 0.10:
                     pick = None
-                if pick is not None and bi < 0.30:
-                    # suspicious handoff: weak overlap AND a much larger
-                    # same-class object — the classic way a track jumps to
-                    # a look-alike sliding past (seen at a frame exit on
-                    # real footage). Only the anchor can confirm it.
+                if pick is not None:
+                    # SUSPICIOUS SIZE HANDOFF: a same-class detection much
+                    # larger than our tracked object (par > 1.8) is either
+                    # a look-alike sliding past at weak overlap OR a larger
+                    # FOREGROUND person whose box ENGULFS the small tracked
+                    # subject at moderate overlap — the pink-suit child at
+                    # t=25.5s on real footage was 2.67x the tracked box in
+                    # ONE frame (IoU 0.37, just past the old bi<0.30 gate)
+                    # and her skin-heavy torso scraped past the 0.65 veto
+                    # at 0.71. A subject can't triple in size in 1/30s, so
+                    # a jump that big needs POSITIVE proof it is still ours,
+                    # at ANY overlap: the anchor agreeing, or (person
+                    # tracks) a same-PERSON-grade appearance match (>= 0.80
+                    # — the gap between the subject's own 0.94+ and a
+                    # look-alike's 0.71). Else drop it and let coverage
+                    # freeze on the last true position (fail closed).
                     pb = [float(v) for v in pick[:4]]
-                    par = (pb[2] - pb[0]) * (pb[3] - pb[1]) / ref_a
-                    if par > 1.8 and not (vbox is not None
-                                          and vscore >= 0.35
-                                          and _iou(pb, vbox) >= 0.25):
-                        pick = None
+                    pa = (pb[2] - pb[0]) * (pb[3] - pb[1])
+                    ca = max((cur[2] - cur[0]) * (cur[3] - cur[1]), 1e-9)
+                    # a jump vs the CURRENT box (a bigger object engulfing
+                    # us THIS frame — the pink-suit child was 2.67x the
+                    # tracked box) OR vs the slow reference (a look-alike
+                    # bigger than the subject has ever been). ref_a alone
+                    # missed it: it had grown while the subject was close
+                    # earlier, so pa/ref_a fell under 1.8 even as pa/current
+                    # hit 2.67. Use both.
+                    par = max(pa / ca, pa / ref_a)
+                    if par > 1.8:
+                        # For a PERSON, appearance is the AUTHORITY: the
+                        # VitTrack anchor drifts onto a larger look-alike
+                        # during the handoff and would rubber-stamp it
+                        # (on this footage it confirmed the pink-suit
+                        # child at t=25.5s), so a big jump needs a
+                        # same-person-grade torso match (>= 0.80 — the gap
+                        # between the subject's own 0.94+ and the
+                        # look-alike's 0.71), NOT the anchor. Only when
+                        # there is no appearance cue (animals/objects) do
+                        # we fall back to the anchor.
+                        if ref_hist is not None:
+                            ch2 = _crop_hist(fr, pb, _poly(pick))
+                            ok = (ch2 is not None and cv2.compareHist(
+                                    ref_hist, ch2,
+                                    cv2.HISTCMP_CORREL) >= 0.80)
+                        else:
+                            ok = (vbox is not None and vscore >= 0.35
+                                  and _iou(pb, vbox) >= 0.25)
+                        if not ok:
+                            if not held:
+                                log("      track: refused a %.1fx size "
+                                    "jump at t=%.1fs — a larger look-alike, "
+                                    "not the tracked %s" % (par, t2, tname))
+                            pick = None
                 # APPEARANCE veto on EVERY accept (PERSON tracks only —
                 # ref_hist is None otherwise; see `appid`). A crossing
                 # between similar-sized people is decided by IoU alone,
