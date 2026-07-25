@@ -743,7 +743,10 @@ landed — partial silent misses have happened repeatedly.
 5. `.github/workflows/windows-installer.yml` builds the native installer on
    a Windows runner (same `windows\build_installer.bat` as a local build)
    and attaches `OpenScrub-Setup-<version>.exe` to the release automatically
-   — no manual exe build or upload needed.
+   — no manual exe build or upload needed. It also uploads a version-less
+   `OpenScrub-Setup.exe` copy so the permanent URL
+   `.../releases/latest/download/OpenScrub-Setup.exe` always serves the
+   newest installer (the openscrub.app Download button points at it).
 
 ## Hard rules
 

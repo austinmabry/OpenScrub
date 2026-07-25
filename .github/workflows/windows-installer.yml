@@ -1,5 +1,8 @@
 # Builds the native Windows installer on every published release and
-# attaches OpenScrub-Setup-<version>.exe to that release automatically.
+# attaches OpenScrub-Setup-<version>.exe to that release automatically,
+# plus a version-less OpenScrub-Setup.exe copy so the permanent URL
+# .../releases/latest/download/OpenScrub-Setup.exe always serves the
+# newest installer (used by the website's Download button).
 #
 # Runs the exact same build a developer would run locally
 # (windows\build_installer.bat -> PyInstaller + Inno Setup), so the
@@ -61,12 +64,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $exe = (Get-ChildItem windows/output/OpenScrub-Setup-*.exe).FullName
+          # Also publish a version-LESS copy so a PERMANENT download URL
+          # always resolves to the newest build (the website's Download
+          # button points here):
+          #   https://github.com/<owner>/<repo>/releases/latest/download/OpenScrub-Setup.exe
+          $stable = Join-Path (Split-Path $exe) "OpenScrub-Setup.exe"
+          Copy-Item $exe $stable -Force
           $tag = "${{ github.event.inputs.tag || github.event.release.tag_name }}"
           # uploads.github.com throws transient 5xx ("Error creating policy",
           # HTTP 502 — it failed a release once); --clobber makes retries safe
           $ok = $false
           foreach ($i in 1..6) {
-            gh release upload "$tag" "$exe" --clobber
+            gh release upload "$tag" "$exe" "$stable" --clobber
             if ($LASTEXITCODE -eq 0) { $ok = $true; break }
             Write-Host "upload attempt $i failed (exit $LASTEXITCODE) - retrying in 20s"
             Start-Sleep -Seconds 20
