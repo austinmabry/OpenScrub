@@ -26,6 +26,10 @@ ICON = os.path.join(ROOT, "assets", "openscrub.ico")
 # from a bare import — collect its binaries/datas/hidden imports explicitly, or
 # the frozen build's license-plate detection (which needs onnxruntime to run
 # the end2end YOLOv9 models OpenCV's DNN can't load) would be silently inert.
+# build_installer.bat installs onnxruntime-DIRECTML before this runs, so the
+# same collect (module name is still "onnxruntime") also bundles DirectML.dll
+# and the Dml provider — _ort_session then GPU-accelerates every ONNX detector
+# on any DirectX 12 GPU (NVIDIA/AMD/Intel), falling back to CPU per-node.
 try:
     from PyInstaller.utils.hooks import collect_all
     _ort_datas, _ort_bins, _ort_hidden = collect_all("onnxruntime")

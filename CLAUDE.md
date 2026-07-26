@@ -64,16 +64,19 @@ Key classes/functions (locate with grep, line numbers drift):
   BACKEND ROUTING (`self.ort` vs `self.net`): the optional ONNX model runs
   on onnxruntime (`_ort_session`, GPU) when THAT reaches a GPU here but
   OpenCV's DNN would not — i.e. `not cuda_dnn_available() and
-  _ort_gpu_available()`, which is exactly the INTEL image (OpenVINO on the
-  iGPU/Arc). The CUDA image already has the GPU through the CUDA-built
-  OpenCV, so it stays on the OpenCV path UNCHANGED; CPU/Windows reach no
-  GPU either way and also stay on OpenCV. `_forward(blob)` abstracts the
+  _ort_gpu_available()`, which is the INTEL image (OpenVINO on the
+  iGPU/Arc) AND the Windows installer (DirectML on any DX12 GPU —
+  onnxruntime-directml swapped in by build_installer.bat). The CUDA image
+  already has the GPU through the CUDA-built OpenCV, so it stays on the
+  OpenCV path UNCHANGED; CPU/Linux reach no GPU either way and also stay
+  on OpenCV. `_forward(blob)` abstracts the
   two engines — the pure-Python centerface/scrfd decode is byte-identical
   for both (SCRFD outputs proved numerically equal cv2.dnn vs onnxruntime,
   same order). A self-test gates it: the Star-Clouds CenterFace ONNX
   declares a FIXED input shape onnxruntime rejects but OpenCV reshapes, so
   it falls back to OpenCV DNN (never lost) — SCRFD (the strongest model,
-  fully dynamic) GPU-accelerates on Intel; CenterFace keeps its CPU path.
+  fully dynamic) GPU-accelerates on Intel and Windows; CenterFace keeps
+  its CPU path.
   `--face-model`/registry SELECTION is unchanged — only the execution
   engine of the chosen model changes, chosen per-platform.
 - `PlateDetector` — YOLO ONNX, NO torch dependency. **Two backends tried per
@@ -594,7 +597,19 @@ degrades loudly to CPU. All four vargs sites (render, render_hdr,
 normalize_vfr sdr copy + VFR-HDR intermediate) carry qsv branches.
 onnxruntime sessions come from `_ort_session`: CUDA > OpenVINO
 (AUTO:GPU,CPU device, with a plain-provider retry for option-name
-drift) > CPU; `OPENSCRUB_CPU_DNN=1` forces CPU.
+drift) > DirectML (the Windows installer — `DmlExecutionProvider` on any
+DirectX 12 GPU, NVIDIA/AMD/Intel; the session gets mem-pattern off +
+sequential exec, which DirectML requires) > CPU; `OPENSCRUB_CPU_DNN=1`
+forces CPU. The Windows PyInstaller build swaps stock onnxruntime for
+`onnxruntime-directml` (`windows/build_installer.bat`; module name is
+still `onnxruntime`, so the spec's `collect_all` bundles it +
+DirectML.dll); `install.py`'s `step_directml` does the same swap for
+from-source Windows installs. This GPU-accelerates every ONNX detector
+on Windows — plates, person/seg, ONNX OCR, and the SCRFD face model —
+with per-node CPU fallback. The tiny default YuNet face model + SFace
+grouping stay on OpenCV DNN CPU (fast already; not worth a hand-rolled
+decode). The two Docker images are UNCHANGED (CUDA uses onnxruntime-gpu,
+Intel uses onnxruntime-openvino).
 
 OpenCV DNN device: the stock opencv-python wheel is CPU-only, so YuNet
 (the zero-setup default) + CenterFace + SFace grouping run on OpenCV DNN
@@ -607,10 +622,12 @@ the opencv-cuda base). CPU builds are byte-identical to before — the GPU
 path is purely additive. Video frame DECODE stays on the CPU either way.
 EXCEPTION — the optional **SCRFD** ONNX face model: when the runtime has
 no CUDA-built OpenCV but DOES have an onnxruntime GPU provider
-(`_ort_gpu_available()`: OpenVINO on Intel, or CUDA), `FaceDetector`
-loads SCRFD through `_ort_session` instead of OpenCV DNN, so the
-strongest face model GPU-accelerates on Intel iGPUs/Arc via OpenVINO
-(the same path that already gives Intel GPU plates/person/OCR). The
+(`_ort_gpu_available()`: OpenVINO on Intel, CUDA, or **DirectML** on the
+Windows installer), `FaceDetector` loads SCRFD through `_ort_session`
+instead of OpenCV DNN, so the strongest face model GPU-accelerates on
+Intel iGPUs/Arc via OpenVINO AND on any DirectX 12 GPU (NVIDIA/AMD/Intel)
+on Windows via DirectML — the same path that already gives Intel GPU
+plates/person/OCR. The
 routing is per-model and self-testing: `self.ort` (onnxruntime) vs
 `self.net` (OpenCV DNN) is chosen at load; a fixed-input-shape model
 (CenterFace rejects onnxruntime's arbitrary blob dims) fails the

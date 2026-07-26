@@ -36,7 +36,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.70"
+VERSION = "1.0.71"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -2762,15 +2762,17 @@ class Callbacks:
 def _ort_session(path):
     """onnxruntime session on the best available hardware: CUDA (the
     :cuda image) > OpenVINO (the :intel image — AUTO targets the
-    iGPU/Arc and falls back to CPU) > CPU. OPENSCRUB_CPU_DNN=1 forces
-    CPU. CPU is always listed last so onnxruntime can fall back
+    iGPU/Arc and falls back to CPU) > DirectML (the Windows installer —
+    any DirectX 12 GPU: NVIDIA, AMD or Intel) > CPU. OPENSCRUB_CPU_DNN=1
+    forces CPU. CPU is always listed last so onnxruntime can fall back
     per-node if GPU init fails at runtime — a driver mismatch degrades
     to CPU instead of killing the job."""
     import onnxruntime as ort
     avail = ort.get_available_providers()
     force_cpu = os.environ.get("OPENSCRUB_CPU_DNN") == "1"
     gpu = ([] if force_cpu else
-           [p for p in ("CUDAExecutionProvider", "OpenVINOExecutionProvider")
+           [p for p in ("CUDAExecutionProvider", "OpenVINOExecutionProvider",
+                        "DmlExecutionProvider")
             if p in avail])
     if "OpenVINOExecutionProvider" in gpu:
         withopts = [("OpenVINOExecutionProvider",
@@ -2781,23 +2783,34 @@ def _ort_session(path):
             return ort.InferenceSession(path, providers=withopts)
         except Exception:
             pass    # device-option drift across ORT versions: retry plain
-    return ort.InferenceSession(path, providers=gpu
-                                + ["CPUExecutionProvider"])
+    sess_opts = None
+    if gpu and gpu[0] == "DmlExecutionProvider":
+        # DirectML requires memory-pattern optimization off and sequential
+        # execution — onnxruntime raises at inference otherwise. (No effect
+        # on the other providers; only set when DirectML leads.)
+        sess_opts = ort.SessionOptions()
+        sess_opts.enable_mem_pattern = False
+        sess_opts.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+    return ort.InferenceSession(path, sess_options=sess_opts,
+                                providers=gpu + ["CPUExecutionProvider"])
 
 
 def _ort_gpu_available():
     """True if onnxruntime can reach a GPU here — OpenVINO on Intel
-    iGPUs/Arc, CUDA on NVIDIA. Used to route ONNX face models onto the
-    GPU on builds where OpenCV's DNN cannot (the Intel image), while the
-    CUDA image — where OpenCV already has the GPU — stays on its existing
-    OpenCV path. OPENSCRUB_CPU_DNN=1 forces CPU (mirrors _ort_session)."""
+    iGPUs/Arc, CUDA on NVIDIA, DirectML on the Windows installer (any
+    DirectX 12 GPU). Used to route ONNX face models onto the GPU on
+    builds where OpenCV's DNN cannot (the Intel and Windows builds),
+    while the CUDA image — where OpenCV already has the GPU — stays on
+    its existing OpenCV path. OPENSCRUB_CPU_DNN=1 forces CPU (mirrors
+    _ort_session)."""
     if os.environ.get("OPENSCRUB_CPU_DNN", "").lower() in (
             "1", "true", "yes"):
         return False
     try:
         import onnxruntime as ort
         return bool(set(ort.get_available_providers())
-                    & {"OpenVINOExecutionProvider", "CUDAExecutionProvider"})
+                    & {"OpenVINOExecutionProvider", "CUDAExecutionProvider",
+                       "DmlExecutionProvider"})
     except Exception:
         return False
 

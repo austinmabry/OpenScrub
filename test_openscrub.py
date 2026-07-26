@@ -2129,16 +2129,26 @@ def test_ctc_greedy_decode():
 def test_ort_gpu_gate(monkeypatch):
     """The face-model GPU routing gate. OPENSCRUB_CPU_DNN=1 forces it OFF
     (a user can pin CPU); otherwise it reflects whether onnxruntime exposes
-    a GPU provider (OpenVINO on Intel, CUDA on NVIDIA). This gate — together
-    with cuda_dnn_available() — is what routes ONNX face models onto the GPU
-    on the Intel image while leaving the CUDA image on its OpenCV path."""
+    a GPU provider (OpenVINO on Intel, CUDA on NVIDIA, DirectML on the
+    Windows installer). This gate — together with cuda_dnn_available() — is
+    what routes ONNX face models onto the GPU on the Intel and Windows
+    builds while leaving the CUDA image on its OpenCV path."""
     monkeypatch.setenv("OPENSCRUB_CPU_DNN", "1")
     assert openscrub._ort_gpu_available() is False
     monkeypatch.delenv("OPENSCRUB_CPU_DNN", raising=False)
     import onnxruntime as ort
-    expect = bool(set(ort.get_available_providers())
-                  & {"OpenVINOExecutionProvider", "CUDAExecutionProvider"})
+    gpu_provs = {"OpenVINOExecutionProvider", "CUDAExecutionProvider",
+                 "DmlExecutionProvider"}
+    expect = bool(set(ort.get_available_providers()) & gpu_provs)
     assert openscrub._ort_gpu_available() is expect
+
+    # DirectML must count as a GPU provider (the Windows-installer path):
+    # simulate onnxruntime exposing it and confirm the gate opens.
+    real = ort.get_available_providers
+    monkeypatch.setattr(ort, "get_available_providers",
+                        lambda: ["DmlExecutionProvider", "CPUExecutionProvider"])
+    assert openscrub._ort_gpu_available() is True
+    monkeypatch.setattr(ort, "get_available_providers", real)
 
 
 def test_structured_recognizers_checksums():

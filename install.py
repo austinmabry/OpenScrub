@@ -5,6 +5,8 @@ OpenScrub installer — Windows, Linux, and (best-effort) macOS.
 One file that takes a fresh machine to a working install:
   * Python package dependencies (OCR, web server, crypto for HTTPS)
   * PaddleOCR with GPU acceleration when an NVIDIA card is present
+  * DirectML GPU acceleration for the ONNX detectors on Windows
+    (onnxruntime-directml — any DirectX 12 GPU: NVIDIA, AMD or Intel)
   * System tools: Tesseract OCR and ffmpeg (winget / apt / dnf / pacman / brew)
   * NVENC hardware-encode verification
   * A launchable "OpenScrub" shortcut with the program icon
@@ -15,7 +17,7 @@ Usage:
     python install.py            interactive install
     python install.py --yes      install everything without prompting
     python install.py --check    report what is present/missing, change nothing
-    python install.py --cpu-only skip GPU OCR even if an NVIDIA card exists
+    python install.py --cpu-only skip all GPU acceleration (OCR + DirectML)
     python install.py --no-shortcut   skip launcher creation
 """
 
@@ -208,6 +210,45 @@ def step_paddle(check, yes, cpu_only):
         record("PaddleOCR (CPU)", r.returncode == 0 and r2.returncode == 0)
 
 
+def _ort_has_dml():
+    r = run([PYTHON, "-c", "import onnxruntime as o;"
+             "print('DmlExecutionProvider' in o.get_available_providers())"])
+    return "True" in (r.stdout or "")
+
+
+def step_directml(check, yes, cpu_only):
+    # Windows-only GPU acceleration for the ONNX detectors (plates,
+    # person/seg, ONNX OCR, and the SCRFD face model). onnxruntime-directml
+    # runs them on ANY DirectX 12 GPU — NVIDIA, AMD or Intel — via the
+    # DmlExecutionProvider _ort_session prefers; it degrades to CPU
+    # per-node if the GPU init fails. Same module name as stock
+    # onnxruntime, so it simply replaces the CPU-only wheel.
+    if not IS_WIN or cpu_only:
+        return
+    if _ort_has_dml():
+        record("onnxruntime DirectML (GPU detectors)", True, "GPU provider active")
+        return
+    if check:
+        record("onnxruntime DirectML (GPU detectors)", False,
+               "stock CPU-only onnxruntime — rerun installer to add GPU")
+        return
+    if not ask("Install DirectML GPU acceleration for ONNX detectors "
+               "(NVIDIA/AMD/Intel)?", yes):
+        return
+    pip("uninstall", "-y", "onnxruntime", "onnxruntime-directml")
+    r = pip("install", "onnxruntime-directml")
+    if r.returncode != 0:
+        # never leave the machine without any onnxruntime — plates/person
+        # go inert without it; restore the stock CPU wheel loudly
+        log("  DirectML wheel failed — restoring CPU onnxruntime")
+        pip("install", "onnxruntime")
+        record("onnxruntime DirectML (GPU detectors)", False,
+               "DirectML wheel unavailable — CPU onnxruntime restored")
+        return
+    record("onnxruntime DirectML (GPU detectors)", _ort_has_dml(),
+           "GPU provider active" if _ort_has_dml() else "installed")
+
+
 def step_system_tools(check, yes):
     tess = shutil.which("tesseract") or (IS_WIN and os.path.exists(
         r"C:\Program Files\Tesseract-OCR\tesseract.exe"))
@@ -354,6 +395,7 @@ def main():
     step_spacy(a.check, a.yes)
     step_system_tools(a.check, a.yes)
     step_paddle(a.check, a.yes, a.cpu_only)
+    step_directml(a.check, a.yes, a.cpu_only)
     step_nvenc()
     if not a.no_shortcut:
         step_shortcut(a.check)

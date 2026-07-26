@@ -19,6 +19,18 @@ if "%VER%"=="" ( echo Could not read VERSION from openscrub.py & exit /b 1 )
 echo Building OpenScrub v%VER% ...
 
 python -m pip install --quiet --upgrade pyinstaller || exit /b 1
+
+rem GPU acceleration: replace the stock CPU-only onnxruntime with
+rem onnxruntime-directml, whose DmlExecutionProvider runs the ONNX
+rem detectors (plates, person/seg, ONNX OCR, and the SCRFD face model)
+rem on ANY DirectX 12 GPU — NVIDIA, AMD or Intel. Same module name
+rem ("onnxruntime"), so the spec's collect_all still bundles it plus the
+rem DirectML.dll; _ort_session prefers DmlExecutionProvider and falls
+rem back to CPU per-node if the GPU init fails. Install LAST so its files
+rem win. (The two Docker images do the CUDA/OpenVINO equivalents.)
+python -m pip uninstall -y onnxruntime onnxruntime-directml >nul 2>nul
+python -m pip install --quiet onnxruntime-directml || exit /b 1
+
 python -m PyInstaller --noconfirm windows\openscrub.spec || exit /b 1
 echo PyInstaller build OK: dist\OpenScrub
 
