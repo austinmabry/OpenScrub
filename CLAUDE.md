@@ -597,6 +597,37 @@ says "detector scans"); no `name` → no NameDetector/spaCy (`namer` is
 None; `detect_phi` and the recall path guard for it). Keep new
 text-pipeline features behind these gates.
 
+OCR engine (`make_ocr(engine, device)`, `--engine auto|paddle|onnx|
+tesseract`, default `auto`) — reads text so `detect_phi` can classify
+PII (SSN/name/email/…). THREE backends under `OcrBackend`
+(returns `[(text,(x1,y1,x2,y2),conf),…]`):
+- `PaddleBackend` — the `paddleocr` package; GPU only via
+  `paddlepaddle-gpu` (CUDA). Installed ONLY in the CUDA image.
+- `OnnxOcrBackend` — PP-OCRv5 **det+rec** as ONNX through `_ort_session`
+  (CUDA→OpenVINO→CPU). SAME PaddleOCR models as PaddleBackend → same
+  accuracy, but NO paddlepaddle dep, so it **GPU-accelerates on Intel
+  iGPUs/Arc via OpenVINO** (and NVIDIA via CUDA). Det reuses the
+  `TextRegionDetector` preprocessing + `_decode_db` (with a TIGHT
+  `pad_frac=0.12` — rec wants the line, not a blur margin); rec resizes
+  the crop to H=48, normalizes BGR to [-1,1], and greedy-CTC-decodes
+  (`_ctc_greedy_decode`, pure/unit-tested) against the 18385-class vocab
+  (blank@0 + 18383 dict chars@1..18383 + space@18384; dict parsed from
+  the pinned `inference.yml`). Output shape is IDENTICAL to
+  PaddleBackend (line detect → per-word split by proportional width), so
+  `detect_phi` is unchanged downstream. Models `PPREC_URL`/`_SHA256` +
+  `PPREC_YML_URL`/`_SHA256`, auto-downloaded + sha256-pinned like YuNet,
+  prefetched in the CPU + Intel images.
+- `TesseractBackend` — CPU, the always-available fallback.
+`auto` order: PaddleBackend first (so the CUDA image keeps GPU
+PaddleOCR — it's the only build that installs `paddleocr`), else
+`OnnxOcrBackend` (the default on Intel/CPU/Windows — better than
+Tesseract AND GPU-accelerated on Intel), else Tesseract. Every step
+`_ocr_selftest`s and degrades LOUDLY, so a broken GPU/OpenVINO path
+never crashes a scan — worst case is CPU OCR, ultimately Tesseract.
+NVIDIA keeps `paddlepaddle-gpu` for now (same models; unify onto ONNX
+later once field-proven). Paddle and Onnx are the SAME models — there
+is no accuracy reason to prefer one; the choice is runtime/deps.
+
 Per-frame detection blocks (dense faces, plates) live inside the frame loop
 in `run_scan`, AFTER the frame read and the detection-window check. The zone
 lookups (`plate_zone_px`, `face_zone_px`) must stay AFTER `zones_px` is

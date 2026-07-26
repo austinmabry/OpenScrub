@@ -2103,6 +2103,29 @@ def test_decode_db_text_regions():
     assert y1 < 200 and y2 > 280, "unclip pad must expand the region"
 
 
+def test_ctc_greedy_decode():
+    """PP-OCR recognizer CTC decode (the correctness-critical step of the
+    ONNX OCR engine): collapse consecutive repeats, drop blank (index 0),
+    map through the charmap, average confidence. A wrong index map or a
+    missed repeat-collapse turns recognized text into garbage."""
+    charmap = ["", "A", "B", "C", " "]        # 0=blank, 4=space
+    def step(i, n=5, p=0.9):
+        v = np.full(n, (1.0 - p) / (n - 1))
+        v[i] = p
+        return v
+    # A A blank B  -> "AB": the repeated A collapses, the blank drops
+    logits = np.array([step(1), step(1), step(0), step(2)])
+    txt, conf = openscrub._ctc_greedy_decode(logits, charmap)
+    assert txt == "AB", txt
+    assert conf > 0.85
+    # space is its own class (index 4) and must render as ' '
+    logits2 = np.array([step(1), step(4), step(3)])
+    assert openscrub._ctc_greedy_decode(logits2, charmap)[0] == "A C"
+    # all-blank -> empty string, zero confidence (no false text)
+    assert openscrub._ctc_greedy_decode(
+        np.array([step(0), step(0)]), charmap) == ("", 0.0)
+
+
 def test_structured_recognizers_checksums():
     """bank/crypto/passport recognizers are CHECKSUM-gated: a match must
     verify (IBAN mod-97, ABA weights, Base58Check) — patterns alone

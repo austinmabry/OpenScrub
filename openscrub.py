@@ -36,7 +36,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.68"
+VERSION = "1.0.69"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -236,24 +236,34 @@ def _ocr_selftest(backend):
 def make_ocr(engine, device="auto"):
     if engine == "tesseract":
         return TesseractBackend()
-    try:
-        return _ocr_selftest(PaddleBackend(device=device))
-    except Exception as e:
-        print("      PaddleOCR failed its self-test: %s: %s"
-              % (type(e).__name__, str(e)[:200]))
-        if device != "cpu":
-            try:
-                print("      retrying PaddleOCR on CPU "
-                      "(GPU/cuDNN/driver problems are the usual cause)…")
-                return _ocr_selftest(PaddleBackend(device="cpu"))
-            except Exception as e2:
-                print("      PaddleOCR on CPU also failed: %s"
-                      % str(e2)[:150])
-        print("      falling back to Tesseract — the job continues on "
-              "CPU OCR." + (" (--engine paddle was requested but is not "
-                            "usable on this machine)" if engine == "paddle"
-                            else ""))
-        return TesseractBackend()
+    # PaddleOCR first for auto/paddle: only the CUDA image installs it, so
+    # on NVIDIA this keeps the GPU PaddleOCR path; on the Intel/CPU/Windows
+    # builds the import fails and we drop straight to the ONNX engine below
+    # (the SAME PP-OCR models, no paddlepaddle, GPU via OpenVINO/CUDA).
+    if engine in ("auto", "paddle"):
+        try:
+            return _ocr_selftest(PaddleBackend(device=device))
+        except Exception as e:
+            print("      PaddleOCR unavailable: %s: %s"
+                  % (type(e).__name__, str(e)[:200]))
+            if engine == "paddle" and device != "cpu":
+                try:
+                    print("      retrying PaddleOCR on CPU "
+                          "(GPU/cuDNN/driver problems are the usual cause)…")
+                    return _ocr_selftest(PaddleBackend(device="cpu"))
+                except Exception as e2:
+                    print("      PaddleOCR on CPU also failed: %s"
+                          % str(e2)[:150])
+    if engine in ("auto", "onnx", "paddle"):
+        try:
+            return _ocr_selftest(OnnxOcrBackend(device=device))
+        except Exception as e:
+            print("      ONNX PP-OCR unavailable: %s: %s"
+                  % (type(e).__name__, str(e)[:200]))
+    print("      falling back to Tesseract — the job continues on CPU OCR."
+          + (" (--engine %s requested but not usable here)" % engine
+             if engine in ("paddle", "onnx") else ""))
+    return TesseractBackend()
 
 
 # ----------------------------------------------------------------------------
@@ -3464,6 +3474,20 @@ PPDET_URL = ("https://huggingface.co/PaddlePaddle/PP-OCRv5_mobile_det_onnx/"
              "resolve/main/inference.onnx")
 PPDET_SHA256 = ("a431985659dc921974177a95adcfbb90"
                 "fd9e51989a5e04d70d0b75f597b6e61d")
+# PP-OCRv5 mobile RECOGNITION model (reads the characters) — the second
+# half of the OnnxOcrBackend OCR engine. Same PaddleOCR models as
+# PaddleBackend, but run through onnxruntime so they GPU-accelerate on
+# the engine's provider ladder (OpenVINO on Intel, CUDA on NVIDIA). The
+# inference.yml carries the CTC character dictionary (18383 entries;
+# the vocab is blank@0 + dict@1..18383 + space@18384). Apache-2.0.
+PPREC_URL = ("https://huggingface.co/PaddlePaddle/PP-OCRv5_mobile_rec_onnx/"
+             "resolve/main/inference.onnx")
+PPREC_SHA256 = ("da72dc72ca4dc220df0dfde68c1dedc3"
+                "1c58d3e76a25871122e5056227d50092")
+PPREC_YML_URL = ("https://huggingface.co/PaddlePaddle/PP-OCRv5_mobile_rec_onnx/"
+                 "resolve/main/inference.yml")
+PPREC_YML_SHA256 = ("5dfeb2777f6d0db8177d8128a8acfcf6"
+                    "e6276dc4ac73ea3bf0dc06d6a5e85d8e")
 YUNET_SHA256 = "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4"
 SFACE_SHA256 = "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79"
 
@@ -4144,13 +4168,32 @@ class QRDetector:
         return _nms_boxes(out, 0.4)
 
 
-def _decode_db(prob, w, h, nw, nh, thresh=0.3, box_thresh=0.5):
+def _ctc_greedy_decode(logits, charmap):
+    """Greedy CTC decode (pure, unit-tested) for the PP-OCR recognizer.
+    Per-timestep argmax, collapse consecutive repeats, drop blank
+    (index 0), map indices through charmap. `charmap[0]` is the blank.
+    Returns (text, mean confidence over the kept, non-blank steps)."""
+    idx = logits.argmax(1)
+    prob = logits.max(1)
+    chars, confs, prev = [], [], -1
+    for t in range(len(idx)):
+        i = int(idx[t])
+        if i != 0 and i != prev and i < len(charmap):
+            chars.append(charmap[i])
+            confs.append(float(prob[t]))
+        prev = i
+    return "".join(chars), (float(np.mean(confs)) if confs else 0.0)
+
+
+def _decode_db(prob, w, h, nw, nh, thresh=0.3, box_thresh=0.5, pad_frac=0.55):
     """Pure DB-head decode (unit-tested): probability map -> text-region
     boxes in frame coords. Contours on the thresholded map are scored
     by their MEAN probability; boxes are unclipped outward by ~55% of
     the short side because DB is trained on SHRUNK text kernels — the
     pad restores full glyph coverage (over-cover beats a clipped
-    ascender, fail closed)."""
+    ascender, fail closed). OCR crops pass a SMALLER pad_frac: the
+    recognizer wants a tight line, not a blur-safety margin of extra
+    background."""
     bitmap = (prob > thresh).astype(np.uint8)
     cnts, _ = cv2.findContours(bitmap, cv2.RETR_LIST,
                                cv2.CHAIN_APPROX_SIMPLE)
@@ -4165,7 +4208,7 @@ def _decode_db(prob, w, h, nw, nh, thresh=0.3, box_thresh=0.5):
         if score < box_thresh:
             continue
         x, y, bw, bh = cv2.boundingRect(c_)
-        pad = int(round(0.55 * min(bw, bh))) + 1
+        pad = int(round(pad_frac * min(bw, bh))) + 1
         out.append(((x - pad) * sx, (y - pad) * sy,
                     (x + bw + pad) * sx, (y + bh + pad) * sy,
                     round(score, 3)))
@@ -4222,6 +4265,112 @@ class TextRegionDetector:
         except Exception:
             return []
         return _decode_db(prob, w, h, nw, nh, self.thresh, self.box_thresh)
+
+
+class OnnxOcrBackend(OcrBackend):
+    """OCR (reads text) using PaddleOCR's PP-OCRv5 models — detection +
+    recognition — run through onnxruntime instead of the PaddlePaddle
+    framework. SAME models as PaddleBackend, so the SAME accuracy, but
+    with NO paddlepaddle dependency: inference rides the engine's
+    execution-provider ladder (`_ort_session`), so it GPU-ACCELERATES on
+    OpenVINO (Intel iGPUs / Arc) and CUDA (NVIDIA), CPU otherwise. This
+    is the better-than-Tesseract, GPU-accelerated OCR for the Intel and
+    CPU builds; NVIDIA keeps PaddleBackend for now. Output is identical
+    in shape to PaddleBackend — line detection, per-word split by
+    proportional width — so `detect_phi` behaves the same downstream."""
+
+    def __init__(self, device="auto", cb=None):
+        self.log = (cb.log if cb else print)
+        md = _model_dir()
+        det_path = os.path.join(md, "text_detection_ppocrv5_mobile.onnx")
+        if not os.path.exists(det_path) or os.path.getsize(det_path) < 10000:
+            self.log("      downloading OCR detection model "
+                     "(~4.8 MB, one time)…")
+            _fetch_model(PPDET_URL, det_path, sha256=PPDET_SHA256,
+                         log_fn=self.log)
+        rec_path = os.path.join(md, "text_recognition_ppocrv5_mobile.onnx")
+        if not os.path.exists(rec_path) or os.path.getsize(rec_path) < 10000:
+            self.log("      downloading OCR recognition model "
+                     "(~16 MB, one time)…")
+            _fetch_model(PPREC_URL, rec_path, sha256=PPREC_SHA256,
+                         log_fn=self.log)
+        yml_path = os.path.join(md, "text_recognition_ppocrv5_mobile.yml")
+        if not os.path.exists(yml_path):
+            _fetch_model(PPREC_YML_URL, yml_path, sha256=PPREC_YML_SHA256,
+                         log_fn=self.log)
+        import yaml
+        with open(yml_path, encoding="utf-8") as fh:
+            chars = yaml.safe_load(fh)["PostProcess"]["character_dict"]
+        # CTC vocabulary: blank at 0, dict chars at 1..N, space last.
+        self.charmap = [""] + list(chars) + [" "]
+        self.det = _ort_session(det_path)
+        self.rec = _ort_session(rec_path)
+        self._din = self.det.get_inputs()[0].name
+        self._rin = self.rec.get_inputs()[0].name
+        try:
+            prov = self.det.get_providers()[0]
+        except Exception:
+            prov = "?"
+        self.log("      OCR engine: PP-OCRv5 via onnxruntime (%s) — "
+                 "GPU-accelerated where available" % prov)
+
+    def _detect(self, frame):
+        """DB text-line boxes, tight pad (rec wants the line, not margin)."""
+        h, w = frame.shape[:2]
+        s = 960.0 / max(h, w) if max(h, w) > 960 else 1.0
+        nh = max(32, int(round(h * s / 32)) * 32)
+        nw = max(32, int(round(w * s / 32)) * 32)
+        img = cv2.resize(frame, (nw, nh)).astype(np.float32) / 255.0
+        img = ((img[:, :, ::-1] - (0.485, 0.456, 0.406))
+               / (0.229, 0.224, 0.225))
+        blob = img.transpose(2, 0, 1)[None].astype(np.float32)
+        try:
+            prob = self.det.run(None, {self._din: blob})[0][0, 0]
+        except Exception:
+            return []
+        return _decode_db(prob, w, h, nw, nh, 0.3, 0.5, pad_frac=0.12)
+
+    def _read_line(self, crop):
+        """Recognize one text-line crop (BGR) -> (text, mean confidence).
+        PP-OCR rec: resize to H=48 keeping aspect, normalize BGR to
+        [-1,1], greedy CTC decode (collapse repeats, drop blank)."""
+        h, w = crop.shape[:2]
+        if h < 2 or w < 2:
+            return "", 0.0
+        rw = max(16, min(2000, int(round(48.0 * w / h))))
+        img = cv2.resize(crop, (rw, 48)).astype(np.float32)
+        img = img.transpose(2, 0, 1) / 255.0
+        img = (img - 0.5) / 0.5
+        try:
+            y = self.rec.run(None, {self._rin:
+                                    img[None].astype(np.float32)})[0][0]
+        except Exception:
+            return "", 0.0
+        return _ctc_greedy_decode(y, self.charmap)
+
+    def read(self, frame):
+        out = []
+        H, W = frame.shape[:2]
+        for x1, y1, x2, y2, _ in self._detect(frame):
+            x1 = max(0, int(x1)); y1 = max(0, int(y1))
+            x2 = min(W, int(x2)); y2 = min(H, int(y2))
+            if x2 - x1 < 6 or y2 - y1 < 6:
+                continue
+            txt, conf = self._read_line(frame[y1:y2, x1:x2])
+            words = txt.split()
+            if not words:
+                continue
+            # line box -> per-word boxes by proportional width, identical
+            # to PaddleBackend so per-word redaction stays tight.
+            total = sum(len(w) for w in words) + (len(words) - 1)
+            cursor = float(x1)
+            for w in words:
+                frac = (len(w) + 1) / max(total, 1)
+                wx2 = cursor + (float(x2) - float(x1)) * frac
+                out.append((w, (int(cursor), int(y1), int(wx2), int(y2)),
+                            conf))
+                cursor = wx2
+        return out
 
 
 # COCO display classes whose CONTENT leaks (a filmed monitor or phone
@@ -5246,7 +5395,8 @@ def build_parser():
     ap.add_argument("--config", help="YAML config profile (CLI flags override it)")
     ap.add_argument("--allow-names", help="text file of provider/staff names to KEEP visible")
     ap.add_argument("--extra-names", help="text file of names to always blur")
-    ap.add_argument("--engine", choices=["auto", "paddle", "tesseract"], default="auto")
+    ap.add_argument("--engine", choices=["auto", "paddle", "onnx", "tesseract"],
+                    default="auto")
     ap.add_argument("--device", choices=["auto", "cpu", "gpu"], default="auto",
                     help="PaddleOCR compute device (default: gpu if available)")
     ap.add_argument("--encoder", choices=["auto", "nvenc", "qsv", "x264"],

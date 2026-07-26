@@ -66,7 +66,13 @@ openscrub._fetch_model(openscrub.VITTRACK_URL, \
 sha256=openscrub.VITTRACK_SHA256, tries=8, delay=15, log_fn=print); \
 openscrub._fetch_model(openscrub.PPDET_URL, \
 '/root/.openscrub/models/text_detection_ppocrv5_mobile.onnx', \
-sha256=openscrub.PPDET_SHA256, tries=8, delay=15, log_fn=print)"
+sha256=openscrub.PPDET_SHA256, tries=8, delay=15, log_fn=print); \
+openscrub._fetch_model(openscrub.PPREC_URL, \
+'/root/.openscrub/models/text_recognition_ppocrv5_mobile.onnx', \
+sha256=openscrub.PPREC_SHA256, tries=8, delay=15, log_fn=print); \
+openscrub._fetch_model(openscrub.PPREC_YML_URL, \
+'/root/.openscrub/models/text_recognition_ppocrv5_mobile.yml', \
+sha256=openscrub.PPREC_YML_SHA256, tries=8, delay=15, log_fn=print)"
 
 EXPOSE 8384
 VOLUME ["/root/.local/share/OpenScrub"]
