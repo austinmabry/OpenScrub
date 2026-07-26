@@ -36,7 +36,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.69"
+VERSION = "1.0.70"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -2785,6 +2785,23 @@ def _ort_session(path):
                                 + ["CPUExecutionProvider"])
 
 
+def _ort_gpu_available():
+    """True if onnxruntime can reach a GPU here — OpenVINO on Intel
+    iGPUs/Arc, CUDA on NVIDIA. Used to route ONNX face models onto the
+    GPU on builds where OpenCV's DNN cannot (the Intel image), while the
+    CUDA image — where OpenCV already has the GPU — stays on its existing
+    OpenCV path. OPENSCRUB_CPU_DNN=1 forces CPU (mirrors _ort_session)."""
+    if os.environ.get("OPENSCRUB_CPU_DNN", "").lower() in (
+            "1", "true", "yes"):
+        return False
+    try:
+        import onnxruntime as ort
+        return bool(set(ort.get_available_providers())
+                    & {"OpenVINOExecutionProvider", "CUDAExecutionProvider"})
+    except Exception:
+        return False
+
+
 _ENC_LADDERS = {"auto": ["h264_nvenc", "h264_qsv"],
                 "nvenc": ["h264_nvenc"],
                 "qsv": ["h264_qsv"],
@@ -4640,14 +4657,44 @@ class FaceDetector:
         log = (cb.log if cb else print)
         self.yunet = None
         self.haar = None
-        self.net = None
+        self.net = None          # OpenCV DNN backend
+        self.ort = None          # onnxruntime backend (GPU on Intel/CUDA)
+        self._fin = None
         self.arch = None
         path = model_path or os.environ.get("OPENSCRUB_FACE_MODEL")
         if path:
             if os.path.exists(path):
                 try:
-                    net = _apply_cuda_dnn(cv2.dnn.readNet(path))
-                    nouts = len(net.getUnconnectedOutLayersNames())
+                    # Route the ONNX face model onto onnxruntime when THAT
+                    # reaches a GPU here but OpenCV's DNN would not —
+                    # OpenVINO on Intel iGPUs/Arc. The CUDA image already
+                    # has the GPU through OpenCV (cuda_dnn_available), so it
+                    # KEEPS the OpenCV path unchanged; CPU/Windows reach no
+                    # GPU either way and also stay on OpenCV. The pure-Python
+                    # decode below is identical for both backends.
+                    #   A self-test guards it: some ONNX face exports (the
+                    # Star-Clouds CenterFace) declare a FIXED input shape
+                    # onnxruntime rejects but OpenCV DNN reshapes — those
+                    # fall back to OpenCV DNN here rather than losing the
+                    # model. So SCRFD GPU-accelerates on Intel; CenterFace
+                    # keeps working (on the CPU path, exactly as before).
+                    sess = net = None
+                    if (path.lower().endswith(".onnx")
+                            and not cuda_dnn_available()
+                            and _ort_gpu_available()):
+                        try:
+                            s = _ort_session(path)
+                            s.run(None, {s.get_inputs()[0].name:
+                                         np.zeros((1, 3, 320, 320),
+                                                  np.float32)})
+                            sess, nouts = s, len(s.get_outputs())
+                        except Exception as e:
+                            log("      (face model runs on OpenCV DNN, not "
+                                "onnxruntime: %s)" % str(e).splitlines()[0][:70])
+                            sess = None
+                    if sess is None:
+                        net = _apply_cuda_dnn(cv2.dnn.readNet(path))
+                        nouts = len(net.getUnconnectedOutLayersNames())
                     if nouts == 4:
                         self.arch = "centerface"
                     elif nouts in (6, 9):
@@ -4655,11 +4702,18 @@ class FaceDetector:
                     else:
                         raise ValueError("unrecognized face-model output "
                                          "signature (%d outputs)" % nouts)
-                    self.net = net
-                    log("      face detector: %s ONNX model (%s) + built-in "
-                        "YuNet (detections are UNIONED — an optional model "
-                        "can only add faces, never lose the baseline's)"
-                        % (self.arch, os.path.basename(path)))
+                    if sess is not None:
+                        self.ort = sess
+                        self._fin = sess.get_inputs()[0].name
+                        backend = "onnxruntime/%s" % sess.get_providers()[0]
+                    else:
+                        self.net = net
+                        backend = ("OpenCV DNN [GPU]" if cuda_dnn_available()
+                                   else "OpenCV DNN")
+                    log("      face detector: %s ONNX model (%s, %s) + "
+                        "built-in YuNet (detections are UNIONED — an optional "
+                        "model can only add faces, never lose the baseline's)"
+                        % (self.arch, os.path.basename(path), backend))
                 except Exception as e:
                     log(f"      face model failed to load ({e}) — "
                         "falling back to built-in YuNet")
@@ -4678,7 +4732,7 @@ class FaceDetector:
             try:
                 self.yunet = _make_yunet(model, (320, 320), self.thresh)
                 self.size = None
-                if self.net is None:
+                if self.net is None and self.ort is None:
                     log("      face detector: YuNet (DNN)"
                         + ("  [GPU]" if cuda_dnn_available() else ""))
                 return
@@ -4698,7 +4752,7 @@ class FaceDetector:
                   if s < 1.0 else frame)
         dh, dw = dframe.shape[:2]
         raw = []
-        if self.net is not None:
+        if self.net is not None or self.ort is not None:
             raw += (self._find_centerface(dframe) if self.arch == "centerface"
                     else self._find_scrfd(dframe))
         if self.yunet is not None:
@@ -4709,7 +4763,8 @@ class FaceDetector:
             for f in (faces if faces is not None else []):
                 x, y, fw, fh, conf = f[0], f[1], f[2], f[3], float(f[-1])
                 raw.append([x, y, x + fw, y + fh, conf])
-        if raw or self.net is not None or self.yunet is not None:
+        if (raw or self.net is not None or self.ort is not None
+                or self.yunet is not None):
             out = [(x1 / s, y1 / s, x2 / s, y2 / s, conf)
                    for x1, y1, x2, y2, conf in _nms_boxes(raw)]
         else:
@@ -4727,6 +4782,16 @@ class FaceDetector:
                              min(w, x2 + ex), min(h, y2 + ey), conf))
         return expanded
 
+    def _forward(self, blob):
+        """Run the optional ONNX face model and return its output arrays as
+        a list — through onnxruntime (GPU where available: OpenVINO on
+        Intel, CUDA on NVIDIA) or OpenCV DNN. The decode is identical for
+        both; only the inference engine differs."""
+        if self.ort is not None:
+            return self.ort.run(None, {self._fin: blob})
+        self.net.setInput(blob)
+        return self.net.forward(self.net.getUnconnectedOutLayersNames())
+
     def _find_centerface(self, frame):
         """CenterFace decode: heatmap + exp(scale)*4 + offset on a stride-4
         grid, input padded up to a multiple of 32 (validated against the
@@ -4735,9 +4800,7 @@ class FaceDetector:
         iw, ih = (w + 31) // 32 * 32, (h + 31) // 32 * 32
         blob = cv2.dnn.blobFromImage(frame, 1.0, (iw, ih), (0, 0, 0),
                                      swapRB=True, crop=False)
-        self.net.setInput(blob)
-        hm, scale, off, _lms = self.net.forward(
-            self.net.getUnconnectedOutLayersNames())
+        hm, scale, off, _lms = self._forward(blob)
         heat = hm[0, 0]
         ys, xs = np.where(heat > self.thresh)
         sx, sy = w / iw, h / ih
@@ -4773,8 +4836,7 @@ class FaceDetector:
         blob = cv2.dnn.blobFromImage(canvas, 1.0 / 128, (iw, ih),
                                      (127.5, 127.5, 127.5),
                                      swapRB=True, crop=False)
-        self.net.setInput(blob)
-        outs = self.net.forward(self.net.getUnconnectedOutLayersNames())
+        outs = self._forward(blob)
         groups = {}
         for o in outs:
             o = o.reshape(o.shape[-2], o.shape[-1]) if o.ndim == 3 else o

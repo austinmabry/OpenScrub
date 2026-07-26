@@ -61,6 +61,21 @@ Key classes/functions (locate with grep, line numbers drift):
   pinned/non-commercial — never bundle it). Registry plumbing is shared with plates:
   `model_registry_path/load_model_registry/download_model(kind)` with
   plate-named wrappers kept for compatibility.
+  BACKEND ROUTING (`self.ort` vs `self.net`): the optional ONNX model runs
+  on onnxruntime (`_ort_session`, GPU) when THAT reaches a GPU here but
+  OpenCV's DNN would not — i.e. `not cuda_dnn_available() and
+  _ort_gpu_available()`, which is exactly the INTEL image (OpenVINO on the
+  iGPU/Arc). The CUDA image already has the GPU through the CUDA-built
+  OpenCV, so it stays on the OpenCV path UNCHANGED; CPU/Windows reach no
+  GPU either way and also stay on OpenCV. `_forward(blob)` abstracts the
+  two engines — the pure-Python centerface/scrfd decode is byte-identical
+  for both (SCRFD outputs proved numerically equal cv2.dnn vs onnxruntime,
+  same order). A self-test gates it: the Star-Clouds CenterFace ONNX
+  declares a FIXED input shape onnxruntime rejects but OpenCV reshapes, so
+  it falls back to OpenCV DNN (never lost) — SCRFD (the strongest model,
+  fully dynamic) GPU-accelerates on Intel; CenterFace keeps its CPU path.
+  `--face-model`/registry SELECTION is unchanged — only the execution
+  engine of the chosen model changes, chosen per-platform.
 - `PlateDetector` — YOLO ONNX, NO torch dependency. **Two backends tried per
   model:** (1) cv2.dnn (fast, honours the CUDA target; handles raw YOLO heads),
   (2) **onnxruntime** fallback for "end2end" exports. cv2.dnn CANNOT build the
@@ -581,14 +596,30 @@ onnxruntime sessions come from `_ort_session`: CUDA > OpenVINO
 (AUTO:GPU,CPU device, with a plain-provider retry for option-name
 drift) > CPU; `OPENSCRUB_CPU_DNN=1` forces CPU.
 
-OpenCV DNN device: the stock opencv-python wheel is CPU-only, so face
-detection (YuNet/SCRFD/CenterFace) + SFace grouping run on the CPU.
-`cuda_dnn_available()` (gated on `cv2.cuda.getCudaEnabledDeviceCount()>0`,
-overridable via `OPENSCRUB_CPU_DNN=1`) drives `_make_yunet`/`_make_sface`/
+OpenCV DNN device: the stock opencv-python wheel is CPU-only, so YuNet
+(the zero-setup default) + CenterFace + SFace grouping run on OpenCV DNN
+CPU. `cuda_dnn_available()` (gated on
+`cv2.cuda.getCudaEnabledDeviceCount()>0`, overridable via
+`OPENSCRUB_CPU_DNN=1`) drives `_make_yunet`/`_make_sface`/
 `_apply_cuda_dnn`, which push those nets to `DNN_TARGET_CUDA` when a
 CUDA-built OpenCV + GPU are present (the CUDA Docker image, once it FROMs
 the opencv-cuda base). CPU builds are byte-identical to before — the GPU
 path is purely additive. Video frame DECODE stays on the CPU either way.
+EXCEPTION — the optional **SCRFD** ONNX face model: when the runtime has
+no CUDA-built OpenCV but DOES have an onnxruntime GPU provider
+(`_ort_gpu_available()`: OpenVINO on Intel, or CUDA), `FaceDetector`
+loads SCRFD through `_ort_session` instead of OpenCV DNN, so the
+strongest face model GPU-accelerates on Intel iGPUs/Arc via OpenVINO
+(the same path that already gives Intel GPU plates/person/OCR). The
+routing is per-model and self-testing: `self.ort` (onnxruntime) vs
+`self.net` (OpenCV DNN) is chosen at load; a fixed-input-shape model
+(CenterFace rejects onnxruntime's arbitrary blob dims) fails the
+zero-blob self-test and falls back LOUDLY to OpenCV DNN, never losing
+the model. `_forward(blob)` hides which backend ran; the CenterFace/
+SCRFD decoders are byte-identical downstream. The CUDA image is
+UNCHANGED (it has CUDA-built OpenCV, so `cuda_dnn_available()` short-
+circuits the onnxruntime route), and model SELECTION is unchanged —
+Intel users still pick any registered face model (SCRFD included).
 
 Lazy loading: `run_scan` loads ONLY what the selected categories need —
 `text_cats = cats - {face, plate}`. No text cats → no OCR engine, no

@@ -2126,6 +2126,21 @@ def test_ctc_greedy_decode():
         np.array([step(0), step(0)]), charmap) == ("", 0.0)
 
 
+def test_ort_gpu_gate(monkeypatch):
+    """The face-model GPU routing gate. OPENSCRUB_CPU_DNN=1 forces it OFF
+    (a user can pin CPU); otherwise it reflects whether onnxruntime exposes
+    a GPU provider (OpenVINO on Intel, CUDA on NVIDIA). This gate — together
+    with cuda_dnn_available() — is what routes ONNX face models onto the GPU
+    on the Intel image while leaving the CUDA image on its OpenCV path."""
+    monkeypatch.setenv("OPENSCRUB_CPU_DNN", "1")
+    assert openscrub._ort_gpu_available() is False
+    monkeypatch.delenv("OPENSCRUB_CPU_DNN", raising=False)
+    import onnxruntime as ort
+    expect = bool(set(ort.get_available_providers())
+                  & {"OpenVINOExecutionProvider", "CUDAExecutionProvider"})
+    assert openscrub._ort_gpu_available() is expect
+
+
 def test_structured_recognizers_checksums():
     """bank/crypto/passport recognizers are CHECKSUM-gated: a match must
     verify (IBAN mod-97, ABA weights, Base58Check) — patterns alone
