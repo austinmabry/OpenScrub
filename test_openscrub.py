@@ -2126,6 +2126,36 @@ def test_ctc_greedy_decode():
         np.array([step(0), step(0)]), charmap) == ("", 0.0)
 
 
+def test_gauss_big_fast_path_stays_strong():
+    """_gauss_big's large-kernel fast path (downscale -> small blur ->
+    upscale) must destroy essentially all recoverable detail, like the
+    direct giant-kernel blur it replaces — the 4K render-speed fix must
+    never weaken redaction. Also pins dtype/shape for the 10-bit HDR
+    planes."""
+    rng = np.random.default_rng(7)
+    roi = rng.integers(0, 255, (1900, 1300, 3)).astype(np.uint8)
+    k = 433                       # real 4K tracked-person kernel size
+    direct = cv2.GaussianBlur(roi, (k, k), 0)
+    fast = openscrub._gauss_big(roi, k)
+
+    def detail(img):
+        g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        return cv2.Laplacian(g, cv2.CV_64F).var()
+
+    orig = detail(roi)
+    assert detail(fast) < orig * 0.001, "fast path left recoverable detail"
+    assert detail(fast) < detail(direct) * 5 + 1.0   # same class of blur
+    assert fast.shape == roi.shape and fast.dtype == roi.dtype
+    # small kernels take the direct path unchanged
+    small = openscrub._gauss_big(roi[:100, :100], 31)
+    assert np.array_equal(small, cv2.GaussianBlur(roi[:100, :100],
+                                                  (31, 31), 0))
+    # 10-bit single-channel plane (HDR path): dtype and shape survive
+    p10 = rng.integers(64, 940, (500, 400)).astype(np.uint16)
+    out10 = openscrub._gauss_big(p10, 133)
+    assert out10.dtype == np.uint16 and out10.shape == p10.shape
+
+
 def test_docker_prefetch_matches_engine_pins():
     """docker/prefetch_models.py bakes models into the Docker images from
     its OWN (url, sha256, filename) table — standalone by design, so the

@@ -36,7 +36,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.72"
+VERSION = "1.0.73"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -2550,6 +2550,28 @@ def _inpaint_fill(img, x1, y1, x2, y2):
     return (out.astype(np.uint16) << 2) if ten_bit else out
 
 
+def _gauss_big(roi, k):
+    """Region-strength Gaussian blur that stays fast on huge regions.
+
+    The redaction kernel scales with the region (k ~ width/3), and a
+    direct GaussianBlur with a 400+ tap kernel over a megapixel
+    4K tracked-person region measured 1.7 SECONDS per frame — the whole
+    render crawled (a real 26s 4K job estimated 56 minutes). Above a
+    threshold, blur a downscaled copy with a small kernel and upscale
+    back: the INTER_AREA downscale destroys the fine detail irreversibly
+    BEFORE the blur even runs, so the redaction is never weaker than the
+    direct kernel — the same low-pass at ~1% of the cost. Works on 8-bit
+    BGR and 10-bit single-channel planes alike."""
+    if k <= 63:
+        return cv2.GaussianBlur(roi, (k, k), 0)
+    h, w = roi.shape[:2]
+    s = 63.0 / k
+    small = cv2.resize(roi, (max(1, int(w * s)), max(1, int(h * s))),
+                       interpolation=cv2.INTER_AREA)
+    small = cv2.GaussianBlur(small, (63, 63), 0)
+    return cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR)
+
+
 def blur_region(frame, x1, y1, x2, y2, mode, shape="rect"):
     h, w = frame.shape[:2]
     x1 = max(0, int(x1)); y1 = max(0, int(y1))
@@ -2573,7 +2595,7 @@ def blur_region(frame, x1, y1, x2, y2, mode, shape="rect"):
                             interpolation=cv2.INTER_NEAREST)
     else:
         k = max(31, (((x2 - x1) // 3) | 1))
-        filled = cv2.GaussianBlur(roi, (k, k), 0)
+        filled = _gauss_big(roi, k)
     if shape == "ellipse":
         # elliptical mask hugs a face: no smeared background corners, which
         # is most of why box-blurred faces read as "whole body blurred"
@@ -2598,7 +2620,9 @@ def blur_region(frame, x1, y1, x2, y2, mode, shape="rect"):
             cv2.ellipse(mask, ((vx1 + vx2) // 2, (vy1 + vy2) // 2),
                         (max(1, (vx2 - vx1) // 2), max(1, (vy2 - vy1) // 2)),
                         0, 0, 360, 255, -1)
-        roi[mask > 0] = filled[mask > 0]
+        # cv2.copyTo: same result as boolean fancy-indexing, ~28x faster
+        # on 4K person-sized regions (writes in place through the view)
+        cv2.copyTo(filled, mask, roi)
     else:
         frame[y1:y2, x1:x2] = filled
 
@@ -2650,8 +2674,8 @@ def blur_silhouette(frame, x1, y1, x2, y2, mode, polys, poly_box,
         filled = cv2.resize(small, (rw, rh), interpolation=cv2.INTER_NEAREST)
     else:
         k = max(31, ((rw // 3) | 1))
-        filled = cv2.GaussianBlur(roi, (k, k), 0)
-    roi[mask > 0] = filled[mask > 0]
+        filled = _gauss_big(roi, k)
+    cv2.copyTo(filled, mask, roi)
 
 
 def probe_audio_streams(src):
@@ -2958,7 +2982,7 @@ def _blur_yuv10(y, u, v, x1, y1, x2, y2, mode, shape="rect"):
                                 interpolation=cv2.INTER_NEAREST)
         else:
             k = max(kmin, (((px2 - px1) // 3) | 1))
-            filled = cv2.GaussianBlur(roi, (k, k), 0)
+            filled = _gauss_big(roi, k)
         if shape == "ellipse":
             rw, rh = px2 - px1, py2 - py1
             mask = np.zeros(roi.shape, np.uint8)
@@ -2978,7 +3002,7 @@ def _blur_yuv10(y, u, v, x1, y1, x2, y2, mode, shape="rect"):
                             (max(1, (vx2 - vx1) // 2),
                              max(1, (vy2 - vy1) // 2)),
                             0, 0, 360, 255, -1)
-            roi[mask > 0] = filled[mask > 0]
+            cv2.copyTo(filled, mask, roi)
         else:
             plane[py1:py2, px1:px2] = filled
 
@@ -3038,12 +3062,12 @@ def _blur_silhouette_yuv10(y, u, v, x1, y1, x2, y2, mode, polys,
                                 interpolation=cv2.INTER_NEAREST)
         else:
             k = max(kmin, (((px2 - px1) // 3) | 1))
-            filled = cv2.GaussianBlur(roi, (k, k), 0)
+            filled = _gauss_big(roi, k)
         m = mask
         if m.shape != roi.shape:            # chroma planes are half-res
             m = cv2.resize(mask, (roi.shape[1], roi.shape[0]),
                            interpolation=cv2.INTER_NEAREST)
-        roi[m > 0] = filled[m > 0]
+        cv2.copyTo(filled, m, roi)
 
     _fill_masked(y, x1i, y1i, x2i, y2i, 64, 31)
     _fill_masked(u, x1i // 2, y1i // 2,

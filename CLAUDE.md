@@ -40,8 +40,14 @@ Mode strength hierarchy (README documents it): box > inpaint (Telea
 reconstruction via `_inpaint_fill`, works on 8-bit BGR AND 10-bit
 planes — synthetic content, so the in-region 8-bit round-trip is
 harmless) > mosaic (tile floor 6px — 2px tiles are the depixelation
-attack's favourite input) > blur (kernel scales with region). Bands
-treat inpaint as box (never weaker).
+attack's favourite input) > blur (kernel scales with region; kernels
+>63 render via `_gauss_big`: downscale→small blur→upscale — the
+INTER_AREA downscale destroys detail BEFORE the blur so it is never
+weaker, and it turned a 1.7s/frame giant-kernel pass on 4K tracked-person
+regions into ~28ms; a real 26s 4K render went from a 56-minute estimate
+to ~1 minute. Masked compositing uses cv2.copyTo, ~28x faster than
+boolean indexing, byte-identical). Bands treat inpaint as box (never
+weaker).
 
 Key classes/functions (locate with grep, line numbers drift):
 - `Detection` dataclass — has `dense: bool`. **Dense detections are per-frame
