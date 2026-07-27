@@ -354,6 +354,10 @@ def build_args(job, for_render=False):
                              else "match"),
             "--codec", (o.get("codec")
                         if o.get("codec") in ("h264", "hevc") else "h264"),
+            "--out-quality", (o.get("out_quality")
+                              if o.get("out_quality") in
+                              ("archival", "balanced", "share")
+                              else "archival"),
             "--face-shape", (o.get("face_shape")
                              if o.get("face_shape") in ("ellipse", "rect")
                              else "ellipse"),

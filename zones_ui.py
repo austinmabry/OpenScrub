@@ -172,6 +172,12 @@ details .inner .full{grid-column:1/-1}
   <div><label>Codec</label><select id="vcodec"><option>h264</option><option>hevc</option></select></div>
   <div><label>Output format</label><select id="outfmt"><option>mp4</option>
    <option>mov</option><option>mkv</option></select></div>
+  <div><label>Output quality <span class="qm" data-tip="File size vs quality. Archival is visually lossless but LARGE (a 12s phone clip can be 100MB+) - great for records, too big to text. Balanced is about a third of that size; Share-friendly about an eighth, still clean enough for messaging and uploads. Redaction strength is identical in all three.">?</span></label>
+   <select id="outqual">
+    <option value="archival">Archival (largest)</option>
+    <option value="balanced">Balanced (~1/3 size)</option>
+    <option value="share">Share-friendly (~1/8 size)</option>
+   </select></div>
   <div class="full"><label>Allow names (keep visible, one per line)</label>
    <textarea id="allow" rows="2"></textarea></div>
   <div class="full"><label>Always blur (extra names)</label>
@@ -1045,6 +1051,7 @@ async function startScan(){
   face_shape:$("fshape").value,detect_scale:+$("dscale").value,
   hdr_output:$("hdrout").value,codec:$("vcodec").value,
   out_format:$("outfmt").value,
+  out_quality:$("outqual").value,
   allow_names:$("allow").value,extra_names:$("extra").value,
   dense_faces:$("densefaces").checked,face_heads:$("faceheads").checked,
   audio_pii:$("audiopii").checked,skip_review:$("skiprev").checked,

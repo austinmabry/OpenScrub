@@ -3153,10 +3153,32 @@ def _dedupe_dense(act):
             if not (d.dense and d.track >= 0 and latest[d.track] is not d)]
 
 
+# Output quality tiers (--out-quality): per-encoder constant-quality
+# values. archival = visually lossless (the historical fixed setting —
+# a 12s 1080x1920/60 HDR clip came out 142MB, too big to share);
+# balanced ~ 1/3 the size; share ~ 1/8, still clean for messaging.
+# OUTPUT renders only — scan copies and HDR intermediates stay
+# near-lossless (they feed detection and re-renders). HEVC steps are one
+# larger per tier (its quality scale runs ~1 lower than H.264's).
+_OUT_QUALITY = {
+    "h264_nvenc": {"archival": "19", "balanced": "24", "share": "29"},
+    "hevc_nvenc": {"archival": "19", "balanced": "25", "share": "30"},
+    "h264_qsv":   {"archival": "19", "balanced": "24", "share": "29"},
+    "hevc_qsv":   {"archival": "19", "balanced": "25", "share": "30"},
+    "libx264":    {"archival": "18", "balanced": "23", "share": "28"},
+    "libx265":    {"archival": "18", "balanced": "23", "share": "28"},
+}
+
+
+def _out_q(codec, quality):
+    return _OUT_QUALITY.get(codec, _OUT_QUALITY["libx264"]).get(
+        quality or "archival", _OUT_QUALITY[codec]["archival"])
+
+
 def render_hdr(src, dst, detections, cum, bands, fps, pad, mode,
                encoder, tags, band_margin=25, progress_every=60, cb=None,
                mode_map=None, face_shape="ellipse", audio_spans=None,
-               mute_tracks=()):
+               mute_tracks=(), out_quality="archival"):
     """render(), but 10-bit end to end: decode the HDR source to raw
     yuv420p10le, blur the planes in place, encode 10-bit HEVC with the
     source's color tags (PQ/HLG + BT.2020) carried over. `hvc1` tagging
@@ -3179,14 +3201,15 @@ def render_hdr(src, dst, detections, cum, bands, fps, pad, mode,
          "-f", "rawvideo", "-pix_fmt", "yuv420p10le", "pipe:1"],
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
         bufsize=w * h * 6)
-    vargs = (["-c:v", "hevc_nvenc", "-preset", "p4", "-cq", "19",
+    q = _out_q(encoder, out_quality)
+    vargs = (["-c:v", "hevc_nvenc", "-preset", "p4", "-cq", q,
               "-profile:v", "main10", "-pix_fmt", "p010le"]
              if encoder == "hevc_nvenc" else
              ["-c:v", "hevc_qsv", "-preset", "medium",
-              "-global_quality", "19", "-profile:v", "main10",
+              "-global_quality", q, "-profile:v", "main10",
               "-pix_fmt", "p010le"]
              if encoder == "hevc_qsv" else
-             ["-c:v", "libx265", "-crf", "18", "-preset", "fast",
+             ["-c:v", "libx265", "-crf", q, "-preset", "fast",
               "-pix_fmt", "yuv420p10le"])
     targs = [a for kv in (tags or {}).items() for a in kv]
     if os.path.splitext(dst)[1].lower() in (".mp4", ".mov"):
@@ -3301,7 +3324,7 @@ def render(src, dst, detections, cum, bands, fps, pad, mode, preview,
            encoder="auto", band_margin=25, progress_every=60, cb=None,
            mode_map=None, draw_scores=False, vcodec="h264",
            face_shape="ellipse", audio_spans=None, clip=None,
-           mute_tracks=()):
+           mute_tracks=(), out_quality="archival"):
     # mode_map: {category: "blur"|"box"} overrides the global `mode` per
     # category. Lets you black-box the reversible-blur-vulnerable categories
     # (SSN, MRN, account numbers) while blurring faces, in one render.
@@ -3330,20 +3353,21 @@ def render(src, dst, detections, cum, bands, fps, pad, mode, preview,
         cb.log(f"      encoder: {codec}"
                + (" (GPU)" if codec.endswith(("_nvenc", "_qsv"))
                   else " (CPU)"))
+        q = _out_q(codec, out_quality)
         if codec == "h264_nvenc":
-            vargs = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "19"]
+            vargs = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", q]
         elif codec == "hevc_nvenc":
-            vargs = ["-c:v", "hevc_nvenc", "-preset", "p4", "-cq", "19"]
+            vargs = ["-c:v", "hevc_nvenc", "-preset", "p4", "-cq", q]
         elif codec == "h264_qsv":
             vargs = ["-c:v", "h264_qsv", "-preset", "medium",
-                     "-global_quality", "19"]
+                     "-global_quality", q]
         elif codec == "hevc_qsv":
             vargs = ["-c:v", "hevc_qsv", "-preset", "medium",
-                     "-global_quality", "19"]
+                     "-global_quality", q]
         elif codec == "libx265":
-            vargs = ["-c:v", "libx265", "-crf", "20", "-preset", "fast"]
+            vargs = ["-c:v", "libx265", "-crf", q, "-preset", "fast"]
         else:
-            vargs = ["-c:v", "libx264", "-crf", "18", "-preset", "fast"]
+            vargs = ["-c:v", "libx264", "-crf", q, "-preset", "fast"]
         if codec in ("hevc_nvenc", "hevc_qsv", "libx265") \
                 and os.path.splitext(dst)[1].lower() in (".mp4", ".mov"):
             vargs += ["-tag:v", "hvc1"]      # QuickTime/Apple compatibility
@@ -5581,6 +5605,12 @@ def build_parser():
                          "cropped word/face (default 8)")
     ap.add_argument("--no-vfr-fix", action="store_true",
                     help="skip automatic CFR normalization of VFR input")
+    ap.add_argument("--out-quality", choices=["archival", "balanced", "share"],
+                    default="archival",
+                    help="output file quality/size: archival = visually "
+                         "lossless (largest, the default), balanced = ~1/3 "
+                         "the size, share = ~1/8 — still clean, sized for "
+                         "messaging and upload")
     ap.add_argument("--codec", choices=["h264", "hevc"], default="h264",
                     help="video codec for the output: h264 (default, plays "
                          "everywhere) or hevc (H.265, smaller files). HDR "
@@ -7163,6 +7193,10 @@ def run_render(args, state, cb=None):
         clip = None
     dets_r = apply_coverage(state["detections"],
                             getattr(args, "coverage", "tight"), cb)
+    out_q = getattr(args, "out_quality", "archival") or "archival"
+    if out_q != "archival":
+        cb.log(f"      output quality: {out_q} (smaller file; archival is "
+               "the visually-lossless default)")
     if getattr(args, "hdr_source", None) and not args.preview:
         render_hdr(args.hdr_source, dst, dets_r, state["cum"],
                    state["bands"], state["fps"], pad=args.pad, mode=args.mode,
@@ -7170,7 +7204,8 @@ def run_render(args, state, cb=None):
                    tags=getattr(args, "hdr_tags", {}),
                    face_shape=getattr(args, "face_shape", "ellipse"),
                    mode_map=getattr(args, "mode_map", None),
-                   audio_spans=aspans, mute_tracks=mute_tracks, cb=cb)
+                   audio_spans=aspans, mute_tracks=mute_tracks, cb=cb,
+                   out_quality=out_q)
     else:
         render(args.video, dst, dets_r, state["cum"],
                state["bands"],
@@ -7180,7 +7215,7 @@ def run_render(args, state, cb=None):
                vcodec=getattr(args, "codec", "h264"),
                face_shape=getattr(args, "face_shape", "ellipse"),
                encoder=args.encoder, audio_spans=aspans, clip=clip,
-               mute_tracks=mute_tracks, cb=cb)
+               mute_tracks=mute_tracks, cb=cb, out_quality=out_q)
     if args.report:
         write_report(args.report, args, state, output_path=dst)
         cb.log(f"      audit report: {args.report} (contains PII text — protect it)")

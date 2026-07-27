@@ -820,6 +820,33 @@ def test_audio_redaction_mute_and_report_roundtrip(tmp_path):
     assert acodec == ["-c:a", "copy"], "no audio stream -> plain copy"
 
 
+def test_out_quality_tiers_shrink_output(tmp_path):
+    """--out-quality maps to per-encoder constant-quality values: share <
+    balanced < archival in file size, with identical frame counts (the
+    tier changes bitrate only — never timeline or redaction strength)."""
+    src = str(tmp_path / "q.mp4")
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
+                    "-i", "testsrc2=s=320x240:r=30:d=2", "-c:v", "libx264",
+                    "-pix_fmt", "yuv420p", src], check=True)
+
+    class Q(openscrub.Callbacks):
+        def log(self, m):
+            pass
+    n, sizes, frames = 60, {}, {}
+    for q in ("archival", "balanced", "share"):
+        dst = str(tmp_path / f"q_{q}.mp4")
+        openscrub.render(src, dst, [], [(0, 0)] * n, [(0, 0)] * n, 30.0,
+                         pad=4, mode="blur", preview=False, cb=Q(),
+                         out_quality=q)
+        sizes[q] = os.path.getsize(dst)
+        frames[q] = int(cv2.VideoCapture(dst).get(cv2.CAP_PROP_FRAME_COUNT))
+    assert sizes["share"] < sizes["balanced"] < sizes["archival"], sizes
+    assert len(set(frames.values())) == 1, frames
+    # every ladder codec has all three tiers defined
+    for codec, tiers in openscrub._OUT_QUALITY.items():
+        assert set(tiers) == {"archival", "balanced", "share"}, codec
+
+
 def test_audio_transcript_report_persistence(tmp_path):
     """The review transcript view reads audio_transcript from the report:
     write_report must persist it beside audio_suggestions, and the

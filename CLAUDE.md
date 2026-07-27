@@ -618,6 +618,15 @@ Key classes/functions (locate with grep, line numbers drift):
   packaged one; new release models merge in, pins never overwritten),
   web jobs/certs/zones. Folder deploys keep writing next to the code.
 
+Output size: `--out-quality archival|balanced|share` (web Advanced
+"Output quality") maps to per-encoder constant-quality values
+(`_OUT_QUALITY`/`_out_q`) in BOTH output renders (render + render_hdr).
+archival = the historical visually-lossless setting (a 12s 1080x1920/60
+HDR clip was 142MB — users re-compressed externally, mangling fps/HDR);
+balanced ~1/3 size; share ~1/8. Tier changes BITRATE only — never
+timeline, fps, HDR, or redaction strength. Scan copies + HDR
+intermediates stay near-lossless (they feed detection and re-renders).
+
 Encoders are a pre-flight-tested LADDER (`nvenc_available`: h264_nvenc
 → h264_qsv → libx264; `hevc10_encoder`: hevc_nvenc → hevc_qsv →
 libx265; `--encoder auto|nvenc|qsv|x264`) — every GPU rung must pass a
