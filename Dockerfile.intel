@@ -81,34 +81,21 @@ assert 'OpenVINOExecutionProvider' in provs, \
 ('onnxruntime OpenVINO provider missing: %r' % provs); \
 print('onnxruntime', ort.__version__, '| providers', provs)"
 
+# ---- model layer: pre-fetched detection models so first run works
+# offline. In its OWN cached layer ABOVE the app code (standalone script,
+# no openscrub import): a release that only changes code no longer
+# re-downloads ~60MB of unchanged models. Rebuilds only when
+# docker/prefetch_models.py itself changes; a sync test pins its table
+# to the engine's constants.
+COPY docker/prefetch_models.py ./
+RUN python prefetch_models.py yunet sface vittrack ppdet pprec pprec_yml
+
 # ---- app layers: tiny, change every release
 COPY pyproject.toml README.md LICENSE NOTICE plate_models.json face_models.json person_models.json ./
 COPY openscrub.py openscrub_web.py openscrub_setup.py openscrub_update.py \
      openscrub_vault.py zones_ui.py install.py test_openscrub.py ./
 COPY assets/openscrub.ico assets/
-RUN pip install --no-cache-dir --no-deps . \
- # pre-fetch the face/track models so first run works offline; _fetch_model
- # retries the flaky LFS media host and verifies the pinned sha256
- && mkdir -p /root/.openscrub/models \
- && python -c "import openscrub; \
-openscrub._fetch_model(openscrub.YUNET_URL, \
-'/root/.openscrub/models/face_detection_yunet_2023mar.onnx', \
-sha256=openscrub.YUNET_SHA256, tries=8, delay=15, log_fn=print); \
-openscrub._fetch_model(openscrub.SFACE_URL, \
-'/root/.openscrub/models/face_recognition_sface_2021dec.onnx', \
-sha256=openscrub.SFACE_SHA256, tries=8, delay=15, log_fn=print); \
-openscrub._fetch_model(openscrub.VITTRACK_URL, \
-'/root/.openscrub/models/object_tracking_vittrack_2023sep.onnx', \
-sha256=openscrub.VITTRACK_SHA256, tries=8, delay=15, log_fn=print); \
-openscrub._fetch_model(openscrub.PPDET_URL, \
-'/root/.openscrub/models/text_detection_ppocrv5_mobile.onnx', \
-sha256=openscrub.PPDET_SHA256, tries=8, delay=15, log_fn=print); \
-openscrub._fetch_model(openscrub.PPREC_URL, \
-'/root/.openscrub/models/text_recognition_ppocrv5_mobile.onnx', \
-sha256=openscrub.PPREC_SHA256, tries=8, delay=15, log_fn=print); \
-openscrub._fetch_model(openscrub.PPREC_YML_URL, \
-'/root/.openscrub/models/text_recognition_ppocrv5_mobile.yml', \
-sha256=openscrub.PPREC_YML_SHA256, tries=8, delay=15, log_fn=print)"
+RUN pip install --no-cache-dir --no-deps .
 
 EXPOSE 8384
 VOLUME ["/root/.local/share/OpenScrub"]

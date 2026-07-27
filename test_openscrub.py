@@ -2126,6 +2126,37 @@ def test_ctc_greedy_decode():
         np.array([step(0), step(0)]), charmap) == ("", 0.0)
 
 
+def test_docker_prefetch_matches_engine_pins():
+    """docker/prefetch_models.py bakes models into the Docker images from
+    its OWN (url, sha256, filename) table — standalone by design, so the
+    prefetch layer caches across releases instead of re-downloading ~60MB
+    per version. That table must stay byte-identical to the engine's
+    pinned constants, or the images would ship a model the engine
+    re-downloads (or worse, one that fails its hash check at runtime)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "prefetch_models",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                     "docker", "prefetch_models.py"))
+    pf = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pf)
+    expect = {
+        "yunet": (openscrub.YUNET_URL, openscrub.YUNET_SHA256,
+                  "face_detection_yunet_2023mar.onnx"),
+        "sface": (openscrub.SFACE_URL, openscrub.SFACE_SHA256,
+                  "face_recognition_sface_2021dec.onnx"),
+        "vittrack": (openscrub.VITTRACK_URL, openscrub.VITTRACK_SHA256,
+                     "object_tracking_vittrack_2023sep.onnx"),
+        "ppdet": (openscrub.PPDET_URL, openscrub.PPDET_SHA256,
+                  "text_detection_ppocrv5_mobile.onnx"),
+        "pprec": (openscrub.PPREC_URL, openscrub.PPREC_SHA256,
+                  "text_recognition_ppocrv5_mobile.onnx"),
+        "pprec_yml": (openscrub.PPREC_YML_URL, openscrub.PPREC_YML_SHA256,
+                      "text_recognition_ppocrv5_mobile.yml"),
+    }
+    assert pf.MODELS == expect
+
+
 def test_quality_tiers_align_with_registries():
     """Every model id a Detection-quality tier selects must exist in its
     registry with a real download_url — a tier pointing at a missing or
