@@ -242,6 +242,7 @@ def new_job(video_path, options, name):
     job = {
         "id": jid, "dir": jdir, "video": video_path, "name": name,
         "options": options, "phase": "queued", "progress": 0.0,
+        "eta": None,
         "log": [], "error": None, "output": None, "created": time.time(),
         "cancel": threading.Event(), "stats": {},
     }
@@ -253,6 +254,7 @@ def new_job(video_path, options, name):
 def job_public(job):
     return {k: job[k] for k in ("id", "name", "phase", "progress", "error",
                                 "stats")} | {
+        "eta": job.get("eta"),      # .get(): jobs rehydrated from disk lack it
         "log_tail": job["log"][-30:],
         "log_len": len(job["log"]),
         "has_output": bool(job["output"] and os.path.exists(job["output"])),
@@ -265,6 +267,10 @@ class WebCallbacks(openscrub.Callbacks):
     def __init__(self, job):
         self.job = job
         self._last_frame = 0.0
+        self._stage = None          # ETA state: current stage,
+        self._t0 = 0.0              # when it started,
+        self._cur0 = 0             # its first cur value,
+        self._eta = None            # and the smoothed estimate
 
     def log(self, msg):
         self.job["log"].append(msg)
@@ -274,9 +280,36 @@ class WebCallbacks(openscrub.Callbacks):
         # smoothing after the loop — previously a silent stall) -> 45-50%;
         # render -> back half. Jobs without a post stage jump 45 -> 50,
         # which reads as instant rather than stuck.
+        # Rounded to 5 decimals, not 3: on a long slow scan 3-decimal
+        # quantization froze the bar for 30s+ stretches, and the old
+        # client-side ETA (extrapolated from bar movement) blanked out.
         base, span = {"scan": (0, 0.45),
                       "post": (0.45, 0.05)}.get(stage, (0.5, 0.5))
-        self.job["progress"] = round(base + span * cur / max(total, 1), 3)
+        self.job["progress"] = round(base + span * cur / max(total, 1), 5)
+
+        # Server-side per-STAGE ETA from the stage's whole-run average
+        # rate (units/sec since the stage began). Each stage runs at its
+        # own real speed — extrapolating one ETA across the stitched bar
+        # (what the client used to do) made the estimate lurch at every
+        # phase boundary. The whole-stage average is stable by
+        # construction, and a light EMA on the published value keeps
+        # re-estimates gliding instead of stepping when the scan hits a
+        # fast-skip jump or a dense stretch.
+        now = time.time()
+        if stage != self._stage:
+            self._stage, self._t0, self._cur0 = stage, now, cur
+            self._eta = None
+            self.job["eta"] = None
+            return
+        done, elapsed = cur - self._cur0, now - self._t0
+        if cur < total and done > 0 and elapsed >= 3.0:
+            rem = (total - cur) * elapsed / done
+            self._eta = (rem if self._eta is None
+                         else 0.75 * self._eta + 0.25 * rem)
+            self.job["eta"] = round(self._eta)
+        else:
+            self._eta = None
+            self.job["eta"] = None
 
     def scan_frame(self, frame, t, found):
         now = time.time()
@@ -499,6 +532,7 @@ def worker():
                 else:
                     job["phase"] = "review"
                 job["progress"] = 0.5
+                job["eta"] = None
             elif action == "render":
                 job["phase"] = "rendering"
                 args = build_args(job, for_render=True)
@@ -509,6 +543,7 @@ def worker():
                     os.path.join(job["dir"], "report.json"))
                 job["phase"] = "done"
                 job["progress"] = 1.0
+                job["eta"] = None
         except openscrub.PipelineCancelled:
             job["phase"] = "cancelled"
             job["error"] = "cancelled by user"
@@ -517,6 +552,7 @@ def worker():
             job["error"] = str(e)
             job["log"].append(f"ERROR: {e}")
         finally:
+            job["eta"] = None       # a dead/paused job must not show "~N left"
             WORK_Q.task_done()
 
 
@@ -1097,6 +1133,75 @@ def model_download_status():
     return jsonify(_model_dl)
 
 
+# Detection-quality tiers: one click maps to per-kind registry selections
+# (the "" face id = built-in YuNet). Applying a tier downloads any missing
+# model first and only then selects it — a selection must never point at a
+# file that is not on disk (fail closed). Manual picks in the models panel
+# still work; when they stop matching a tier the UI shows "Custom".
+QUALITY_TIERS = {
+    "fast": {"face": "", "plate": "oim-yolov9-t-640",
+             "person": "yolo11n-seg-person"},
+    "balanced": {"face": "centerface", "plate": "oim-yolov9-t-640",
+                 "person": "yolo11s-seg-person"},
+    "accurate": {"face": "centerface", "plate": "oim-yolov9-s-608",
+                 "person": "yolo11m-seg-person"},
+}
+
+_tier_apply = {"state": "idle", "tier": "", "step": "", "error": ""}
+
+
+@app.route("/api/quality_tier", methods=["GET", "POST"])
+def quality_tier():
+    if request.method == "GET":
+        sel = load_model_select()
+        cur = next((tid for tid, t in QUALITY_TIERS.items()
+                    if all(sel.get(k, "") == v for k, v in t.items())), "")
+        needs = {tid: [k for k, v in t.items()
+                       if v and not find_model_file("%s.onnx" % v)]
+                 for tid, t in QUALITY_TIERS.items()}
+        return jsonify({"tier": cur, "applying": _tier_apply, "needs": needs})
+    tier = (request.get_json(force=True) or {}).get("tier", "")
+    t = QUALITY_TIERS.get(tier)
+    if t is None:
+        return jsonify({"error": "unknown tier"}), 404
+    if _model_dl["state"] == "downloading" or _tier_apply["state"] == "applying":
+        return jsonify({"error": "a download is already in progress"}), 409
+    _tier_apply.update(state="applying", tier=tier, step="", error="")
+
+    def work():
+        try:
+            for kind, mid in t.items():
+                if mid:
+                    entry = next((m for m in
+                                  openscrub.load_model_registry(kind)
+                                  if m.get("id") == mid), None)
+                    if entry is None:
+                        raise RuntimeError(
+                            "model registry is missing %s/%s" % (kind, mid))
+                    if not find_model_file("%s.onnx" % mid):
+                        _tier_apply["step"] = ("downloading %s"
+                                               % entry.get("label", mid))
+                        _model_dl.update(state="downloading", pct=0,
+                                         error="", id=mid, kind=kind)
+                        try:
+                            openscrub.download_model(
+                                entry, kind,
+                                progress=lambda f:
+                                    _model_dl.update(pct=int(f * 100)))
+                            _model_dl.update(state="done", pct=100)
+                        except Exception:
+                            _model_dl.update(state="error")
+                            raise
+                sel = load_model_select()
+                sel[kind] = mid
+                save_model_select(sel)
+            _tier_apply.update(state="done", step="")
+        except Exception as e:
+            _tier_apply.update(state="error", error=str(e), step="")
+    threading.Thread(target=work, daemon=True).start()
+    return jsonify({"ok": True})
+
+
 # legacy aliases (pre-1.0.30 clients)
 @app.route("/api/plate_models")
 def plate_models():
@@ -1291,6 +1396,10 @@ to any per-job allow names set in the Scan Setup editor.</div>
 <div id="persistnote" class="pnote" style="display:none"></div>
 <button type="button" class="sec" id="clearpersist" style="display:none;margin-top:5px;padding:4px 10px;font-size:12px" onclick="clearPersist()">Clear all learned words</button>
 </div>
+<div class="card" id="qualitypanel">
+<h2>Detection quality <span class="qm" data-tip="One switch for the face / plate / person model set. Higher tiers use larger models: they catch small, distant and partly hidden subjects the fast models can miss, at the cost of longer scans. Applying a tier downloads any missing model (SHA-256 verified) and selects it; picking individual models below still works and shows as Custom. Scan-time multiples are approximate - GPU builds feel the increase far less than CPU.">?</span></h2>
+<div id="qtiers" style="font-size:13px">loading&#8230;</div>
+</div>
 <div class="card" id="modelpanel">
 <h2>Detection models <span class="qm" data-tip="Face detection works out of the box (built-in YuNet); optional higher-accuracy models can be downloaded and selected here. Plate detection needs a model file (not bundled). Every download is SHA-256 verified against a pinned hash before use, and each entry shows its license — some are non-commercial.">?</span></h2>
  <div id="msec_face"></div>
@@ -1418,7 +1527,7 @@ async function refreshModelPanel(){
 async function selModel(kind,id){
  await fetch(`/api/models/${kind}/select`,{method:"POST",
   headers:{"Content-Type":"application/json"},body:JSON.stringify({id})});
- refreshModelPanel();
+ refreshModelPanel();renderTiers();
 }
 async function dlModel(kind,id,btn){
  btn.disabled=true;btn.textContent="0%";
@@ -1432,8 +1541,57 @@ async function dlModel(kind,id,btn){
    else{btn.disabled=false;btn.textContent="retry";btn.title=s.error||"download failed";}}
  },500);
 }
-refreshModelPanel();
-let CUR=null, EN={}, MAN=[], DUR=0, POLL=null, PHIST=[], LOGN=0, SHELLPH=null, JOBSJSON="";
+
+// Detection-quality tiers: one click per tier; scan-time multiples and
+// accuracy staging shown beside each. Multiples are honest approximations
+// (measured on the person model, the dominant per-frame cost).
+const QTIERS=[
+ {id:"fast",name:"Fast",mult:"~1× scan time (baseline)",stage:"Good",
+  desc:"Built-in YuNet face + nano person model. Lightest and quickest; can miss small, distant or partly hidden subjects."},
+ {id:"balanced",name:"Balanced",mult:"~1.5–2× scan time",stage:"Better",
+  desc:"CenterFace face + small person model — catches most small or partly hidden subjects the Fast tier misses."},
+ {id:"accurate",name:"Accurate",mult:"~2.5–4× scan time",stage:"Best",
+  desc:"CenterFace face + medium person model + the most-accurate plate model. Highest recall on crowds, occlusion and distant subjects; best experienced on a GPU."}];
+let QAPPLY=0;
+async function renderTiers(){
+ const el=document.getElementById("qtiers"); if(!el)return;
+ try{
+  const d=await(await fetch("/api/quality_tier")).json();
+  const ap=d.applying||{};
+  let h="";
+  for(const t of QTIERS){
+   const cur=d.tier===t.id, busy=ap.state==="applying"&&ap.tier===t.id;
+   const dl=((d.needs&&d.needs[t.id])||[]).length;
+   h+=`<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-top:1px solid #334155">
+    <input type="radio" name="qtier" ${cur?"checked":""} ${ap.state==="applying"?"disabled":""} onchange="applyTier('${t.id}')" style="margin:0">
+    <div style="flex:1;min-width:0">
+     <div style="font-size:12.5px;font-weight:600">${t.name}
+      <span style="color:#94a3b8;font-weight:400">— ${t.mult}</span>
+      <span style="font-size:11px;border-radius:5px;padding:1px 7px;margin-left:4px;background:${t.stage==="Good"?"#374151":t.stage==="Better"?"#1e3a8a":"#14532d"};color:${t.stage==="Good"?"#d1d5db":t.stage==="Better"?"#bfdbfe":"#86efac"}">${t.stage} accuracy</span></div>
+     <div style="font-size:11px;color:#94a3b8">${t.desc}</div>
+     ${busy?`<div style="font-size:11px;color:#fbbf24">${ap.step||"applying…"}</div>`:""}
+    </div>
+    ${!cur&&dl?`<span style="font-size:11px;color:#9ca3af;white-space:nowrap">${dl} download${dl>1?"s":""}</span>`:""}
+   </div>`;
+  }
+  if(!d.tier&&ap.state!=="applying")h+=`<div style="font-size:11px;color:#fbbf24;padding-top:5px">Current selection: Custom (models picked individually below)</div>`;
+  if(ap.state==="error")h+=`<div style="font-size:11px;color:#f87171;padding-top:5px">${ap.error}</div>`;
+  h+=`<div style="font-size:11px;color:#64748b;padding-top:6px">Higher tiers download larger models on demand (person/plate models are AGPL/MIT licensed — shown per model below). For the strongest face detection, SCRFD (non-commercial license) can be selected manually in Detection models.</div>`;
+  el.innerHTML=h;
+  if(ap.state==="applying"){QAPPLY=1;setTimeout(renderTiers,900);}
+  else if(QAPPLY){QAPPLY=0;refreshModelPanel();}
+ }catch(e){el.textContent="quality tiers unavailable";}
+}
+async function applyTier(id){
+ const d=await(await fetch("/api/quality_tier")).json();
+ const need=(d.needs&&d.needs[id])||[];
+ if(need.length&&!confirm(`Switching to this tier downloads ${need.length} model file(s) first (SHA-256 verified). Continue?`)){renderTiers();return;}
+ const r=await fetch("/api/quality_tier",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({tier:id})});
+ if(!r.ok){let e={};try{e=await r.json();}catch(_){/**/}alert(e.error||"could not apply tier");}
+ renderTiers();
+}
+refreshModelPanel();renderTiers();
+let CUR=null, EN={}, MAN=[], DUR=0, POLL=null, PHIST=[], PHPH="", LOGN=0, SHELLPH=null, JOBSJSON="";
 
 async function loadJobs(){
  const r=await fetch("api/jobs");
@@ -1457,7 +1615,7 @@ async function delJob(id){
  JOBSJSON="";loadJobs();
 }
 async function openJob(id){
- CUR=id; EN={}; MAN=[]; PHIST=[]; LOGN=0; SHELLPH=null;
+ CUR=id; EN={}; MAN=[]; PHIST=[]; PHPH=""; LOGN=0; SHELLPH=null;
  detail.innerHTML="";
  if(POLL)clearInterval(POLL);
  POLL=setInterval(refresh,900); refresh();
@@ -1486,13 +1644,20 @@ async function refresh(){
   im.onerror=()=>{im.style.display="none";};   // 404 before first preview: stay hidden
  }
 
- // progress + ETA (updated in place — nothing is rebuilt)
+ // progress + ETA (updated in place — nothing is rebuilt).
+ // The server sends a smoothed per-stage estimate (j.eta, seconds) built
+ // from the stage's average processing rate — prefer it. The old
+ // client-side extrapolation from bar movement stays only as a fallback
+ // (rehydrated jobs mid-phase), with its history reset on phase change so
+ // it never extrapolates a scan-speed rate across the render phase.
+ if(PHPH!==j.phase){PHIST=[];PHPH=j.phase;}
  PHIST.push([Date.now(),j.progress]); if(PHIST.length>40)PHIST.shift();
- let eta="";
- if(j.progress>0&&j.progress<1&&PHIST.length>5){
+ let sec=null;
+ if(typeof j.eta==="number"&&j.progress<1)sec=j.eta;
+ else if(j.progress>0&&j.progress<1&&PHIST.length>3){
   const[t0,p0]=PHIST[0],[t1,p1]=PHIST[PHIST.length-1];
-  if(p1>p0){const rem=(1-p1)*(t1-t0)/(p1-p0)/1000;
-   eta=` ~${rem>90?Math.round(rem/60)+" min":Math.round(rem)+" s"} left`;}}
+  if(p1>p0)sec=(1-p1)*(t1-t0)/(p1-p0)/1000;}
+ const eta=sec===null?"":` ~${sec>90?Math.round(sec/60)+" min":Math.round(sec)+" s"} left`;
  document.getElementById("ph").textContent=j.phase;
  document.getElementById("eta").textContent=eta;
  document.getElementById("prog").value=j.progress;

@@ -15,6 +15,32 @@
       "recommended": true
     },
     {
+      "id": "yolo11s-seg-person",
+      "label": "YOLO11s-seg (higher accuracy - ~2x slower)",
+      "license": "AGPL-3.0",
+      "family": "yolo-seg",
+      "input_size": 640,
+      "source_url": "https://huggingface.co/mobilint/YOLO11s-seg",
+      "attribution": "Ultralytics YOLO11 segmentation (AGPL-3.0), standard ONNX export mirrored by mobilint on Hugging Face.",
+      "download_url": "https://huggingface.co/mobilint/YOLO11s-seg/resolve/main/yolo11s-seg.onnx",
+      "sha256": "340a164246b60f73ce0640cd02aa543345964139399c247f34ef1c52a57b8afa",
+      "notes": "39 MB. Small-tier model (COCO mask mAP 37.8 vs 32.0 for the nano): finds small, distant and partly hidden people the nano model misses, at roughly 2x its inference cost. The 'Balanced' quality tier.",
+      "recommended": false
+    },
+    {
+      "id": "yolo11m-seg-person",
+      "label": "YOLO11m-seg (highest accuracy - ~3x slower)",
+      "license": "AGPL-3.0",
+      "family": "yolo-seg",
+      "input_size": 640,
+      "source_url": "https://huggingface.co/mobilint/YOLO11m-seg",
+      "attribution": "Ultralytics YOLO11 segmentation (AGPL-3.0), standard ONNX export mirrored by mobilint on Hugging Face.",
+      "download_url": "https://huggingface.co/mobilint/YOLO11m-seg/resolve/main/yolo11m-seg.onnx",
+      "sha256": "4de4022753f22266a80d361ae0a777a82be4d16286b68b1d9e1ba92b030d3c96",
+      "notes": "86 MB. Medium-tier model (COCO mask mAP 41.5): best recall on hard footage - crowds, occlusion, frame-edge subjects - at roughly 3x the nano's inference cost. The 'Accurate' quality tier; strongly recommended on a GPU.",
+      "recommended": false
+    },
+    {
       "id": "yolov8n-seg-person",
       "label": "YOLOv8n-seg (silhouette masks - alternative)",
       "license": "AGPL-3.0",

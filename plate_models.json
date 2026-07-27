@@ -10,7 +10,7 @@
       "source_url": "https://github.com/ankandrew/open-image-models",
       "attribution": "Model: ankandrew/open-image-models (MIT). Training data derived from a Roboflow license-plate dataset (CC BY 4.0).",
       "download_url": "https://github.com/ankandrew/open-image-models/releases/download/assets/yolo-v9-t-640-license-plates-end2end.onnx",
-      "sha256": "",
+      "sha256": "c3c1026ca7d0585dd88084d68182dd897113712fa734ae1557ca70174440c076",
       "notes": "mAP50 0.958. Good default: strong accuracy, 640px input matches OpenScrub's face-detection size.",
       "recommended": true
     },

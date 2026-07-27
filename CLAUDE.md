@@ -133,9 +133,11 @@ Key classes/functions (locate with grep, line numbers drift):
   body ("person (full body)"; SFace grouping stays face-only). INERT
   without a model (exactly like plates); `--person-model` →
   `$OPENSCRUB_PERSON_MODEL` → `models/person_yolov8.onnx` → registry
-  ids. `--person-threshold` default 0.5. Registry models are YOLO11n-seg
-  / YOLOv8n-seg ONNX (HF mirrors, PRE-pinned sha256, validated on real
-  footage at authoring) — AGPL-3.0, registry-download only, never
+  ids. `--person-threshold` default 0.5. Registry models are YOLO11
+  n/s/m-seg + YOLOv8n-seg ONNX (HF mirrors, PRE-pinned sha256, validated
+  on real footage at authoring; n/s/m are the Fast/Balanced/Accurate
+  quality-tier picks — the s and m tiers find frame-edge/partial people
+  the nano provably misses) — AGPL-3.0, registry-download only, never
   bundled.
 - `detect_phi` — text-category detection over OCR line dicts. Word-loop
   order matters: card (Luhn-gated) before apikey before SSN. The `mrn`
@@ -716,6 +718,29 @@ defined — there was a real UnboundLocalError from ordering once.
   Old `/api/plate_models*` routes remain as aliases. A model shows a
   Download button only if its registry `download_url` is real. New models
   are picked up on the next job (detector instantiated per run).
+- Detection-quality tiers (`QUALITY_TIERS` + `/api/quality_tier`,
+  Settings card ABOVE the models panel): one click maps to per-kind
+  model selections — fast = built-in YuNet + yolo11n-seg + t-640 plate;
+  balanced = centerface + yolo11s-seg + t-640; accurate = centerface +
+  yolo11m-seg + s-608. Apply runs in a background thread that downloads
+  any missing model FIRST and only then writes that kind's selection
+  (fail closed — a failed download leaves the previous selection
+  pointing at a file that exists). UI shows scan-time multiples +
+  accuracy staging beside each tier and "Custom" when manual picks
+  match no tier; SCRFD is NEVER auto-selected (non-commercial license —
+  manual pick only, noted in the card footer).
+  test_quality_tiers_align_with_registries pins every tier id to a real
+  registry entry with a real download_url.
+- Progress ETA is computed SERVER-side per STAGE
+  (`WebCallbacks.progress`): whole-stage average rate + a light EMA on
+  the published seconds (`eta` in the job JSON; cleared on stage change,
+  finish, cancel and error — a dead job must not show "~N left"). Each
+  stage runs at its own real speed, so the old client extrapolation
+  across the stitched progress bar lurched at every phase boundary. The
+  client prefers `j.eta` and keeps bar-movement extrapolation only as a
+  fallback for rehydrated jobs, with its history reset on phase change.
+  Progress rounds to 5 decimals — 3 quantized the bar frozen for 30s+
+  stretches on long scans, which also blanked the old ETA entirely.
 - Server: cheroot with `BuiltinSSLAdapter` (self-signed or user cert), Flask
   dev server fallback if cheroot missing. `ssl_ctx` is a `(cert, key)` tuple.
   `RedirectingTLS` peeks the first byte to 301 plain-HTTP → https, but the

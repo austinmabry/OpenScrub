@@ -2126,6 +2126,24 @@ def test_ctc_greedy_decode():
         np.array([step(0), step(0)]), charmap) == ("", 0.0)
 
 
+def test_quality_tiers_align_with_registries():
+    """Every model id a Detection-quality tier selects must exist in its
+    registry with a real download_url — a tier pointing at a missing or
+    undownloadable model would error at apply time in the UI. ("" = the
+    built-in face default and needs no registry entry.)"""
+    import openscrub_web
+    for tier, kinds in openscrub_web.QUALITY_TIERS.items():
+        assert set(kinds) == {"face", "plate", "person"}, tier
+        for kind, mid in kinds.items():
+            if mid == "":
+                continue
+            entry = next((m for m in openscrub.load_model_registry(kind)
+                          if m.get("id") == mid), None)
+            assert entry is not None, f"{tier}: {kind}/{mid} not in registry"
+            assert entry.get("download_url") not in (None, "", "TODO_VERIFY"), \
+                f"{tier}: {kind}/{mid} has no download URL"
+
+
 def test_ort_gpu_gate(monkeypatch):
     """The face-model GPU routing gate. OPENSCRUB_CPU_DNN=1 forces it OFF
     (a user can pin CPU); otherwise it reflects whether onnxruntime exposes
