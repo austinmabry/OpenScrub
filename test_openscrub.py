@@ -2323,6 +2323,22 @@ def test_speech_suggestions_spoken_address():
     # unselected category: nothing (gating unchanged)
     assert openscrub._speech_suggestions(words, {"ssn"}) == []
 
+    # ASR formatting variance (all three leaked a real address between
+    # whisper builds): thousands-comma ZIP ("62,704"), spaced-digit ZIP,
+    # and a word-number house ("one thirteen Main Street" — RE_STREET's
+    # digit head can never match it)
+    assert openscrub.RE_SPOKEN_STATEZIP.search("Springfield Illinois 62,704")
+    assert openscrub.RE_SPOKEN_STATEZIP.search("Springfield Illinois 6 2 7 0 4")
+    assert openscrub.RE_SPOKEN_STREET.search("one thirteen Main Street")
+    assert openscrub.RE_SPOKEN_STREET.search(
+        "eleven twenty two West Elm Avenue apartment 4B")
+    # ordinary prose stays clean — no false positives from the widening
+    for clean in ("I walked down the street yesterday",
+                  "the meeting is in room 12",
+                  "turn left in five hundred feet"):
+        assert not openscrub.RE_SPOKEN_STREET.search(clean), clean
+        assert not openscrub.RE_SPOKEN_STATEZIP.search(clean), clean
+
 
 def test_person_seg_migration_lives_in_init():
     """The seg-to-onnxruntime migration must run at LOAD TIME as the

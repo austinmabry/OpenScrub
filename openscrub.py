@@ -36,7 +36,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.74"
+VERSION = "1.0.75"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -4991,11 +4991,35 @@ _STATE_NAMES = (
     r"ohio|oklahoma|oregon|pennsylvania|rhode\s+island|south\s+carolina|"
     r"south\s+dakota|tennessee|texas|utah|vermont|virginia|washington|"
     r"west\s+virginia|wisconsin|wyoming")
+# ZIP tolerant of ASR number formatting: whisper renders "72211" as
+# "72,211" (thousands comma) on some builds, and occasionally as spaced/
+# hyphenated digits ("7 2 2 1 1"). Anchored right after a state name, the
+# tolerance cannot false-positive on ordinary prose.
+_ZIP_ASR = r"(?:\d{5}|\d{2},\d{3}|\d(?:[ \-]\d){4})(?:-\d{4})?"
 RE_SPOKEN_STATEZIP = re.compile(
     r"(?i)\b(?:[A-Za-z.'\-]+\s+){0,3}(?:" + _STATE_NAMES +
     r"|AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|"
     r"MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|"
-    r"VA|WA|WV|WI|WY)[,\s]+\d{5}(?:-\d{4})?\b")
+    r"VA|WA|WV|WI|WY)[,\s]+" + _ZIP_ASR + r"\b")
+
+# Street line with a SPOKEN house number: whisper sometimes writes "one
+# thirteen Main Street" instead of "113 Main Street" — RE_STREET's \d head
+# can never match that. Number words (1-6 of them) replace the digit head;
+# the same street-suffix requirement keeps false positives low.
+_NUMWORDS = (r"(?:zero|oh|one|two|three|four|five|six|seven|eight|nine|ten|"
+             r"eleven|twelve|thir(?:teen|ty)|four(?:teen|ty)|fif(?:teen|ty)|"
+             r"six(?:teen|ty)|seven(?:teen|ty)|eigh(?:teen|ty)|"
+             r"nine(?:teen|ty)|twenty|hundred|thousand)")
+RE_SPOKEN_STREET = re.compile(r"""(?ix)
+    \b(?:\d{1,6}|""" + _NUMWORDS + r"""(?:[\s\-]+""" + _NUMWORDS + r"""){0,5})\s+
+    (?:[NSEW]\.?\s+|(?:north|south|east|west)\s+)?
+    [A-Za-z0-9.'\-]+(?:\s+[A-Za-z0-9.'\-]+){0,4}?\s+
+    (?:st|street|ave|avenue|blvd|boulevard|rd|road|dr|drive|ln|lane|ct|court|
+       cir|circle|way|pl|place|ter|terrace|pkwy|parkway|hwy|highway|trl|trail|
+       loop|pike|row|run|path|crossing|xing|square|sq)\.?
+    (?:\s+(?:apt|apartment|suite|ste|unit|bldg|building|fl|floor|rm|room)\.?\s*
+       \#?\s*\w+)?
+    \b""")
 
 _SPEECH_CHECKS = (
     ("ssn", lambda s: RE_SSN.search(s)),
@@ -5009,10 +5033,11 @@ _SPEECH_CHECKS = (
     ("crypto", lambda s: RE_ETH.search(s) or RE_BECH32.search(s)),
     # address was MISSING here entirely — an address-only spoken-PII job
     # could never suggest anything (a real user hit exactly that).
-    # RE_STREET covers "113 Main Street"; the other two cover the
-    # city/state/ZIP tail in written and spoken forms.
-    ("address", lambda s: RE_STREET.search(s) or RE_CITYSTATEZIP.search(s)
-        or RE_SPOKEN_STATEZIP.search(s)),
+    # RE_SPOKEN_STREET covers the street line (digit AND word-number house
+    # numbers); the other two cover the city/state/ZIP tail in written and
+    # spoken forms.
+    ("address", lambda s: RE_SPOKEN_STREET.search(s)
+        or RE_CITYSTATEZIP.search(s) or RE_SPOKEN_STATEZIP.search(s)),
 )
 
 
@@ -5033,10 +5058,13 @@ def _speech_suggestions(words, cats, nlp=None, custom_res=()):
     out = []
 
     def add(a, b, cat, snip):
+        # ±0.5s pad: whisper word timestamps drift by hundreds of ms
+        # across builds/quantizations, and a 0.35s pad let the first
+        # digit of a spoken house number escape a mute on a real clip.
         wi = idx[max(0, min(a, len(idx) - 1))]
         wj = idx[max(0, min(b - 1, len(idx) - 1))]
-        out.append({"t0": round(max(0.0, words[wi][0] - 0.35), 2),
-                    "t1": round(words[wj][1] + 0.35, 2),
+        out.append({"t0": round(max(0.0, words[wi][0] - 0.5), 2),
+                    "t1": round(words[wj][1] + 0.5, 2),
                     "category": cat, "text": snip.strip()[:80]})
 
     # regex windows: scan a sliding join so matches can span tokens

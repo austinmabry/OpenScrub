@@ -572,13 +572,18 @@ Key classes/functions (locate with grep, line numbers drift):
   `_speech_suggestions` (pure, unit-tested) runs the text engine's
   checksum/regex patterns + spaCy PERSON ents over the transcript,
   restricted to the job's selected cats. Address checks are speech-aware:
-  RE_STREET + RE_CITYSTATEZIP + RE_SPOKEN_STATEZIP (full state name, no
-  comma — "Springfield Illinois 62704", the form speech actually takes;
-  address was once missing from _SPEECH_CHECKS entirely and an
-  address-only job suggested nothing). Matches map to word times
-  ±0.35s; same-category spans within 0.6s merge — 2.0s for address, so
-  the natural pause between street line and city/state/ZIP still yields
-  ONE span, never a half-address. Output is
+  RE_SPOKEN_STREET (digit AND word-number house numbers — whisper writes
+  "one thirteen Main Street" on some builds) + RE_CITYSTATEZIP +
+  RE_SPOKEN_STATEZIP (full state name, no comma — "Springfield Illinois
+  62704", the form speech actually takes; its _ZIP_ASR tolerates
+  "72,211" thousands-commas and spaced digits, both real whisper
+  outputs that leaked an address; address was once missing from
+  _SPEECH_CHECKS entirely and an address-only job suggested nothing).
+  Matches map to word times ±0.5s (whisper timings drift across builds —
+  0.35 let a house number's first digit escape a mute); same-category
+  spans within 0.6s merge — 2.0s for address, so the natural pause
+  between street line and city/state/ZIP still yields ONE span, never a
+  half-address. Output is
   SUGGESTIONS: state/report-additive `audio_suggestions`
   [{t0,t1,category,text}], surfaced in the review box-editor's audio
   section (renderAudioSugg/applyAudioSugg — Add per item or Add all →
