@@ -820,6 +820,44 @@ def test_audio_redaction_mute_and_report_roundtrip(tmp_path):
     assert acodec == ["-c:a", "copy"], "no audio stream -> plain copy"
 
 
+def test_textless_band_suppression():
+    """A scan with ZERO OCR text hits must drop its safety bands: bands
+    exist to cover unscanned text, and on handheld footage the camera-
+    motion probe reads as static, camera bob fakes scroll offsets — a
+    real address-only selfie job shipped a thin phantom blur bar at the
+    bottom edge. Any text hit at all keeps bands untouched (fail
+    closed)."""
+    moving = [(0.0, 0.0), (0.0, -4.0), (3.0, 0.0), (0.0, 0.0)]
+    out, sup = openscrub._suppress_textless_bands(list(moving), 0)
+    assert sup and all(x == 0 and y == 0 for x, y in out)
+    assert len(out) == len(moving)
+    # text WAS found -> bands untouched, no matter the offsets
+    out, sup = openscrub._suppress_textless_bands(list(moving), 7)
+    assert not sup and out == moving
+    # already-quiet bands (sub-threshold jitter) -> untouched, not "suppressed"
+    quiet = [(0.0, 0.0), (1.0, -1.5)]
+    out, sup = openscrub._suppress_textless_bands(list(quiet), 0)
+    assert not sup and out == quiet
+
+
+def test_rate_cap_args_nvenc_only():
+    """The balanced/share bitrate ceiling applies to NVENC only (constant-
+    quality NVENC has no size anchor — a 12s 4K 'share' render came out
+    123MB), scales with resolution/fps, and never touches archival or the
+    CPU/QSV encoders."""
+    a = openscrub._rate_cap_args("hevc_nvenc", "share", 3840, 2160, 60.0)
+    assert a[0] == "-maxrate" and a[2] == "-bufsize"
+    cap = int(a[1])
+    assert cap == int(3840 * 2160 * 60 * 0.04) and int(a[3]) == 2 * cap
+    small = int(openscrub._rate_cap_args(
+        "h264_nvenc", "share", 1080, 1920, 30.0)[1])
+    assert small < cap                                    # scales down
+    assert openscrub._rate_cap_args("hevc_nvenc", "archival",
+                                    3840, 2160, 60.0) == []
+    assert openscrub._rate_cap_args("libx264", "share", 3840, 2160, 60.0) == []
+    assert openscrub._rate_cap_args("hevc_qsv", "share", 3840, 2160, 60.0) == []
+
+
 def test_out_quality_tiers_shrink_output(tmp_path):
     """--out-quality maps to per-encoder constant-quality values: share <
     balanced < archival in file size, with identical frame counts (the

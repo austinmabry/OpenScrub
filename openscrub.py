@@ -36,7 +36,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.75"
+VERSION = "1.0.76"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -3153,6 +3153,22 @@ def _dedupe_dense(act):
             if not (d.dense and d.track >= 0 and latest[d.track] is not d)]
 
 
+def _suppress_textless_bands(bands, n_raw_hits):
+    """-> (bands, suppressed). Safety bands exist to cover unscanned TEXT
+    scrolling into view. A scan whose OCR found ZERO text in any sampled
+    frame has proven there is nothing for bands to protect — but camera
+    bob still fakes scroll offsets on handheld footage that
+    probe_camera_motion reads as static (too steady to look like a
+    camera), and a real selfie job (address category, no on-screen text)
+    shipped with a thin phantom blur bar at the bottom edge. With zero
+    text hits there is no text-leak risk to mitigate, so dropping the
+    bands is fail-closed by construction; any text hit at all keeps them
+    untouched."""
+    if n_raw_hits or not any(abs(x) > 2 or abs(y) > 2 for x, y in bands):
+        return bands, False
+    return [(0.0, 0.0)] * len(bands), True
+
+
 # Output quality tiers (--out-quality): per-encoder constant-quality
 # values. archival = visually lossless (the historical fixed setting —
 # a 12s 1080x1920/60 HDR clip came out 142MB, too big to share);
@@ -3173,6 +3189,31 @@ _OUT_QUALITY = {
 def _out_q(codec, quality):
     return _OUT_QUALITY.get(codec, _OUT_QUALITY["libx264"]).get(
         quality or "archival", _OUT_QUALITY[codec]["archival"])
+
+
+# bits-per-pixel budgets for the size-oriented tiers on NVENC. Constant-
+# quality NVENC has no size anchor: on noisy 4K/60 HDR footage cq~30
+# still produced a 123MB 12-second "share" file. A VBR ceiling scaled by
+# resolution and fps makes the tiers mean something in MB (12s of 4K60
+# HEVC "share" ≈ 30MB, 1080p30 h264 ≈ 5MB); quality mode still governs
+# below the ceiling. archival stays pure constant-quality, uncapped.
+_TIER_BPP = {"balanced": {"h264": 0.14, "hevc": 0.10},
+             "share": {"h264": 0.06, "hevc": 0.04}}
+
+
+def _rate_cap_args(codec, out_quality, w, h, fps):
+    """-> extra ffmpeg args (possibly []) putting a resolution-scaled
+    bitrate ceiling on NVENC for the balanced/share tiers. Pure —
+    unit-tested. CPU x264/x265 CRF and QSV global_quality already track
+    size predictably and are left alone."""
+    if not codec.endswith("_nvenc"):
+        return []
+    bpp = _TIER_BPP.get(out_quality or "", {}).get(
+        "hevc" if codec.startswith("hevc") else "h264")
+    if not bpp:
+        return []
+    cap = int(w * h * max(1.0, fps) * bpp)
+    return ["-maxrate", str(cap), "-bufsize", str(2 * cap)]
 
 
 def render_hdr(src, dst, detections, cum, bands, fps, pad, mode,
@@ -3211,6 +3252,7 @@ def render_hdr(src, dst, detections, cum, bands, fps, pad, mode,
              if encoder == "hevc_qsv" else
              ["-c:v", "libx265", "-crf", q, "-preset", "fast",
               "-pix_fmt", "yuv420p10le"])
+    vargs += _rate_cap_args(encoder, out_quality, w, h, fps)
     targs = [a for kv in (tags or {}).items() for a in kv]
     if os.path.splitext(dst)[1].lower() in (".mp4", ".mov"):
         targs += ["-tag:v", "hvc1"]          # QuickTime/Apple compatibility
@@ -3368,6 +3410,7 @@ def render(src, dst, detections, cum, bands, fps, pad, mode, preview,
             vargs = ["-c:v", "libx265", "-crf", q, "-preset", "fast"]
         else:
             vargs = ["-c:v", "libx264", "-crf", q, "-preset", "fast"]
+        vargs += _rate_cap_args(codec, out_quality, w, h, fps)
         if codec in ("hevc_nvenc", "hevc_qsv", "libx265") \
                 and os.path.splitext(dst)[1].lower() in (".mp4", ".mov"):
             vargs += ["-tag:v", "hvc1"]      # QuickTime/Apple compatibility
@@ -7134,6 +7177,12 @@ def run_scan(args, cb=None):
         top = sorted(recall_counts.items(), key=lambda kv: -kv[1])[:8]
         cb.log("      top recalled strings (check for false positives): "
                + ", ".join(f"'{k}'x{v}" for k, v in top))
+
+    bands, _bsup = _suppress_textless_bands(bands, len(raw))
+    if _bsup:
+        cb.log("      safety bands: suppressed — the scan found no text "
+               "anywhere, so edge bands (which exist to cover unscanned "
+               "text) could only be camera-motion artifacts")
 
     audio_sugg, audio_tx = [], []
     if getattr(args, "audio_pii", False):

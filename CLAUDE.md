@@ -214,7 +214,13 @@ Key classes/functions (locate with grep, line numbers drift):
   subject motion as scrolling (edge-band smears, drifting boxes). Face/
   plate-only jobs force track_on off. For text jobs, camera vs screen:
   `probe_camera_motion` (--scroll-track auto) detects continuous 2-axis
-  motion and disables scroll tracking + safety bands on camera footage. `assign_dense_tracks` groups the
+  motion and disables scroll tracking + safety bands on camera footage.
+  Second gate (`_suppress_textless_bands`, run_scan tail): a scan whose
+  OCR found ZERO text hits drops its bands entirely (loud log) — a
+  steady handheld selfie reads as static to the probe, camera bob fakes
+  scroll offsets, and a real address-only selfie job shipped a thin
+  phantom blur bar at the bottom edge. Zero text anywhere ⇒ nothing for
+  bands to protect; any hit keeps them (fail closed). `assign_dense_tracks` groups the
   per-frame dense samples into tracks (`Detection.track`, additive report
   field) so review shows ONE card per physical object with a fan-out
   toggle (web `TRKMEM`), not hundreds of frames. Association hardening
@@ -623,7 +629,11 @@ Output size: `--out-quality archival|balanced|share` (web Advanced
 (`_OUT_QUALITY`/`_out_q`) in BOTH output renders (render + render_hdr).
 archival = the historical visually-lossless setting (a 12s 1080x1920/60
 HDR clip was 142MB — users re-compressed externally, mangling fps/HDR);
-balanced ~1/3 size; share ~1/8. Tier changes BITRATE only — never
+balanced ~1/3 size; share ~1/8. On NVENC the balanced/share tiers ALSO
+get a resolution/fps-scaled VBR ceiling (`_rate_cap_args`/`_TIER_BPP`)
+— constant-quality NVENC has no size anchor and a 12s 4K "share" render
+came out 123MB; CPU CRF and QSV stay uncapped (they track size
+predictably). Tier changes BITRATE only — never
 timeline, fps, HDR, or redaction strength. Scan copies + HDR
 intermediates stay near-lossless (they feed detection and re-renders).
 
