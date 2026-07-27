@@ -571,8 +571,14 @@ Key classes/functions (locate with grep, line numbers drift):
   _model_dir()/whisper, size via --audio-pii-model default "base") and
   `_speech_suggestions` (pure, unit-tested) runs the text engine's
   checksum/regex patterns + spaCy PERSON ents over the transcript,
-  restricted to the job's selected cats. Matches map to word times
-  ±0.35s, same-category spans within 0.6s merge. Output is
+  restricted to the job's selected cats. Address checks are speech-aware:
+  RE_STREET + RE_CITYSTATEZIP + RE_SPOKEN_STATEZIP (full state name, no
+  comma — "Springfield Illinois 62704", the form speech actually takes;
+  address was once missing from _SPEECH_CHECKS entirely and an
+  address-only job suggested nothing). Matches map to word times
+  ±0.35s; same-category spans within 0.6s merge — 2.0s for address, so
+  the natural pause between street line and city/state/ZIP still yields
+  ONE span, never a half-address. Output is
   SUGGESTIONS: state/report-additive `audio_suggestions`
   [{t0,t1,category,text}], surfaced in the review box-editor's audio
   section (renderAudioSugg/applyAudioSugg — Add per item or Add all →

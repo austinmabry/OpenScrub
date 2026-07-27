@@ -2293,6 +2293,37 @@ def test_speech_suggestions_from_word_stream():
     assert ns[0]["t0"] <= 0.6 and ns[0]["t1"] >= 2.4
 
 
+def test_speech_suggestions_spoken_address():
+    """Spoken addresses. The address category was MISSING from
+    _SPEECH_CHECKS entirely — an address-only spoken-PII job could never
+    suggest anything (a real user hit exactly that on a clip saying
+    'My address is <number> <street>, <city> <state> <zip>'). Pins the
+    three speech-address behaviors: RE_STREET on the street line, the
+    spoken city/state/ZIP tail (full state name, no comma — the written
+    RE_CITYSTATEZIP form cannot match it), and the pause-tolerant merge
+    that joins both halves across a natural mid-address pause into ONE
+    span, so review never shows a half-address."""
+    words = [(0.7, 1.3, " My"), (1.3, 1.9, " address"), (1.9, 2.6, " is"),
+             (2.6, 4.0, " 1200"), (4.0, 5.1, " Oak"), (5.1, 5.7, " Street,"),
+             # natural ~1.5s pause before the city/state/ZIP tail
+             (7.2, 8.6, " Springfield"), (8.6, 9.1, " Illinois"),
+             (9.1, 10.8, " 62704.")]
+    sugg = openscrub._speech_suggestions(words, {"address"})
+    assert len(sugg) == 1, sugg          # ONE merged span, not two halves
+    s = sugg[0]
+    assert s["category"] == "address"
+    assert s["t0"] <= 2.6 - 0.3 and s["t1"] >= 10.8 + 0.3, s
+    assert "1200" in s["text"] and "62704" in s["text"]
+    # tail alone (no street line) still suggests — state name + ZIP is a
+    # strong signal by itself
+    tail = openscrub._speech_suggestions(
+        [(0.0, 0.5, " Springfield"), (0.5, 1.0, " Illinois"),
+         (1.0, 1.6, " 62704")], {"address"})
+    assert len(tail) == 1 and tail[0]["category"] == "address"
+    # unselected category: nothing (gating unchanged)
+    assert openscrub._speech_suggestions(words, {"ssn"}) == []
+
+
 def test_person_seg_migration_lives_in_init():
     """The seg-to-onnxruntime migration must run at LOAD TIME as the
     tail of PersonDetector.__init__. In v1.0.65 a method insertion

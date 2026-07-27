@@ -36,7 +36,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.73"
+VERSION = "1.0.74"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -4976,6 +4976,27 @@ def _settings_dict(args):
     return out
 
 
+# Spoken-address tail: "<City> <State> 12345". Speech drops the written
+# form's comma and usually uses the FULL state name ("Little Rock
+# Arkansas 72211"), which RE_CITYSTATEZIP — built for on-screen text —
+# cannot match (it requires "City, AR 72211"). A state name/abbreviation
+# followed by a ZIP is a strong, low-false-positive signal on its own,
+# and these are review suggestions, so over-suggesting beats missing.
+_STATE_NAMES = (
+    r"alabama|alaska|arizona|arkansas|california|colorado|connecticut|"
+    r"delaware|florida|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|"
+    r"kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|"
+    r"mississippi|missouri|montana|nebraska|nevada|new\s+hampshire|"
+    r"new\s+jersey|new\s+mexico|new\s+york|north\s+carolina|north\s+dakota|"
+    r"ohio|oklahoma|oregon|pennsylvania|rhode\s+island|south\s+carolina|"
+    r"south\s+dakota|tennessee|texas|utah|vermont|virginia|washington|"
+    r"west\s+virginia|wisconsin|wyoming")
+RE_SPOKEN_STATEZIP = re.compile(
+    r"(?i)\b(?:[A-Za-z.'\-]+\s+){0,3}(?:" + _STATE_NAMES +
+    r"|AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|"
+    r"MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|"
+    r"VA|WA|WV|WI|WY)[,\s]+\d{5}(?:-\d{4})?\b")
+
 _SPEECH_CHECKS = (
     ("ssn", lambda s: RE_SSN.search(s)),
     ("phone", lambda s: RE_PHONE.search(s)),
@@ -4986,6 +5007,12 @@ _SPEECH_CHECKS = (
     ("ipaddr", lambda s: RE_IP.search(s)),
     ("bank", lambda s: (m := RE_IBAN.search(s)) and _iban_ok(m.group())),
     ("crypto", lambda s: RE_ETH.search(s) or RE_BECH32.search(s)),
+    # address was MISSING here entirely — an address-only spoken-PII job
+    # could never suggest anything (a real user hit exactly that).
+    # RE_STREET covers "113 Main Street"; the other two cover the
+    # city/state/ZIP tail in written and spoken forms.
+    ("address", lambda s: RE_STREET.search(s) or RE_CITYSTATEZIP.search(s)
+        or RE_SPOKEN_STATEZIP.search(s)),
 )
 
 
@@ -5042,13 +5069,18 @@ def _speech_suggestions(words, cats, nlp=None, custom_res=()):
                     add(ent.start_char, ent.end_char, "name", ent.text)
         except Exception:
             pass
-    # merge same-category spans that touch (within 0.6s)
+    # merge same-category spans that touch (within 0.6s). Addresses get a
+    # wider gap: people naturally pause between the street line and the
+    # city/state/ZIP ("113 Main Street … [1.5s] … Springfield Illinois
+    # 62704"), and two disjoint suggestions for one spoken address invite
+    # a half-redaction.
     out.sort(key=lambda s: (s["category"], s["t0"]))
     merged = []
     for s in out:
         p = merged[-1] if merged else None
+        gap = 2.0 if s["category"] == "address" else 0.6
         if (p and p["category"] == s["category"]
-                and s["t0"] - p["t1"] <= 0.6):
+                and s["t0"] - p["t1"] <= gap):
             p["t1"] = max(p["t1"], s["t1"])
             if s["text"] not in p["text"]:
                 p["text"] = (p["text"] + " … " + s["text"])[:120]
