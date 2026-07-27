@@ -588,7 +588,17 @@ Key classes/functions (locate with grep, line numbers drift):
   [{t0,t1,category,text}], surfaced in the review box-editor's audio
   section (renderAudioSugg/applyAudioSugg — Add per item or Add all →
   normal audio_redactions save path); `--audio-pii-apply` merges them
-  as mute spans without review (CLI/batch). Nothing leaves the
+  as mute spans without review (CLI/batch). transcribe_audio_pii
+  returns (sugg, transcript): `audio_transcript` [[t0,t1,word],…] is
+  report-additive beside audio_suggestions (write_report persists it;
+  run_pipeline's from-report path reloads BOTH so the render-end
+  rewrite keeps them) and feeds the review TRANSCRIPT VIEW
+  (renderTranscript/txWordClick in APP_JS, `#beATx`): the full
+  transcript with will-be-muted words red/struck and un-added
+  suggestion words amber — the fail-closed check for ASR misses; click
+  a start word then an end word to mute that range (±0.5s pad, same
+  BE.audio save path). Highlighting re-renders on every span change
+  (apply/remove/timeline drag-add). Nothing leaves the
   machine; missing faster-whisper logs a loud install hint. Validated
   on real news footage (accurate transcript; correctly zero
   suggestions when nothing sensitive is spoken).

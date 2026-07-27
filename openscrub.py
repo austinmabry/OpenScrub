@@ -5123,19 +5123,23 @@ def transcribe_audio_pii(video, cats, cb, model_size="base", nlp=None,
     """Fully LOCAL speech-to-PII: extract the audio, transcribe with
     faster-whisper (word timestamps, VAD), and run the text engine's
     patterns over the transcript. Spoken names, numbers and addresses
-    leak PII no matter how good the visual blur is. Returns suggestion
-    dicts; [] (with a loud note) when faster-whisper is not installed
-    or the file has no audio. Nothing leaves the machine."""
+    leak PII no matter how good the visual blur is. Returns
+    (suggestions, transcript) where transcript is [[t0, t1, word], ...]
+    — the review UI shows it with matched spans highlighted so a human
+    can SEE what was heard and mute anything the patterns missed
+    (ASR output varies; the transcript view is the fail-closed check).
+    ([], []) with a loud note when faster-whisper is not installed or
+    the file has no audio. Nothing leaves the machine."""
     try:
         from faster_whisper import WhisperModel
     except ImportError:
         cb.log("      spoken-PII: faster-whisper is not installed — "
                "`pip install faster-whisper` enables local speech "
                "transcription (the Docker images include it)")
-        return []
+        return [], []
     if not probe_has_audio(video):
         cb.log("      spoken-PII: no audio track — skipped")
-        return []
+        return [], []
     import tempfile
     wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
     try:
@@ -5145,7 +5149,7 @@ def transcribe_audio_pii(video, cats, cb, model_size="base", nlp=None,
             capture_output=True, text=True)
         if p.returncode != 0:
             cb.log("      spoken-PII: audio extraction failed — skipped")
-            return []
+            return [], []
         cb.log(f"      spoken-PII: transcribing locally (whisper "
                f"{model_size}, CPU)…")
         model = WhisperModel(
@@ -5164,10 +5168,11 @@ def transcribe_audio_pii(video, cats, cb, model_size="base", nlp=None,
         for s in sugg[:12]:
             cb.log("        %.1f-%.1fs  %-8s  %s"
                    % (s["t0"], s["t1"], s["category"], s["text"]))
-        return sugg
+        return sugg, [[round(t0, 2), round(t1, 2), tok]
+                      for t0, t1, tok in words]
     except Exception as e:
         cb.log(f"      spoken-PII: transcription failed ({e}) — skipped")
-        return []
+        return [], []
     finally:
         try:
             os.remove(wav)
@@ -5214,6 +5219,8 @@ def write_report(path, args, state, output_path=None):
             {"t0": a, "t1": b, "mode": m} for a, b, m in aspans]
     if state.get("audio_suggestions"):
         doc["audio_suggestions"] = state["audio_suggestions"]
+    if state.get("audio_transcript"):
+        doc["audio_transcript"] = state["audio_transcript"]
     with open(path, "w", encoding="utf-8") as f:
         json.dump(doc, f, indent=1)
     try:
@@ -7098,11 +7105,11 @@ def run_scan(args, cb=None):
         cb.log("      top recalled strings (check for false positives): "
                + ", ".join(f"'{k}'x{v}" for k, v in top))
 
-    audio_sugg = []
+    audio_sugg, audio_tx = [], []
     if getattr(args, "audio_pii", False):
         # spoken names/numbers/addresses leak PII no matter how good the
         # visual blur is — transcribe locally and suggest mute spans
-        audio_sugg = transcribe_audio_pii(
+        audio_sugg, audio_tx = transcribe_audio_pii(
             getattr(args, "original_video", None) or args.video, cats, cb,
             model_size=getattr(args, "audio_pii_model", "base") or "base",
             nlp=getattr(namer, "nlp", None) if namer else None,
@@ -7110,6 +7117,7 @@ def run_scan(args, cb=None):
 
     return {"fps": fps, "cum": cum, "bands": bands, "detections": detections,
             "zdropped": zdropped, "audio_suggestions": audio_sugg,
+            "audio_transcript": audio_tx,
             "input_sha256": sha256_file(args.video),
             "stats": {"scans": n_scans, "raw_hits": len(raw),
                       "regions": len(detections), "recalls": n_recalled,
@@ -7192,8 +7200,13 @@ def run_pipeline(args, cb=None):
         dets, rstate, prov = load_report(args.from_report)
         try:
             with open(args.from_report, encoding="utf-8") as _f:
+                _adoc = json.load(_f)
                 rstate["audio_suggestions"] = (
-                    json.load(_f).get("audio_suggestions") or [])
+                    _adoc.get("audio_suggestions") or [])
+                # keep the transcript through the render-end report
+                # rewrite — load_report drops unknown fields
+                rstate["audio_transcript"] = (
+                    _adoc.get("audio_transcript") or [])
         except Exception:
             pass
         # audio redactions ride in the report (the web review writes them

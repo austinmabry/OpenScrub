@@ -1487,7 +1487,49 @@ function applyAudioSugg(i){
   if(!(BE.audio||[]).some(a=>Math.abs(a.t0-s.t0)<0.05&&Math.abs(a.t1-s.t1)<0.05))
    BE.audio.push({t0:s.t0,t1:s.t1,mode:"mute"});
  }
- renderAudioSugg();beTLDraw();
+ renderAudioSugg();renderTranscript();beTLDraw();
+}
+// Full transcript with matched spans highlighted — the fail-closed check
+// for spoken PII: ASR patterns can miss (a real half-muted address shipped
+// once), but a human reading the transcript catches it in seconds. Click a
+// start word then an end word to mute that range directly.
+function renderTranscript(){
+ const el=document.getElementById("beATx");
+ if(!el)return;
+ const tx=BE.audioTx||[];
+ if(!tx.length){el.style.display="none";el.innerHTML="";return;}
+ el.style.display="block";
+ const wasOpen=el.querySelector("details")?el.querySelector("details").open:true;
+ const esc=s=>String(s).replace(/[<>&]/g,"");
+ const muted=w=>(BE.audio||[]).some(a=>w[0]<a.t1&&w[1]>a.t0);
+ const sugg=w=>(BE.audioSugg||[]).some(a=>w[0]<a.t1&&w[1]>a.t0);
+ let h='<details'+(wasOpen?' open':'')+'><summary style="font-size:12px;color:#94a3b8;cursor:pointer">&#128221; Transcript ('+tx.length+' words) — verify nothing sensitive slipped through</summary>'
+  +'<div style="max-height:150px;overflow-y:auto;line-height:2.1;padding:6px 2px;font-size:12.5px;color:#cbd5e1">';
+ tx.forEach((wd,i)=>{
+  const m=muted(wd),g=sugg(wd),a=i===BE.txAnchor;
+  let st='cursor:pointer;border-radius:4px;padding:1px 3px;';
+  if(a)st+='outline:2px solid #f59e0b;';
+  if(m)st+='background:#7f1d1d;color:#fecaca;text-decoration:line-through;';
+  else if(g)st+='background:#78350f;color:#fde68a;';
+  h+='<span style="'+st+'" title="'+wd[0].toFixed(2)+'&ndash;'+wd[1].toFixed(2)+'s'+(m?' (will be muted)':'')+'" onclick="txWordClick('+i+')">'+esc(wd[2])+'</span>';
+ });
+ h+='</div><div style="font-size:11px;color:#64748b">'
+  +(BE.txAnchor>=0?'<b style="color:#f59e0b">now click the last word of the range to mute it</b>'
+    :'<span style="background:#7f1d1d;border-radius:3px;padding:0 4px">red</span> will be muted &nbsp;'
+     +'<span style="background:#78350f;border-radius:3px;padding:0 4px">amber</span> detected PII (not yet added) &nbsp;'
+     +'— click a start word, then an end word, to mute a missed range (&plusmn;0.5s pad)')
+  +'</div></details>';
+ el.innerHTML=h;
+}
+function txWordClick(i){
+ const tx=BE.audioTx||[];if(!tx[i])return;
+ if(BE.txAnchor<0){BE.txAnchor=i;renderTranscript();return;}
+ const a=Math.min(BE.txAnchor,i),b=Math.max(BE.txAnchor,i);
+ BE.txAnchor=-1;
+ BE.audio.push({t0:Math.max(0,+(tx[a][0]-0.5).toFixed(2)),
+                t1:+(tx[b][1]+0.5).toFixed(2),
+                mode:(document.getElementById("beAMode")||{}).value||"mute"});
+ renderTranscript();renderAudioSugg();beTLDraw();
 }
 const CATDN={mrn:"regex",person:"person (full body)",manual:"tracked object",qrcode:"QR / barcode",screen:"screen (tv/laptop/phone)",anytext:"all text",bank:"bank number",crypto:"crypto address",passport:"passport / MRZ"};   // display names — ids are a compat surface
 async function refreshModelPanel(){
@@ -1740,6 +1782,7 @@ async function loadBoxEdit(fromReview){
    <button class="tog" id="beMute" onclick="beMuteMode()">&#128263; Audio span</button>
    <button class="danger" id="beARm" style="display:none" onclick="beAudioRm()">Delete span</button></div>
   <div id="beASugg" style="display:none;margin-top:6px"></div>
+  <div id="beATx" style="display:none;margin-top:6px"></div>
   <div class="row" style="margin-top:6px">
    <button class="tog" id="beAdd" onclick="beAddMode()">&#65291; Add box</button>
    <button class="tog" id="beTrk" onclick="beTrackMode()">&#8857; Track object</button>
@@ -1783,7 +1826,8 @@ async function tlInit(){
   BE.tlspans=Object.values(per);
   BE.audio=(doc.audio_redactions||[]).map(s=>({t0:s.t0,t1:s.t1,mode:s.mode||"mute"}));
   BE.audioSugg=doc.audio_suggestions||[];
-  renderAudioSugg();
+  BE.audioTx=doc.audio_transcript||[];BE.txAnchor=-1;
+  renderAudioSugg();renderTranscript();
  }catch(e){BE.tlspans=[];}
  beTLDraw();
 }
@@ -1864,6 +1908,7 @@ function tlHook(){
    if(s.t1-s.t0<0.15){BE.audio.pop();BE.audioSel=-1;}   // stray click
    BE.muteArm=false;document.getElementById("beMute").classList.remove("on");
    document.getElementById("beARm").style.display=BE.audioSel>=0?"inline-block":"none";
+   renderTranscript();
   }
   BE.tlDrag=null;beTLDraw();
  });
@@ -1877,7 +1922,8 @@ function beMuteMode(){
 }
 function beAudioRm(){
  if(BE.audioSel>=0){BE.audio.splice(BE.audioSel,1);BE.audioSel=-1;
-  document.getElementById("beARm").style.display="none";beTLDraw();}
+  document.getElementById("beARm").style.display="none";
+  renderTranscript();renderAudioSugg();beTLDraw();}
 }
 function beTrackMode(){
  BE.trk=!BE.trk;BE.add=false;BE.addAnchor=null;BE.muteArm=false;

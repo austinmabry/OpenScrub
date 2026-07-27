@@ -820,6 +820,34 @@ def test_audio_redaction_mute_and_report_roundtrip(tmp_path):
     assert acodec == ["-c:a", "copy"], "no audio stream -> plain copy"
 
 
+def test_audio_transcript_report_persistence(tmp_path):
+    """The review transcript view reads audio_transcript from the report:
+    write_report must persist it beside audio_suggestions, and the
+    no-whisper/no-audio paths must return the ([], []) tuple shape (the
+    caller unpacks two values)."""
+    d = openscrub.Detection(1.0, 1.5, (10, 10, 50, 50), "face", "face",
+                            0.9, (0, 0))
+    args = openscrub.build_parser().parse_args(["dummy.mp4"])
+    tx = [[0.7, 1.3, " My"], [1.3, 1.9, " address"]]
+    sugg = [{"t0": 0.35, "t1": 2.4, "category": "address", "text": "x"}]
+    state = {"fps": 30.0, "cum": [(0.0, 0.0)], "bands": [(0.0, 0.0)],
+             "detections": [d], "input_sha256": "x",
+             "audio_suggestions": sugg, "audio_transcript": tx}
+    rp = str(tmp_path / "r.json")
+    openscrub.write_report(rp, args, state)
+    with open(rp, encoding="utf-8") as f:
+        doc = json.load(f)
+    assert doc["audio_transcript"] == tx
+    assert doc["audio_suggestions"] == sugg
+
+    class Q(openscrub.Callbacks):
+        def log(self, m):
+            pass
+    out = openscrub.transcribe_audio_pii(
+        str(tmp_path / "missing.mp4"), {"address"}, Q())
+    assert out == ([], []), "failure paths must keep the tuple shape"
+
+
 def test_categories_none_manual_only(tmp_path):
     """--categories none = manual-only job: no detectors, no OCR, but a
     valid report with render_state so review can add tracked objects."""
