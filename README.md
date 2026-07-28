@@ -28,6 +28,13 @@ dense, scrolling records screens (medical, financial, CRM, support
 consoles) — but the engine is general-purpose.
 
 <p align="center">
+  <img src="https://raw.githubusercontent.com/austinmabry/OpenScrub/main/assets/screenshots/redaction-demo.gif"
+       alt="Split-screen wipe: a skier carving down a slope, one side redacted by OpenScrub with a body-shaped silhouette blur that tracks them through the turn while the snow, skis and poles stay sharp"
+       width="900">
+</p>
+<p align="center"><em>Real output. The wipe reveals the same frames redacted and untouched: the silhouette mask tracks the skier through a fast carve, and only the body is covered — the mountain stays sharp. <sub>Footage: <a href="https://www.pexels.com/video/15155922/">Pexels</a>.</sub></em></p>
+
+<p align="center">
   <img src="https://raw.githubusercontent.com/austinmabry/OpenScrub/main/assets/screenshots/editor-demo.gif"
        alt="OpenScrub editor in action: a video loaded on the timeline with stackable detection windows, per-window categories and zones, and audio-track lanes"
        width="900">
