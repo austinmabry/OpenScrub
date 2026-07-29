@@ -97,6 +97,11 @@ COPY openscrub.py openscrub_web.py openscrub_setup.py openscrub_update.py \
 COPY assets/openscrub.ico assets/
 RUN pip install --no-cache-dir --no-deps .
 
+# tells the web UI it runs in a container: the update notice becomes
+# inform-only ("pull the new image") instead of offering the in-place
+# updater, whose writes would vanish on the next container recreate
+ENV OPENSCRUB_IN_DOCKER=1
+
 EXPOSE 8384
 VOLUME ["/root/.local/share/OpenScrub"]
 CMD ["openscrub-web", "--host", "0.0.0.0"]

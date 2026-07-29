@@ -800,6 +800,12 @@ defined — there was a real UnboundLocalError from ordering once.
   update — a fix that only worked in Private mode was the tell.
 - Self-update: `/api/update_check` (6h-cached PyPI poll, offline-silent),
   `/api/update_run` (409 while any job is queued/running), `/api/update_status`.
+  IN CONTAINERS (`_in_container()`: OPENSCRUB_IN_DOCKER env — set by all
+  three Dockerfiles — or /.dockerenv or /run/.containerenv) the notice is
+  INFORM-ONLY: update_check returns can_update=false, the footer shows
+  "pull the new image to update" as plain text, and update_run refuses
+  with the pull instruction — the in-place updater would write into the
+  ephemeral container and silently vanish on recreate.
   Footer shows the version via the `%%VERSION%%` placeholder replaced at
   serve time in `index()` — never hardcode a version in PAGE again (the
   v4.2.0 footer went stale once already). Updates need a server restart.

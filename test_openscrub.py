@@ -2280,6 +2280,31 @@ def test_docker_prefetch_matches_engine_pins():
     assert pf.MODELS == expect
 
 
+def test_container_update_notice_is_inform_only(monkeypatch):
+    """Inside Docker the in-place updater writes into the ephemeral
+    container filesystem — the "update" would vanish on the next recreate
+    while the UI claimed success (a real CUDA-image user saw the footer
+    offer an update it could not deliver). In a container the API must
+    say can_update=false (footer shows "pull the new image") and
+    update_run must refuse with the pull instruction."""
+    import openscrub_web
+    monkeypatch.setenv("OPENSCRUB_IN_DOCKER", "1")
+    assert openscrub_web._in_container() is True
+    client = openscrub_web.app.test_client()
+    d = client.get("/api/update_check").get_json()
+    assert d["can_update"] is False
+    r = client.post("/api/update_run")
+    assert r.status_code == 400
+    assert b"pulling the new image" in r.data
+    # env cleared -> the env-var gate no longer forces container mode
+    monkeypatch.delenv("OPENSCRUB_IN_DOCKER", raising=False)
+    import os as _os
+    if not (_os.path.exists("/.dockerenv")
+            or _os.path.exists("/run/.containerenv")):
+        assert openscrub_web._in_container() is False
+        assert client.get("/api/update_check").get_json()["can_update"] is True
+
+
 def test_quality_tiers_align_with_registries():
     """Every model id a Detection-quality tier selects must exist in its
     registry with a real download_url — a tier pointing at a missing or

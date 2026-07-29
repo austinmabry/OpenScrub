@@ -2420,9 +2420,17 @@ async function removeCerts(){
 async function updCheck(){
  try{
   const d=await (await fetch("/api/update_check")).json();
-  if(d.available)document.getElementById("upd").innerHTML=
-   '· <a href="#" style="color:#fbbf24" onclick="updRun();return false">v'
-   +d.latest+' available — update</a> ';
+  if(!d.available)return;
+  const el=document.getElementById("upd");
+  if(d.can_update===false){
+   // Docker/Podman: the in-place updater would write into the ephemeral
+   // container and be lost on recreate — inform only, never offer.
+   el.innerHTML='· <span style="color:#fbbf24" title="Pull the new image tag and recreate the container — job data lives in the mounted volume and is preserved.">v'
+    +d.latest+' available — pull the new image to update</span> ';
+  }else{
+   el.innerHTML='· <a href="#" style="color:#fbbf24" onclick="updRun();return false">v'
+    +d.latest+' available — update</a> ';
+  }
  }catch(e){}
 }
 async function updRun(){
@@ -2546,11 +2554,21 @@ UPD = {"running": False, "log": [], "ok": None, "cache": (0.0, None)}
 UPD_LOCK = threading.Lock()
 
 
+def _in_container():
+    """True inside Docker/Podman. The in-place updater writes into the
+    container's ephemeral filesystem — the "update" would vanish on the
+    next recreate while the UI claimed success. Containers update by
+    pulling the new image, so the web UI must inform, never offer."""
+    return (os.environ.get("OPENSCRUB_IN_DOCKER", "") not in ("", "0")
+            or os.path.exists("/.dockerenv")
+            or os.path.exists("/run/.containerenv"))
+
+
 @app.route("/api/update_check")
 def update_check():
     if openscrub_update is None:
         return jsonify({"current": openscrub.VERSION, "latest": None,
-                        "available": False})
+                        "available": False, "can_update": False})
     now = time.time()
     with UPD_LOCK:
         ts, latest = UPD["cache"]
@@ -2564,11 +2582,16 @@ def update_check():
                                                       openscrub.VERSION))
     return jsonify({"current": openscrub.VERSION,
                     "latest": latest["version"] if latest else None,
-                    "available": avail})
+                    "available": avail,
+                    "can_update": not _in_container()})
 
 
 @app.route("/api/update_run", methods=["POST"])
 def update_run():
+    if _in_container():
+        abort(400, "running in a container — update by pulling the new "
+                   "image and recreating the container (job data lives in "
+                   "the mounted volume and is preserved)")
     if openscrub_update is None:
         abort(400, "updater module not available")
     with JOBS_LOCK:
