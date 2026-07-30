@@ -2336,6 +2336,31 @@ def test_ocr_space_recovery_and_ascii_forms():
     assert txt == "A B" and pos == [0, 1, 3]
 
 
+def test_merge_tail_extends_through_supporting_scans():
+    """A span ends `hold` after its last full detection, but heavily
+    compressed footage keeps showing the string while OCR reads only
+    fragments — the benchmark's compressed card was exposed for its last
+    0.7s exactly this way. Scans whose region words fuzzy-match the span
+    text extend coverage; a scan reading different text stops the walk."""
+    from rapidfuzz import fuzz
+    def mk():
+        return openscrub.Detection(t_start=0.0, t_end=0.0,
+                                   cbox=(100, 100, 300, 120),
+                                   category="card", text="4111111111111111",
+                                   confidence=0.9)
+    frag = lambda t, txt: (t, 0.0, [(txt, (110, 102, 220, 118), 0.9)])
+    scans = [frag(1.0, "4111."), frag(2.0, "1111-1111"),
+             frag(3.0, "TOTALLY DIFFERENT")]
+    m = openscrub.merge_detections([mk()], hold=0.8, scans=scans,
+                                   fuzz=fuzz)[0]
+    assert m.t_end == pytest.approx(2.8), m.t_end   # 2.0 + hold, stopped at 3.0
+    # no supporting scans -> tail stays at plain hold
+    m = openscrub.merge_detections([mk()], hold=0.8,
+                                   scans=[frag(1.0, "UNRELATED")],
+                                   fuzz=fuzz)[0]
+    assert m.t_end == pytest.approx(0.8), m.t_end
+
+
 def test_blur_kernel_is_two_thirds_region():
     """Re-identification benchmark, close-up faces (200-750px): a
     1/3-width Gaussian left SFace similarity at 0.57-0.69 — above the

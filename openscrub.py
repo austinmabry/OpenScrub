@@ -481,21 +481,37 @@ def group_lines(words):
     {text, words: [(word, box, conf, char_start, char_end)]}"""
     if not words:
         return []
-    items = sorted(words, key=lambda w: ((w[1][1] + w[1][3]) / 2, w[1][0]))
+    # Sweep words left-to-right and chain each onto the line whose
+    # RIGHTMOST member's y-center is within 0.7x line height. Comparing to
+    # the local neighbour (not the line's average y) makes grouping follow
+    # tilted text: on a 2.5deg-rotated page the two ends of one text row
+    # differ by ~50px — far more than a line height — so an average-y band
+    # seeded at one end rejected words at the other ('Marguerite' was
+    # orphaned from 'Vandersloot' and the name went undetected on the
+    # rotated benchmark), while adjacent words shear by only ~1px per 25px
+    # of gap and always chain.
+    items = sorted(words, key=lambda w: (w[1][0], (w[1][1] + w[1][3]) / 2))
     lines = []
     for w in items:
         yc = (w[1][1] + w[1][3]) / 2
         h = max(w[1][3] - w[1][1], 1)
-        placed = False
+        best = None
+        best_gap = None
         for ln in lines:
-            if abs(ln["yc"] - yc) < 0.7 * max(h, ln["h"]):
-                ln["raw"].append(w)
-                ln["yc"] = (ln["yc"] * (len(ln["raw"]) - 1) + yc) / len(ln["raw"])
-                ln["h"] = max(ln["h"], h)
-                placed = True
-                break
-        if not placed:
+            m = ln["raw"][-1]                       # rightmost so far
+            myc = (m[1][1] + m[1][3]) / 2
+            mh = max(m[1][3] - m[1][1], 1)
+            if abs(yc - myc) < 0.7 * max(h, mh):
+                gap = w[1][0] - m[1][2]
+                if best is None or gap < best_gap:
+                    best, best_gap = ln, gap
+        if best is not None:
+            best["raw"].append(w)
+            best["h"] = max(best["h"], h)
+        else:
             lines.append({"raw": [w], "yc": yc, "h": h})
+    lines.sort(key=lambda ln: sum((m[1][1] + m[1][3]) / 2
+                                  for m in ln["raw"]) / len(ln["raw"]))
     out = []
     for ln in lines:
         ln["raw"].sort(key=lambda w: w[1][0])
@@ -2596,6 +2612,46 @@ def merge_detections(dets, hold, scans=None, bridge_gap=4.0, fuzz=None,
                 break
         else:
             merged.append(d)
+
+    # Tail extension: a span ends `hold` after its LAST positive detection,
+    # but the text often outlives that detection — under heavy compression
+    # the final scans read only fragments ('4111.' '1111-1111' '1111'),
+    # which fail the full pattern yet are strong evidence the string is
+    # still on screen (the benchmark's compressed card leaked exactly this
+    # tail). Walk the scans PAST each span's last sighting: while a scan's
+    # words in the region fuzzy-match the span text (the same same-word
+    # test contradicted() uses), the content verifiably persisted — extend
+    # coverage through that scan. A scan with no matching read stops the
+    # walk, so a real scene change never accretes stale blur.
+    if scans and fuzz:
+        for m in merged:
+            if getattr(m, "dense", False) or not m.text:
+                continue
+            mx1, my1, mx2, my2 = m.cbox
+            mt = PhiMemory.norm(m.text)
+            for st, _cum, words in scans:
+                if st <= m.last_seen + 0.01:
+                    continue
+                if st - m.last_seen > bridge_gap:
+                    break
+                support = False
+                for txt, (x1, y1, x2, y2), conf in words:
+                    if conf < 0.5:
+                        continue
+                    cxm = (x1 + x2) / 2
+                    cym = (y1 + y2) / 2
+                    if not (mx1 - 6 <= cxm <= mx2 + 6
+                            and my1 - 4 <= cym <= my2 + 4):
+                        continue
+                    n = PhiMemory.norm(txt)
+                    if len(n) >= 3 and (fuzz.ratio(n, mt) >= 70
+                                        or fuzz.partial_ratio(n, mt) >= 85):
+                        support = True
+                        break
+                if not support:
+                    break
+                m.last_seen = st
+                m.t_end = max(m.t_end, st + hold)
     return merged
 
 
