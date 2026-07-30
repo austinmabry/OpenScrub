@@ -2203,7 +2203,12 @@ def test_ctc_greedy_decode():
     missed repeat-collapse turns recognized text into garbage."""
     charmap = ["", "A", "B", "C", " "]        # 0=blank, 4=space
     def step(i, n=5, p=0.9):
-        v = np.full(n, (1.0 - p) / (n - 1))
+        # off-target mass stays at 0.001 — the measured within-word
+        # ceiling of the real model. Spreading (1-p) evenly put 0.025 on
+        # the space class at every step, which no real frame does, and
+        # tripped the space-recovery threshold (a fixture bug, not an
+        # engine bug).
+        v = np.full(n, 0.001)
         v[i] = p
         return v
     # A A blank B  -> "AB": the repeated A collapses, the blank drops
@@ -2315,14 +2320,92 @@ def test_ocr_space_recovery_and_ascii_forms():
     # same shape, but the blank run has NO space probability -> "AB"
     lo = np.array([step(1), step(0), step(0), step(2)])
     assert openscrub._ctc_greedy_decode(lo, charmap)[0] == "AB"
-    # a one-step gap is never a space (too short to be a word break).
-    # space_p stays BELOW the blank probability here, so blank still wins
-    # the argmax — the case this fix exists for.
+    # a ONE-step gap still carries a space when its space probability is
+    # clear — tight det crops compress real word gaps to single steps
+    # (space_p stays below blank's argmax share, the case this exists for)
     short = np.array([step(1), step(0, 0.4), step(2)])
-    assert openscrub._ctc_greedy_decode(short, charmap)[0] == "AB"
+    assert openscrub._ctc_greedy_decode(short, charmap)[0] == "A B"
+    # ...but a one-step gap with a flat space signal is not a word break
+    short_lo = np.array([step(1), step(0, 0.001), step(2)])
+    assert openscrub._ctc_greedy_decode(short_lo, charmap)[0] == "AB"
     # no leading space, and repeats still collapse
     lead = np.array([step(0, 0.4), step(0, 0.4), step(1), step(1)])
     assert openscrub._ctc_greedy_decode(lead, charmap)[0] == "A"
+    # with_pos: timesteps come back aligned with the emitted characters
+    txt, conf, pos = openscrub._ctc_greedy_decode(hi, charmap, with_pos=True)
+    assert txt == "A B" and pos == [0, 1, 3]
+
+
+def test_shredded_card_fragment_join():
+    """OCR can fragment a spaced PAN into arbitrary digit chunks
+    ("41 11 11 11 1 1 11 11 11" — a real read of a highlighted card row
+    under video compression) or attach stray punctuation ("1111." from
+    motion blur). Both defeated the fixed 3/4-group join and the card
+    leaked. Any same-row run of digit tokens whose 13-16 digit
+    concatenation has a card prefix AND passes Luhn must fire."""
+    def w(txt, x):
+        return (txt, (x, 100, x + 12 * max(1, len(txt)), 120), 0.9)
+    shredded = [w(t, 60 + i * 40) for i, t in enumerate(
+        ["41", "11", "11", "11", "1", "1", "11", "11", "11"])]
+    dets = openscrub.detect_phi(shredded, [], 0.0, (0, 0), None, None)
+    assert any(d.category == "card" and d.text == "4111111111111111"
+               for d in dets), [(d.category, d.text) for d in dets]
+    dotted = [w("4111", 60), w("1111", 130), w("1111.", 200), w("1111", 270)]
+    dets = openscrub.detect_phi(dotted, [], 0.0, (0, 0), None, None)
+    assert any(d.category == "card" for d in dets)
+    # a random digit run that fails Luhn must NOT fire
+    junk = [w("4111", 60), w("1111", 130), w("1111", 200), w("1112", 270)]
+    dets = openscrub.detect_phi(junk, [], 0.0, (0, 0), None, None)
+    assert not any(d.category == "card" for d in dets)
+    # SHREDDED fragments on different rows never join (the fragment
+    # join is noise-driven, so it stays same-row; the classic 4-group
+    # join may still bridge a wrapped PAN — that one is Luhn-gated)
+    split_rows = ([w(t, 60 + i * 30) for i, t in enumerate(
+                      ["41", "11", "11", "11"])]
+                  + [("1", (60 + i * 30, 300, 80 + i * 30, 320), 0.9)
+                     for i in range(8)])
+    dets = openscrub.detect_phi(split_rows, [], 0.0, (0, 0), None, None)
+    assert not any(d.category == "card" for d in dets)
+
+
+def test_name_pair_heuristic_union_and_adjacency():
+    """The capitalized-pair name heuristic is a UNION with NER, not a
+    fallback: spaCy's small model returned zero entities for a real
+    two-token name on a records screen, and NER availability silently
+    disabled the heuristic that would have caught it. In strict (union)
+    mode ALLCAPS headers stay exempt, and pairs glued together from
+    different COLUMNS by line reconstruction (big x gap) never pair —
+    that fake adjacency blurred benign text two columns away."""
+    class FakeDoc:
+        ents = ()
+
+    class FakeNLP:
+        def __call__(self, text):
+            return FakeDoc()
+
+    nd = openscrub.NameDetector(use_ner=False)
+    nd.nlp = FakeNLP()                       # NER "available", finds nothing
+    nd.heuristic = False                     # auto-mode: heuristic off pre-fix
+
+    def line(pairs):
+        words, text, x = [], "", None
+        entries = []
+        for wtxt, bx in pairs:
+            s = len(text) + (1 if text else 0)
+            text = (text + " " + wtxt) if text else wtxt
+            entries.append((wtxt, bx, 0.9, s, s + len(wtxt)))
+        return [{"text": text, "words": entries}]
+
+    # adjacent Titlecase pair -> caught even though NER found nothing
+    hits = nd.find(line([("Marguerite", (100, 50, 220, 70)),
+                         ("Vandersloot", (228, 50, 360, 70))]))
+    assert {h[1] for h in hits} == {"Marguerite", "Vandersloot"}
+    # ALLCAPS header exempt in strict mode
+    assert nd.find(line([("PATIENT", (100, 50, 200, 70)),
+                         ("RECORD", (208, 50, 300, 70))])) == []
+    # cross-column fake pair (huge x gap) never pairs
+    assert nd.find(line([("Vandersloot", (100, 50, 220, 70)),
+                         ("Ward", (600, 50, 660, 70))])) == []
 
 
 def test_container_update_notice_is_inform_only(monkeypatch):

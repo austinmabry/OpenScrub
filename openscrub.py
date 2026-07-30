@@ -36,7 +36,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.78"
+VERSION = "1.0.79"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -612,11 +612,32 @@ class NameDetector:
                     if w.strip(".,:;()[]").lower() in self.extra:
                         hits.append((box, w))
 
-            # --- 4. capitalized-pair heuristic (fallback) ---
-            if self.heuristic:
+            # --- 4. capitalized-pair heuristic ---
+            # UNION, not fallback: spaCy's small model is blind to
+            # uncommon names with no sentence context — on a records
+            # screen "Marguerite Vandersloot" returned NO entities at
+            # all (a real benchmarked leak), so NER availability must
+            # never disable this detector (same union principle as the
+            # face models: an extra detector may only ADD coverage).
+            # With NER present the pair test tightens to non-ALLCAPS
+            # tokens so headers ("PATIENT RECORD") don't flood review;
+            # without NER the historical broader behavior stands.
+            if self.heuristic or self.nlp is not None:
+                strict = self.nlp is not None and not self.heuristic
                 for i in range(len(words) - 1):
                     w1, b1 = words[i][0], words[i][1]
                     w2, b2 = words[i + 1][0], words[i + 1][1]
+                    if strict and (w1.strip(".,:;()[]").isupper()
+                                   or w2.strip(".,:;()[]").isupper()):
+                        continue
+                    # a real "First Last" pair sits within a couple of
+                    # character-heights; line reconstruction also glues
+                    # COLUMNS together, and the resulting fake pairs
+                    # ("Vandersloot | Ward", "Road | Priority") blurred
+                    # benign text two columns away (benchmarked)
+                    gap = b2[0] - b1[2]
+                    if gap > 2.5 * max(b1[3] - b1[1], b2[3] - b2[1], 8):
+                        continue
                     pair = False
                     if self._namey(w1) and self._namey(w2):
                         pair = True
@@ -809,6 +830,50 @@ def detect_phi(words, lines, t, offset, namer, mrn_re, custom_res=()):
                      max(b[2] for b in bx), max(b[3] for b in bx)),
                     "card", joined, min(g[2] for g in grp))
                 break
+
+    # shredded card: OCR can fragment a spaced PAN into arbitrary digit
+    # chunks ("41 11 11 11 1 1 11 11 11" — a real read of a highlighted
+    # card row under video compression), which the fixed 3/4-group join
+    # above cannot see. Join maximal runs of consecutive same-row digit
+    # tokens; any 13-16 digit concatenation that carries a card-brand
+    # prefix AND passes Luhn is a card. Luhn is the false-positive
+    # gate — an arbitrary digit run fails it 9 times out of 10.
+    digit_run = []
+    for w in words + [("", (0, 0, 0, 0), 0.0)]:      # sentinel flushes
+        tok = re.sub(r"\D", "", w[0])
+        # digits with incidental punctuation still count: motion blur
+        # turned one group into "1111." and the stray period broke every
+        # join (a real scrolling-card leak)
+        digity = bool(tok) and bool(re.fullmatch(r"[\d.,:;\-]{1,8}", w[0]))
+        same_row = (digit_run
+                    and abs((w[1][1] + w[1][3]) - (digit_run[-1][1][1]
+                            + digit_run[-1][1][3])) / 2
+                    < max(8, digit_run[-1][1][3] - digit_run[-1][1][1]))
+        if digity and len(tok) <= 6 and (not digit_run or same_row):
+            digit_run.append(w)
+            continue
+        if len(digit_run) >= 2:
+            for a in range(len(digit_run)):
+                digits = ""
+                for z in range(a, len(digit_run)):
+                    digits += re.sub(r"\D", "", digit_run[z][0])
+                    if len(digits) > 16:
+                        break
+                    if len(digits) >= 13:
+                        grouped = " ".join(digits[k:k + 4]
+                                           for k in range(0, len(digits), 4))
+                        if RE_CARD.search(grouped) and _luhn_ok(digits):
+                            bx = [q[1] for q in digit_run[a:z + 1]]
+                            add((min(b[0] for b in bx),
+                                 min(b[1] for b in bx),
+                                 max(b[2] for b in bx),
+                                 max(b[3] for b in bx)), "card", digits,
+                                min(q[2] for q in digit_run[a:z + 1]))
+                            a = None
+                            break
+                if a is None:
+                    break
+        digit_run = [w] if (digity and len(tok) <= 6) else []
 
     # split-across-words phone: "(501)" "555-0142"
     for i in range(len(words) - 1):
@@ -4305,7 +4370,7 @@ def _ascii_forms(s):
     return s.translate(_FULLWIDTH)
 
 
-def _ctc_greedy_decode(logits, charmap, space_thresh=0.05):
+def _ctc_greedy_decode(logits, charmap, space_thresh=0.01, with_pos=False):
     """Greedy CTC decode (pure, unit-tested) for the PP-OCR recognizer.
     Per-timestep argmax, collapse consecutive repeats, drop blank
     (index 0), map indices through charmap. `charmap[0]` is the blank.
@@ -4318,15 +4383,25 @@ def _ctc_greedy_decode(logits, charmap, space_thresh=0.05):
     EVERY multi-token PII regex (address/phone/ssn silently stopped
     matching once this backend became the CPU/Intel/Windows default).
     The signal is there underneath: measured on real frames, the peak
-    space-class probability inside a word-gap blank run is ~0.15 while
-    inside a word it is ~0.000 — a 100x separation. So when a blank run
-    between two characters carries space probability above
-    space_thresh, emit the space the argmax dropped. Languages that do
-    not use spaces are unaffected (their space probability stays flat)."""
+    space-class probability inside a word-gap blank run ranges 0.013 to
+    0.165 while inside a word it stays at or below 0.001 — at least a
+    10x separation everywhere it was measured (the first threshold,
+    0.05, sat INSIDE the word-gap range and welded exactly the rows
+    whose gap signal was weakest: small text — "SSN123-45-6789" again).
+    So when a blank run between two characters carries space probability
+    above space_thresh, emit the space the argmax dropped. Languages
+    that do not use spaces are unaffected (space probability stays flat).
+
+    with_pos=True additionally returns the per-character TIMESTEP of
+    each emitted char (recovered spaces get their blank run's start).
+    Timesteps map linearly onto the crop width, which gives true
+    per-word boxes downstream — the proportional character-count split
+    used before drifted off the real word positions and blur landed
+    beside the text it was covering."""
     idx = logits.argmax(1)
     prob = logits.max(1)
     sp = (len(charmap) - 1) if (charmap and charmap[-1] == " ") else -1
-    chars, confs, prev = [], [], -1
+    chars, confs, pos, prev = [], [], [], -1
     run = None                      # start index of the current blank run
     for t in range(len(idx)):
         i = int(idx[t])
@@ -4336,15 +4411,26 @@ def _ctc_greedy_decode(logits, charmap, space_thresh=0.05):
             prev = i
             continue
         if i != prev and i < len(charmap):
-            if (sp > 0 and chars and run is not None and t - run >= 2
+            # any nonempty blank run can carry a space: a tight det crop
+            # compresses the word gap to a SINGLE timestep (measured
+            # p=0.02-0.065 there, still ~10x above the within-word
+            # ceiling of ~0.001) — requiring 2+ steps welded exactly
+            # those rows
+            if (sp > 0 and chars and run is not None and t - run >= 1
                     and charmap[i] != " " and chars[-1] != " "
                     and float(logits[run:t, sp].max()) > space_thresh):
                 chars.append(" ")
+                pos.append(run)
             chars.append(charmap[i])
             confs.append(float(prob[t]))
+            pos.append(t)
         run = None
         prev = i
-    return "".join(chars), (float(np.mean(confs)) if confs else 0.0)
+    text = "".join(chars)
+    conf = float(np.mean(confs)) if confs else 0.0
+    if with_pos:
+        return text, conf, pos
+    return text, conf
 
 
 def _decode_db(prob, w, h, nw, nh, thresh=0.3, box_thresh=0.5, pad_frac=0.55):
@@ -4493,12 +4579,14 @@ class OnnxOcrBackend(OcrBackend):
         return _decode_db(prob, w, h, nw, nh, 0.3, 0.5, pad_frac=0.12)
 
     def _read_line(self, crop):
-        """Recognize one text-line crop (BGR) -> (text, mean confidence).
-        PP-OCR rec: resize to H=48 keeping aspect, normalize BGR to
-        [-1,1], greedy CTC decode (collapse repeats, drop blank)."""
+        """Recognize one text-line crop (BGR) -> (text, mean confidence,
+        char timesteps, total timesteps). PP-OCR rec: resize to H=48
+        keeping aspect, normalize BGR to [-1,1], greedy CTC decode
+        (collapse repeats, drop blank). The timesteps map linearly onto
+        the crop width, so callers can place each WORD exactly."""
         h, w = crop.shape[:2]
         if h < 2 or w < 2:
-            return "", 0.0
+            return "", 0.0, [], 1
         rw = max(16, min(2000, int(round(48.0 * w / h))))
         img = cv2.resize(crop, (rw, 48)).astype(np.float32)
         img = img.transpose(2, 0, 1) / 255.0
@@ -4507,8 +4595,9 @@ class OnnxOcrBackend(OcrBackend):
             y = self.rec.run(None, {self._rin:
                                     img[None].astype(np.float32)})[0][0]
         except Exception:
-            return "", 0.0
-        return _ctc_greedy_decode(y, self.charmap)
+            return "", 0.0, [], 1
+        txt, conf, pos = _ctc_greedy_decode(y, self.charmap, with_pos=True)
+        return txt, conf, pos, max(1, len(y))
 
     def read(self, frame):
         out = []
@@ -4518,20 +4607,32 @@ class OnnxOcrBackend(OcrBackend):
             x2 = min(W, int(x2)); y2 = min(H, int(y2))
             if x2 - x1 < 6 or y2 - y1 < 6:
                 continue
-            txt, conf = self._read_line(frame[y1:y2, x1:x2])
-            words = _ascii_forms(txt).split()
-            if not words:
+            txt, conf, pos, T = self._read_line(frame[y1:y2, x1:x2])
+            txt = _ascii_forms(txt)      # 1:1 mapping — positions stay aligned
+            if not txt.strip():
                 continue
-            # line box -> per-word boxes by proportional width, identical
-            # to PaddleBackend so per-word redaction stays tight.
-            total = sum(len(w) for w in words) + (len(words) - 1)
-            cursor = float(x1)
-            for w in words:
-                frac = (len(w) + 1) / max(total, 1)
-                wx2 = cursor + (float(x2) - float(x1)) * frac
-                out.append((w, (int(cursor), int(y1), int(wx2), int(y2)),
-                            conf))
-                cursor = wx2
+            # line box -> per-word boxes from the CTC TIMESTEPS: the
+            # recognizer says exactly where each character sits across
+            # the crop, so each word gets its true x-range (the old
+            # proportional character-count split drifted off the real
+            # positions and blur landed beside the text). Half a
+            # timestep cell of margin on each side covers glyph edges.
+            span = float(x2) - float(x1)
+            cell = span / T
+            i = 0
+            while i < len(txt):
+                if txt[i] == " ":
+                    i += 1
+                    continue
+                j = i
+                while j < len(txt) and txt[j] != " ":
+                    j += 1
+                w = txt[i:j]
+                wx1 = x1 + pos[i] * cell - 0.8 * cell
+                wx2 = x1 + (pos[j - 1] + 1) * cell + 0.8 * cell
+                out.append((w, (int(max(x1, wx1)), int(y1),
+                                int(min(x2, wx2)), int(y2)), conf))
+                i = j
         return out
 
 
