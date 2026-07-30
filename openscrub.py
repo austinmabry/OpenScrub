@@ -499,15 +499,31 @@ def group_lines(words):
     out = []
     for ln in lines:
         ln["raw"].sort(key=lambda w: w[1][0])
-        text = ""
-        entries = []
-        for w, box, conf in ln["raw"]:
-            if text:
-                text += " "
-            start = len(text)
-            text += w
-            entries.append((w, box, conf, start, len(text)))
-        out.append({"text": text, "words": entries})
+        # split at column-sized horizontal gaps: two-column layouts land on
+        # the same y-band, and a merged line makes every line-level match
+        # (address box, spaCy NER context) span BOTH columns — the blur then
+        # swallows unrelated text a page-width away. A gap wider than 2.5x
+        # the line height (same scale as the name-pair adjacency rule) is a
+        # column boundary, not a word gap. PII values never span columns,
+        # so splitting can only tighten boxes, never lose a match.
+        segments = [[]]
+        prev_x2 = None
+        for w in ln["raw"]:
+            if (prev_x2 is not None
+                    and w[1][0] - prev_x2 > 2.5 * max(ln["h"], 10)):
+                segments.append([])
+            segments[-1].append(w)
+            prev_x2 = w[1][2]
+        for seg in segments:
+            text = ""
+            entries = []
+            for w, box, conf in seg:
+                if text:
+                    text += " "
+                start = len(text)
+                text += w
+                entries.append((w, box, conf, start, len(text)))
+            out.append({"text": text, "words": entries})
     return out
 
 

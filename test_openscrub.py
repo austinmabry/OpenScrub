@@ -2336,6 +2336,27 @@ def test_ocr_space_recovery_and_ascii_forms():
     assert txt == "A B" and pos == [0, 1, 3]
 
 
+def test_group_lines_splits_columns():
+    """Two-column layouts share a y-band; a merged line made the address
+    detection's line box (and spaCy's NER context) span BOTH columns, so
+    the blur swallowed unrelated right-column text ('Priority normal' sat
+    on the address row and was over-blurred in 7 of 8 benchmark
+    scenarios). A gap wider than 2.5x line height is a column boundary."""
+    def w(txt, x, y=100):
+        return (txt, (x, y, x + 12 * len(txt), y + 120 - 100 + y), 0.9)
+    words = [("4210", (100, 100, 148, 120), 0.9),
+             ("Kestrel", (160, 100, 244, 120), 0.9),
+             ("Road", (256, 100, 304, 120), 0.9),
+             ("Priority", (820, 100, 916, 120), 0.9),
+             ("normal", (928, 100, 1000, 120), 0.9)]
+    lines = openscrub.group_lines(words)
+    texts = [ln["text"] for ln in lines]
+    assert "4210 Kestrel Road" in texts and "Priority normal" in texts, texts
+    # normal word gaps must NOT split
+    lines = openscrub.group_lines(words[:3])
+    assert [ln["text"] for ln in lines] == ["4210 Kestrel Road"]
+
+
 def test_shredded_card_fragment_join():
     """OCR can fragment a spaced PAN into arbitrary digit chunks
     ("41 11 11 11 1 1 11 11 11" — a real read of a highlighted card row
