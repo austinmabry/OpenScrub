@@ -2353,6 +2353,22 @@ def test_shredded_card_fragment_join():
     dotted = [w("4111", 60), w("1111", 130), w("1111.", 200), w("1111", 270)]
     dets = openscrub.detect_phi(dotted, [], 0.0, (0, 0), None, None)
     assert any(d.category == "card" for d in dets)
+    # dark/noisy footage welds neighbouring groups into one big token
+    # ("4111" ".1111." "1111.1111" — the exact PP-OCRv5 read of the
+    # dark-mode benchmark card row that leaked in 1.0.78 dev): tokens up
+    # to a full welded PAN must still join
+    welded = [w("4111", 60), w(".1111.", 130), w("1111.1111", 210)]
+    dets = openscrub.detect_phi(welded, [], 0.0, (0, 0), None, None)
+    assert any(d.category == "card" and d.text == "4111111111111111"
+               for d in dets), [(d.category, d.text) for d in dets]
+    # and a single fully-welded punctuated PAN fires on its own
+    solo = [w("4111.1111.1111.1111", 60)]
+    dets = openscrub.detect_phi(solo, [], 0.0, (0, 0), None, None)
+    assert any(d.category == "card" for d in dets)
+    # welded junk that fails Luhn stays silent
+    wj = [w("1234", 60), w("5678.9012", 130), w("3456", 240)]
+    dets = openscrub.detect_phi(wj, [], 0.0, (0, 0), None, None)
+    assert not any(d.category == "card" for d in dets)
     # a random digit run that fails Luhn must NOT fire
     junk = [w("4111", 60), w("1111", 130), w("1111", 200), w("1112", 270)]
     dets = openscrub.detect_phi(junk, [], 0.0, (0, 0), None, None)

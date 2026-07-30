@@ -843,16 +843,21 @@ def detect_phi(words, lines, t, offset, namer, mrn_re, custom_res=()):
         tok = re.sub(r"\D", "", w[0])
         # digits with incidental punctuation still count: motion blur
         # turned one group into "1111." and the stray period broke every
-        # join (a real scrolling-card leak)
-        digity = bool(tok) and bool(re.fullmatch(r"[\d.,:;\-]{1,8}", w[0]))
+        # join (a real scrolling-card leak), and dark/noisy footage welds
+        # neighbouring groups into "1111.1111" (8 digits, 9 chars) — the
+        # old {1,8}/6-digit caps split the run right there and leaked the
+        # card. Any punctuated token up to a full welded PAN (16 digits)
+        # may join; Luhn + brand prefix stay the false-positive gate.
+        digity = (bool(tok) and len(tok) <= 16
+                  and bool(re.fullmatch(r"[\d.,:;\-]{1,19}", w[0])))
         same_row = (digit_run
                     and abs((w[1][1] + w[1][3]) - (digit_run[-1][1][1]
                             + digit_run[-1][1][3])) / 2
                     < max(8, digit_run[-1][1][3] - digit_run[-1][1][1]))
-        if digity and len(tok) <= 6 and (not digit_run or same_row):
+        if digity and (not digit_run or same_row):
             digit_run.append(w)
             continue
-        if len(digit_run) >= 2:
+        if digit_run:
             for a in range(len(digit_run)):
                 digits = ""
                 for z in range(a, len(digit_run)):
@@ -873,7 +878,7 @@ def detect_phi(words, lines, t, offset, namer, mrn_re, custom_res=()):
                             break
                 if a is None:
                     break
-        digit_run = [w] if (digity and len(tok) <= 6) else []
+        digit_run = [w] if digity else []
 
     # split-across-words phone: "(501)" "555-0142"
     for i in range(len(words) - 1):
