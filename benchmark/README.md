@@ -83,9 +83,17 @@ preservation; lower is better for leak rate:
 Every planted value — names, SSNs, phone numbers, addresses, cards,
 emails, dates of birth, IP addresses — was unreadable in every sampled
 frame of the rendered output, across all eight scenarios, on both
-engines. The one benign loss (Tesseract) is "Follow-up in 6 weeks"
-garbled under the 120 kbps compression — over-blur, the failure
-direction this tool chooses on purpose.
+engines. The one benign loss (Tesseract) is a genuine over-blur, and
+worth naming precisely: on the 120 kbps copy, compression noise made
+Tesseract read the lowercase "in" of "Follow-up in 6 weeks" as "In", the
+capitalised-pair name heuristic saw "Follow-up In", and the phrase was
+blurred as a name. Wrong, but wrong in the safe direction — the
+failure this tool chooses on purpose.
+
+**No zones, no detection windows, no tuning flags.** The scorer runs
+the engine on its defaults (`--engine <x> -o … --report …`) and nothing
+else. Scoping features would raise the numbers by telling the engine
+where the answers are — see "Why the benchmark runs unassisted" below.
 
 A 100 % row on a fixed corpus means the corpus no longer finds leaks —
 not that leaks are impossible. The honest reading is the history below.
@@ -147,6 +155,35 @@ Two candidate clips (a street scene with small oblique faces, a
 multi-person interview) produced **invalid controls** — the recognizer
 could not re-identify unredacted faces in them — and the harness
 refused to grade them. That refusal is the feature.
+
+## Why the benchmark runs unassisted
+
+OpenScrub ships scoping tools that make redaction better in practice:
+**detection windows** (scan only these time ranges) and **zones**
+(look for this category only inside this rectangle), plus never-blur
+**ignore zones**. A benchmark run *with* them would score at least as
+well as the numbers above and would remove false blurs, because a zone
+that excludes a column excludes every false positive in it.
+
+They are deliberately not used here, for one reason: on a synthetic
+corpus the person drawing the zones has the answer key. Zoning the
+region where you planted the SSN and then reporting that the SSN was
+covered measures the renderer, not the detector — and the first
+question any skeptical reader asks is "so you told it where to look?".
+The number that means something is the one from the path a new user
+gets by default, on footage the tool knows nothing about.
+
+So the rule for this harness: **the engine is never told anything the
+corpus generator knew.** If a future scenario defeats the unassisted
+path, the fix belongs in the detector, not in a hand-drawn rectangle.
+
+That is a statement about the *benchmark*, not about the feature.
+Windows and zones are the right tool on real footage — where you, not
+a generator, know the phone number only appears in the lower third, and
+where excluding the rest of the frame genuinely removes false blurs and
+scan time. If a zone-assisted number is ever published, it belongs in
+its own clearly-labelled row ("guided mode"), never merged into the
+unassisted one.
 
 ## Rules for quoting these numbers
 
