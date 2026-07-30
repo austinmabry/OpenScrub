@@ -182,11 +182,108 @@ def scenario_scrolling_notes(path, seconds=8, speed=180.0):
     return {"samples": samples, "scroll_px_per_s": speed}
 
 
+def scenario_dark_mode(path, seconds=4):
+    """Dark-mode UI: light text on near-black — the polarity most OCR
+    pipelines see least of."""
+    img = np.full((H, W, 3), 18, np.uint8)
+    cv2.rectangle(img, (0, 0), (W, 64), (36, 30, 24), -1)
+    samples = []
+    y = 140
+    for txt, cat in PII:
+        box = _put(img, txt, (80, y), 0.85, 2, (222, 222, 222))
+        samples.append({"text": txt, "category": cat, "box": box,
+                        "t0": 0.0, "t1": seconds, "kind": "pii"})
+        y += 64
+    for i, txt in enumerate(BENIGN):
+        box = _put(img, txt, (820, 140 + i * 64), 0.7, 2, (140, 140, 140))
+        samples.append({"text": txt, "category": None, "box": box,
+                        "t0": 0.0, "t1": seconds, "kind": "benign"})
+    _write(path, [img] * int(seconds * FPS))
+    return {"samples": samples, "scroll_px_per_s": 0.0}
+
+
+def scenario_noisy(path, seconds=4, sigma=14.0):
+    """Sensor-noise grain over the record screen (deterministic seed):
+    webcam-quality capture of a monitor. Per-frame noise also exercises
+    scan-to-scan OCR stability — flicker between reads is what expires
+    detection holds."""
+    base = np.full((H, W, 3), 240, np.uint8)
+    samples = []
+    y = 150
+    for txt, cat in PII:
+        box = _put(base, txt, (70, y), 0.9, 2, (25, 25, 25))
+        samples.append({"text": txt, "category": cat, "box": box,
+                        "t0": 0.0, "t1": seconds, "kind": "pii"})
+        y += 62
+    for i, txt in enumerate(BENIGN):
+        box = _put(base, txt, (830, 150 + i * 62), 0.75, 2, (60, 60, 60))
+        samples.append({"text": txt, "category": None, "box": box,
+                        "t0": 0.0, "t1": seconds, "kind": "benign"})
+    rng = np.random.default_rng(23)
+    frames = []
+    for _ in range(int(seconds * FPS)):
+        noise = rng.normal(0.0, sigma, base.shape)
+        frames.append(np.clip(base.astype(np.float64) + noise,
+                              0, 255).astype(np.uint8))
+    _write(path, frames)
+    return {"samples": samples, "scroll_px_per_s": 0.0}
+
+
+def scenario_rotated(path, seconds=4, angle=2.5):
+    """The whole record rendered at a slight tilt — a phone photo of a
+    screen / an imperfectly scanned page. Boxes in ground truth are the
+    rotated text's axis-aligned bounding boxes."""
+    flat = np.full((H, W, 3), 247, np.uint8)
+    placed = []
+    y = 150
+    for txt, cat in PII:
+        box = _put(flat, txt, (110, y), 0.9, 2)
+        placed.append((txt, cat, box, "pii"))
+        y += 62
+    for i, txt in enumerate(BENIGN):
+        box = _put(flat, txt, (830, 150 + i * 62), 0.75, 2, (60, 60, 60))
+        placed.append((txt, None, box, "benign"))
+    M = cv2.getRotationMatrix2D((W / 2, H / 2), angle, 1.0)
+    img = cv2.warpAffine(flat, M, (W, H), flags=cv2.INTER_CUBIC,
+                         borderValue=(247, 247, 247))
+    samples = []
+    for txt, cat, (x1, y1, x2, y2), kind in placed:
+        pts = np.array([[x1, y1, 1], [x2, y1, 1], [x1, y2, 1], [x2, y2, 1]])
+        rot = pts @ M.T
+        samples.append({"text": txt, "category": cat,
+                        "box": [float(rot[:, 0].min()),
+                                float(rot[:, 1].min()),
+                                float(rot[:, 0].max()),
+                                float(rot[:, 1].max())],
+                        "t0": 0.0, "t1": seconds, "kind": kind})
+    _write(path, [img] * int(seconds * FPS))
+    return {"samples": samples, "scroll_px_per_s": 0.0}
+
+
+def scenario_compressed(path, seconds=4):
+    """The static record put through a BRUTAL low-bitrate encode —
+    screen-share/remote-desktop quality, ringing and block artifacts.
+    Built by writing the clean video then re-encoding at ~120kbps."""
+    tmp = path + ".clean.mp4"
+    meta = scenario_static_record(tmp, seconds=seconds)
+    import subprocess
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", tmp,
+                    "-c:v", "libx264", "-b:v", "120k", "-maxrate", "120k",
+                    "-bufsize", "60k", "-preset", "veryfast", path],
+                   check=True)
+    os.remove(tmp)
+    return meta
+
+
 SCENARIOS = {
     "static_record": scenario_static_record,
     "small_text": scenario_small_text,
     "highlighted": scenario_highlighted,
     "scrolling_notes": scenario_scrolling_notes,
+    "dark_mode": scenario_dark_mode,
+    "noisy": scenario_noisy,
+    "rotated": scenario_rotated,
+    "compressed": scenario_compressed,
 }
 
 
