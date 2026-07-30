@@ -154,6 +154,12 @@ refused to grade them. That refusal is the feature.
   number without them is not a claim, it is a vibe.
 - Never say "HIPAA compliant" or "GDPR compliant" — tools are not
   compliant, processes are.
-- Never say 100 %, "guaranteed", or "fully anonymised".
+- Never say "guaranteed", "fully anonymised", or "undetectable" — those
+  describe the tool, and no redaction tool can promise them.
+- A measured 100 % is a **result**, not a promise: quote it only with
+  its scope attached ("100 % of the planted values on corpus v2 were
+  unreadable in the output"), never bare and never in the future tense
+  ("OpenScrub blurs 100 % of PII"). The first is what happened; the
+  second is a claim about footage nobody has run yet.
 - Publish the failures next to the successes. A tool that says where it
   struggles is the one worth believing.
