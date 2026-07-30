@@ -558,9 +558,9 @@ values × 5 sampled frames):
     Benign preservation:  100.0%   (43/43 non-PII samples left readable)
 
 Face re-identification (v1.0.78, default blur, SFace matcher, valid
-same-person controls): **0 of 383 redacted faces re-identified** across
-a handheld 1080p party clip, a public-domain close-up interview, and a
-mosaic-mode run — with post-redaction similarity below the
+same-person controls): **0 of 511 redacted faces re-identified** across
+a handheld party clip at 1080p and native 4K, a public-domain close-up
+interview, and a mosaic-mode run — with post-redaction similarity below the
 *cross-person chance floor*, i.e. a redacted face matches its own
 original no better than a stranger's face does.
 

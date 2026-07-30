@@ -128,6 +128,7 @@ faces in the *unredacted* footage, so a 0 % result is meaningful):
 | Footage | Faces attacked | Re-identified | Still detected as a face | Control |
 |---|---|---|---|---|
 | Handheld 1080p party clip, five subjects, constant motion ([Pexels 7100826](https://www.pexels.com/video/7100826/), downscaled from 4K) | 125 | **0 (0.0 %)** | 0.0 % | 0.888 |
+| The same party clip at native 4K (3840×2160 — larger faces, more recoverable detail) | 128 | **0 (0.0 %)** | 0.0 % | 0.887 |
 | Public-domain interview, large frontal close-up faces, 1080×1920 ([Wikimedia Commons](https://commons.wikimedia.org/wiki/File:Interview_with_a_Marshall_Center_professor_(999984).webm)) | 133 | **0 (0.0 %)** | 0.7 % | 0.691 |
 | Same party clip, `--mode mosaic` | 125 | **0 (0.0 %)** | 4.8 % | 0.888 |
 
