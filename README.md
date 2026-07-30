@@ -543,17 +543,31 @@ This software is provided "AS IS" without warranty of any kind — see the
 
 ## Validation
 
-During development the pipeline is scored against a **synthetic corpus**:
-a generator plants fake PII at known locations across the hard cases —
-static charts, schedule grids, scrolling notes, OCR-disrupting
-highlights, embedded face photos — and a scorer checks the rendered
-output against the ground truth:
+OpenScrub ships a **reproducible redaction benchmark**
+([`benchmark/`](benchmark/)) — you run the same commands and get your
+own numbers instead of trusting ours. It measures what a reader of the
+output actually cares about: is the planted PII still *readable*, and
+can a face recognizer still *identify* the person?
 
-    PII recall:           100.0%   (102/102 planted samples blurred)
-    Benign preservation:  100.0%   (39/39 benign samples left readable)
+Text PII (v1.0.78, CPU, corpus v2 — 8 scenarios including dark mode,
+sensor noise, 2.5° rotation and 120 kbps re-compression; 64 planted
+values × 5 sampled frames):
 
-(measured with the Tesseract fallback engine; PaddleOCR + spaCy NER, the
-recommended stack, is stronger). The shipped regression suite
+    PII recall:           100.0%   (64/64 planted values never readable in the output)
+    Frame leak rate:        0.00%  (0/320 sampled region-frames readable)
+    Benign preservation:  100.0%   (43/43 non-PII samples left readable)
+
+Face re-identification (v1.0.78, default blur, SFace matcher, valid
+same-person controls): **0 of 383 redacted faces re-identified** across
+a handheld 1080p party clip, a public-domain close-up interview, and a
+mosaic-mode run — with post-redaction similarity below the
+*cross-person chance floor*, i.e. a redacted face matches its own
+original no better than a stranger's face does.
+
+Numbers on a fixed corpus mean the corpus no longer finds leaks — not
+that leaks are impossible. The benchmark README lists every defect the
+harness caught (all fixed and regression-pinned), and the rules for
+quoting these numbers honestly. The shipped test suite
 (`pytest test_openscrub.py`) exercises the same end-to-end pipeline on
 synthetic videos — for this tool a regression is not a bug, it's a leak,
 so the suite must stay green on every change.

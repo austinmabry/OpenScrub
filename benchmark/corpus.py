@@ -289,7 +289,7 @@ SCENARIOS = {
 
 def build(outdir):
     os.makedirs(outdir, exist_ok=True)
-    doc = {"corpus_version": 1, "fps": FPS, "size": [W, H], "scenarios": []}
+    doc = {"corpus_version": 2, "fps": FPS, "size": [W, H], "scenarios": []}
     for name, fn in SCENARIOS.items():
         video = os.path.join(outdir, name + ".mp4")
         meta = fn(video)

@@ -36,9 +36,12 @@ documentation range**: 555 phone numbers, `example.com` (RFC 2606),
 `192.0.2.0/24` (RFC 5737), the public `4111…` test card. The benchmark
 for a privacy tool must not itself be a privacy problem.
 
-Four scenarios, 32 PII + 23 benign samples: a static record screen,
-small text (needs the 2x re-OCR pass), PII on coloured highlight bars
-(the classic OCR disruptor), and scrolling notes at a known rate.
+Eight scenarios (corpus v2), 64 PII + 43 benign samples: a static
+record screen, small text (needs the 2x re-OCR pass), PII on coloured
+highlight bars (the classic OCR disruptor), scrolling notes at a known
+rate, dark mode (light text on dark), heavy sensor noise, a 2.5°
+rotated page (photographed-document tilt), and a brutally re-compressed
+copy (120 kbps — screen-share/messenger quality).
 
 Reported: **PII recall** (samples never readable in any sampled frame),
 **frame leak rate** (region-frames that were readable), and **benign
@@ -66,37 +69,83 @@ instead of letting you publish the number.
 Supply your own footage or public-domain clips. Do not run this on real
 people's faces and publish the frames.
 
-## Measured so far
+## Measured: text PII
 
-OpenScrub v1.0.78, CPU only (no GPU), corpus v1, 5 frames sampled per
-sample. These are **starting numbers on a deliberately hard corpus**,
-not marketing figures:
+OpenScrub v1.0.78, CPU only (no GPU), corpus v2 (8 scenarios), 5 frames
+sampled per planted value. Higher is better for recall and benign
+preservation; lower is better for leak rate:
 
 | OCR engine | PII recall | Frame leak rate | Benign preserved |
 |---|---|---|---|
-| Tesseract | 84.4 % | 11.3 % | 87.0 % |
-| ONNX PP-OCRv5 (before the fixes below) | 40.6 % | 57.5 % | 91.3 % |
-| ONNX PP-OCRv5 (after) | 68.8 % | 26.9 % | 82.6 % |
+| ONNX PP-OCRv5 (the default on CPU/Intel/Windows) | 100.0 % | 0.00 % | 100.0 % |
+| Tesseract | 100.0 % | 0.00 % | 97.7 % |
 
-Building this harness immediately found two real defects in the ONNX OCR
-backend — the **default on CPU, Intel and Windows** since 1.0.69 — both
-fixed in 1.0.78:
+Every planted value — names, SSNs, phone numbers, addresses, cards,
+emails, dates of birth, IP addresses — was unreadable in every sampled
+frame of the rendered output, across all eight scenarios, on both
+engines. The one benign loss (Tesseract) is "Follow-up in 6 weeks"
+garbled under the 120 kbps compression — over-blur, the failure
+direction this tool chooses on purpose.
+
+A 100 % row on a fixed corpus means the corpus no longer finds leaks —
+not that leaks are impossible. The honest reading is the history below.
+
+### What building the benchmark caught (all fixed in 1.0.78)
+
+The first runs of this harness measured the ONNX backend at **40.6 %
+recall with a 57.5 % frame leak rate**. Every point of the gap traced to
+a real, previously-invisible defect; each is now fixed and pinned by a
+regression test:
 
 - **Lost spaces.** PP-OCRv5's space class routinely loses the argmax to
-  blank at word gaps, welding `SSN 123-45-6789` into `SSN123-45-6789`,
-  so every multi-token pattern (address, phone, SSN) silently stopped
-  matching. The signal was recoverable: peak space probability inside a
-  word gap measured ~0.15 versus ~0.000 inside a word.
-- **Full-width punctuation.** Its Chinese-first vocabulary returned
-  `（555）013-8842` — visually identical to a reader, matched by no
-  regex.
+  blank at word gaps, welding `SSN 123-45-6789` into `SSN123-45-6789` —
+  every multi-token pattern silently stopped matching.
+- **Full-width punctuation.** The Chinese-first vocabulary returned
+  `（555）013-8842` — visually identical to a reader, matched by no regex.
+- **Shredded card numbers.** Compression and noise fragment a spaced
+  PAN into arbitrary digit chunks (`41 11 11 …`, `4111. 1111-1111`);
+  the fixed-format matcher missed them. Fragments now join under a
+  Luhn + brand-prefix gate.
+- **Column-spanning over-blur.** Two-column layouts merged into one OCR
+  line, so an address detection's blur swallowed unrelated text a page
+  width away (benign preservation cost, found by the corpus's benign
+  samples).
+- **Tilted-line grouping.** On the 2.5° rotated page, line grouping by
+  average y-center split a first name from its surname and the name was
+  never detected at all.
+- **Uncovered tails.** Under heavy compression the last scans read only
+  fragments of a card number — real evidence the string was still on
+  screen, but not a full match, so the blur ended ~0.7 s early.
 
-**Known gap, stated plainly:** even after those fixes the ONNX backend
-still trails Tesseract on this corpus (68.8 % vs 84.4 %), mostly on
-name, phone and SSN. Line-level detection with proportional word
-splitting yields coarser word boxes than Tesseract's true per-word
-output. Until that closes, `--engine tesseract` is the stronger choice
-for text-PII-critical work on CPU builds.
+## Measured: face re-identification
+
+OpenScrub v1.0.78, default blur mode, SFace matcher, same-person
+threshold 0.55. "Re-identified" = the redacted face still matched the
+identity embedding taken from the unredacted original. All three rows
+have a valid control (the recognizer reliably re-identifies the same
+faces in the *unredacted* footage, so a 0 % result is meaningful):
+
+| Footage | Faces attacked | Re-identified | Still detected as a face | Control |
+|---|---|---|---|---|
+| Handheld 1080p party clip, five subjects, constant motion ([Pexels 7100826](https://www.pexels.com/video/7100826/), downscaled from 4K) | 125 | **0 (0.0 %)** | 0.0 % | 0.888 |
+| Public-domain interview, large frontal close-up faces, 1080×1920 ([Wikimedia Commons](https://commons.wikimedia.org/wiki/File:Interview_with_a_Marshall_Center_professor_(999984).webm)) | 133 | **0 (0.0 %)** | 0.7 % | 0.691 |
+| Same party clip, `--mode mosaic` | 125 | **0 (0.0 %)** | 4.8 % | 0.888 |
+
+Mean post-redaction similarity sat **below the cross-person chance
+floor** in all three runs — a redacted face matches its own original no
+better than a random stranger's face does.
+
+This table also records a caught defect: the interview clip's close-up
+faces (200–750 px) were initially re-identified at **8.3 % straight
+through the old blur** — a large face keeps enough low-frequency
+identity when the blur kernel is 1/3 of the region. The kernel is now
+2/3 of the region (pinned by test), which also drove
+"still detected as a face" from 99.2 % to 0 % on the party clip.
+
+Two candidate clips (a street scene with small oblique faces, a
+multi-person interview) produced **invalid controls** — the recognizer
+could not re-identify unredacted faces in them — and the harness
+refused to grade them. That refusal is the feature.
 
 ## Rules for quoting these numbers
 
