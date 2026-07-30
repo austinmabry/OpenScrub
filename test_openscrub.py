@@ -2280,6 +2280,51 @@ def test_docker_prefetch_matches_engine_pins():
     assert pf.MODELS == expect
 
 
+def test_ocr_space_recovery_and_ascii_forms():
+    """Two PP-OCRv5 quirks that silently broke PII detection on the
+    ONNX OCR backend — the DEFAULT on CPU/Intel/Windows since 1.0.69 —
+    found by the benchmark harness:
+
+    1. The space class routinely loses the argmax to blank at real word
+       gaps, welding "SSN 123-45-6789" into "SSN123-45-6789" and
+       "4210 Kestrel Hollow Road" into one token, so every multi-token
+       regex (address/phone/ssn) stopped matching. The space signal is
+       still present in the blank run and must be recovered.
+    2. Its Chinese-first vocabulary returns FULL-WIDTH punctuation:
+       "（555）013-8842" matches no phone pattern even though it is
+       visually identical to the ASCII form."""
+    # --- full-width normalization
+    assert openscrub._ascii_forms("（555）013-8842") == "(555)013-8842"
+    assert openscrub._ascii_forms("１２３－４５－６７８９") == "123-45-6789"
+    assert openscrub._ascii_forms("already ascii 1-2") == "already ascii 1-2"
+
+    # --- space recovery: charmap[-1] is the space class
+    charmap = [""] + list("AB") + [" "]          # blank, A, B, space
+    SP = len(charmap) - 1
+    n = len(charmap)
+
+    def step(i, space_p=0.0):
+        v = np.full(n, 0.001, np.float32)
+        v[i] = 1.0 - space_p
+        v[SP] = max(v[SP], space_p)
+        return v
+
+    # "A" <blank run carrying space probability> "B"  ->  "A B"
+    hi = np.array([step(1), step(0, 0.4), step(0, 0.4), step(2)])
+    assert openscrub._ctc_greedy_decode(hi, charmap)[0] == "A B"
+    # same shape, but the blank run has NO space probability -> "AB"
+    lo = np.array([step(1), step(0), step(0), step(2)])
+    assert openscrub._ctc_greedy_decode(lo, charmap)[0] == "AB"
+    # a one-step gap is never a space (too short to be a word break).
+    # space_p stays BELOW the blank probability here, so blank still wins
+    # the argmax — the case this fix exists for.
+    short = np.array([step(1), step(0, 0.4), step(2)])
+    assert openscrub._ctc_greedy_decode(short, charmap)[0] == "AB"
+    # no leading space, and repeats still collapse
+    lead = np.array([step(0, 0.4), step(0, 0.4), step(1), step(1)])
+    assert openscrub._ctc_greedy_decode(lead, charmap)[0] == "A"
+
+
 def test_container_update_notice_is_inform_only(monkeypatch):
     """Inside Docker the in-place updater writes into the ephemeral
     container filesystem — the "update" would vanish on the next recreate

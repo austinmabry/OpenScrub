@@ -126,3 +126,7 @@ CLAUDE.local.md
 # Windows installer build output (windows/build_installer.bat)
 windows/output/
 model_select.json
+
+# benchmark working dirs (regenerate with benchmark/corpus.py)
+benchmark/_corpus/
+benchmark/_results/

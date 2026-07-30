@@ -36,7 +36,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.77"
+VERSION = "1.0.78"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -4289,19 +4289,60 @@ class QRDetector:
         return _nms_boxes(out, 0.4)
 
 
-def _ctc_greedy_decode(logits, charmap):
+_FULLWIDTH = {ord(c): ord(a) for c, a in zip(
+    "０１２３４５６７８９（）－．，：／＠＃",
+    "0123456789()-.,:/@#")}
+_FULLWIDTH[0x3000] = 0x20          # ideographic space
+
+
+def _ascii_forms(s):
+    """Map full-width/CJK punctuation and digits to their ASCII forms
+    (pure, unit-tested). PP-OCRv5's vocabulary is Chinese-first and it
+    returns '（555）013-8842' for a plain US phone number — no PII regex
+    matches that, so a real phone number sailed through untouched. The
+    glyphs are visually identical to a reader; only the code points
+    differ, so normalizing costs nothing and closes the hole."""
+    return s.translate(_FULLWIDTH)
+
+
+def _ctc_greedy_decode(logits, charmap, space_thresh=0.05):
     """Greedy CTC decode (pure, unit-tested) for the PP-OCR recognizer.
     Per-timestep argmax, collapse consecutive repeats, drop blank
     (index 0), map indices through charmap. `charmap[0]` is the blank.
-    Returns (text, mean confidence over the kept, non-blank steps)."""
+    Returns (text, mean confidence over the kept, non-blank steps).
+
+    SPACE RECOVERY: PP-OCRv5's space class routinely loses the argmax to
+    blank at real word gaps, so a pure argmax decode welds words
+    together — "SSN 123-45-6789" came back as "SSN123-45-6789" and
+    "4210 Kestrel Hollow Road" as "4210KestrelHollowRoad", which breaks
+    EVERY multi-token PII regex (address/phone/ssn silently stopped
+    matching once this backend became the CPU/Intel/Windows default).
+    The signal is there underneath: measured on real frames, the peak
+    space-class probability inside a word-gap blank run is ~0.15 while
+    inside a word it is ~0.000 — a 100x separation. So when a blank run
+    between two characters carries space probability above
+    space_thresh, emit the space the argmax dropped. Languages that do
+    not use spaces are unaffected (their space probability stays flat)."""
     idx = logits.argmax(1)
     prob = logits.max(1)
+    sp = (len(charmap) - 1) if (charmap and charmap[-1] == " ") else -1
     chars, confs, prev = [], [], -1
+    run = None                      # start index of the current blank run
     for t in range(len(idx)):
         i = int(idx[t])
-        if i != 0 and i != prev and i < len(charmap):
+        if i == 0:
+            if run is None:
+                run = t
+            prev = i
+            continue
+        if i != prev and i < len(charmap):
+            if (sp > 0 and chars and run is not None and t - run >= 2
+                    and charmap[i] != " " and chars[-1] != " "
+                    and float(logits[run:t, sp].max()) > space_thresh):
+                chars.append(" ")
             chars.append(charmap[i])
             confs.append(float(prob[t]))
+        run = None
         prev = i
     return "".join(chars), (float(np.mean(confs)) if confs else 0.0)
 
@@ -4478,7 +4519,7 @@ class OnnxOcrBackend(OcrBackend):
             if x2 - x1 < 6 or y2 - y1 < 6:
                 continue
             txt, conf = self._read_line(frame[y1:y2, x1:x2])
-            words = txt.split()
+            words = _ascii_forms(txt).split()
             if not words:
                 continue
             # line box -> per-word boxes by proportional width, identical
