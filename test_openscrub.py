@@ -2336,6 +2336,24 @@ def test_ocr_space_recovery_and_ascii_forms():
     assert txt == "A B" and pos == [0, 1, 3]
 
 
+def test_blur_kernel_is_two_thirds_region():
+    """Re-identification benchmark, close-up faces (200-750px): a
+    1/3-width Gaussian left SFace similarity at 0.57-0.69 — above the
+    0.55 same-person bar, so 11/133 faces re-identified through the
+    blur. 2/3 width measures 0.11-0.23 on the same faces, at or below
+    cross-person chance. Pin the kernel so a 'cosmetic' weakening of the
+    blur can't silently reopen the leak."""
+    seen = []
+    orig = openscrub._gauss_big
+    openscrub._gauss_big = lambda roi, k: (seen.append(k), orig(roi, k))[1]
+    try:
+        frame = np.full((400, 400, 3), 128, np.uint8)
+        openscrub.blur_region(frame, 50, 50, 350, 350, "blur")
+    finally:
+        openscrub._gauss_big = orig
+    assert seen and seen[0] >= (2 * 300 // 3) | 1, seen
+
+
 def test_group_lines_splits_columns():
     """Two-column layouts share a y-band; a merged line made the address
     detection's line box (and spaCy's NER context) span BOTH columns, so
