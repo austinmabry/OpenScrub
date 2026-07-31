@@ -45,6 +45,18 @@ number on real footage):
                   actually change (an untouched re-identified face is a
                   pipeline MISS; an altered one is weak redaction —
                   different bugs, reported separately).
+  6. FLAT FLOOR   a crop only supports an identity claim if its
+                  embedding is about the person. Each original crop is
+                  compared against a FLAT PATCH of its own mean color:
+                  real faces measure ~0.1-0.3, but a 30x90 border
+                  sliver measured 0.73 — it matched a featureless
+                  rectangle better than it matched its own blur, so
+                  its "re-identification" indicted the crop, not the
+                  redaction. Crops with flat-floor >= 0.5 are excluded
+                  from the similarity comparison and counted openly,
+                  exactly like unconfirmed candidates. The floor is
+                  also reported per row: a residual match barely above
+                  a crop's own floor is color-mass, not a face.
 
     python benchmark/reid.py --video clip.mp4
     python benchmark/reid.py --video clip.mp4 --redacted out.mp4   # reuse render
@@ -261,16 +273,27 @@ def run(video, out_dir, mode, coverage, categories, extra, redacted=None):
             co, cr = fo[y1:y2, x1:x2], fr[y1:y2, x1:x2]
             eo, er = _embed(rec, co), _embed(rec, cr)
             sim = _cos(eo, er)
+            # flat floor: how well the ORIGINAL matches a featureless
+            # patch of its own mean color — the crop's irreducible
+            # self-similarity. >= 0.5 means the embedding is about
+            # smoothness/color, not the person (real faces: ~0.1-0.3).
+            flat = np.full_like(co, co.reshape(-1, 3).mean(axis=0)
+                                .astype(np.uint8))
+            floor = _cos(eo, _embed(rec, flat))
+            degenerate = floor is not None and floor >= 0.5
             pixdiff = float(np.abs(co.astype(np.int16)
                                    - cr.astype(np.int16)).mean())
             still = len(det.find(fr[max(0, y1 - 20):y2 + 20,
                                     max(0, x1 - 20):x2 + 20])) > 0
             ti = track_of.get((t, tuple(box)))
-            if eo is not None and ti is not None:
+            if eo is not None and ti is not None and not degenerate:
                 embeds_by_track.setdefault(ti, []).append(eo)
             rows.append({"t": round(t, 2), "box": [x1, y1, x2, y2],
                          "track": ti,
                          "similarity": None if sim is None else round(sim, 4),
+                         "flat_floor": (None if floor is None
+                                        else round(floor, 4)),
+                         "degenerate": bool(degenerate),
                          "pix_diff": round(pixdiff, 2),
                          "still_detectable": bool(still)})
         n += 1
@@ -294,8 +317,9 @@ def run(video, out_dir, mode, coverage, categories, extra, redacted=None):
                 cross.append(c)
     ctrl = float(np.mean(same)) if same else None
 
-    sims = [r["similarity"] for r in rows if r["similarity"] is not None]
-    matched = [r for r in rows
+    graded = [r for r in rows if not r["degenerate"]]
+    sims = [r["similarity"] for r in graded if r["similarity"] is not None]
+    matched = [r for r in graded
                if r["similarity"] is not None
                and r["similarity"] >= SAME_PERSON]
     untouched = [r for r in matched if r["pix_diff"] < 2.0]
@@ -305,6 +329,7 @@ def run(video, out_dir, mode, coverage, categories, extra, redacted=None):
         "reference": os.path.basename(reference),
         "faces": len(rows), "tracks": len(tracks),
         "unconfirmed_candidates": unconfirmed,
+        "degenerate_excluded": sum(1 for r in rows if r["degenerate"]),
         "still_detectable": sum(1 for r in rows if r["still_detectable"]),
         "compared": len(sims),
         "reidentified": len(matched),
@@ -350,6 +375,10 @@ def main():
     print(" still face-detectable      %d  (%.1f%%)"
           % (res["still_detectable"],
              100 * res["still_detectable"] / max(1, res["faces"])))
+    if res["degenerate_excluded"]:
+        print(" degenerate crops excluded  %d  (embedding matches a flat "
+              "patch >= 0.5 — carries no identity)"
+              % res["degenerate_excluded"])
     print(" RE-IDENTIFIED              %d/%d  (%.1f%%)  [threshold %.2f]"
           % (res["reidentified"], res["compared"],
              100 * res["reid_rate"], SAME_PERSON))
