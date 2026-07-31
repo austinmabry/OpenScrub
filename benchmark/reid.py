@@ -8,7 +8,20 @@ harness attacks the redacted file directly.
 Protocol (each step exists because a naive version produced a wrong
 number on real footage):
 
-  1. CANDIDATES   scan the ORIGINAL with a low-threshold face pass.
+  0. ALIGN        redact FIRST, then attack against the pipeline's
+                  NORMALIZED copy when one was produced. A real VFR
+                  clip (avg 55.78 fps, 1392 frames) was normalized to
+                  CFR 56 fps / 1397 frames by the pipeline; the oracle
+                  read the ORIGINAL's timeline, so every box drifted
+                  off its face and the "findings" were curtain and
+                  trombone slides matching themselves. HDR output is
+                  forced to SDR for the same reason: the attack must
+                  compare like with like. Reference and redacted are
+                  decoded in LOCKSTEP (no seeks — seeks lie on some
+                  codec/build combos). If no timeline-matching
+                  reference exists, the harness REFUSES to grade
+                  rather than compare misaligned frames.
+  1. CANDIDATES   scan the reference with a low-threshold face pass.
   2. CONFIRM      re-test every candidate at the standard threshold.
                   The low-threshold pass alone "found" smiley-face
                   banner flags, the back of a head, and a birthday cake
@@ -98,11 +111,12 @@ def _iou(a, b):
 
 
 def confirmed_faces(video, every=0.5, low=0.3, confirm=0.6):
-    """[(t, box)] real faces + count of unconfirmed low-threshold
-    candidates. Candidates come from the low pass (over-find), but only
-    boxes the STANDARD-threshold detector agrees on count as attack
-    surface — see the module docstring for what the low pass alone
-    'found'."""
+    """[(frame_idx, t, box)] real faces + count of unconfirmed
+    low-threshold candidates. Candidates come from the low pass
+    (over-find), but only boxes the STANDARD-threshold detector agrees
+    on count as attack surface — see the module docstring for what the
+    low pass alone 'found'. Faces carry their FRAME INDEX so the attack
+    can decode reference and redacted in lockstep instead of seeking."""
     det_low = openscrub.FaceDetector(_Quiet(), thresh=low)
     det_std = openscrub.FaceDetector(_Quiet(), thresh=confirm)
     cap = cv2.VideoCapture(video)
@@ -118,12 +132,40 @@ def confirmed_faces(video, every=0.5, low=0.3, confirm=0.6):
             conf = [c[:4] for c in det_std.find(fr)]
             for b in cand:
                 if any(_iou(b, c) >= 0.4 for c in conf):
-                    out.append((n / fps, [int(v) for v in b]))
+                    out.append((n, n / fps, [int(v) for v in b]))
                 else:
                     unconfirmed += 1
         n += 1
     cap.release()
     return out, unconfirmed, fps
+
+
+def _frame_count(path):
+    cap = cv2.VideoCapture(path)
+    n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    cap.release()
+    return n
+
+
+def _pick_reference(video, dst):
+    """The video the attack must treat as ground truth: the pipeline's
+    normalized copy when normalization happened (VFR->CFR resample,
+    HDR->SDR tonemap — both live NEXT TO the output), else the original.
+    Chosen by TIMELINE: the reference must have the same frame count as
+    the redacted output, or boxes land on the wrong moments (the VFR bug
+    this function exists for). Returns (path, why) or (None, reason)."""
+    n_dst = _frame_count(dst)
+    base = os.path.join(os.path.dirname(os.path.abspath(dst)),
+                        os.path.splitext(os.path.basename(video))[0])
+    candidates = [(base + ".sdr.mp4", "tone-mapped CFR scan copy"),
+                  (base + ".cfr.mp4", "CFR-normalized copy"),
+                  (video, "original")]
+    for path, why in candidates:
+        if os.path.exists(path) and abs(_frame_count(path) - n_dst) <= 2:
+            return path, why
+    return None, ("no reference matches the output's timeline "
+                  "(%d frames): original has %d"
+                  % (n_dst, _frame_count(video)))
 
 
 def link_tracks(faces, max_gap=1.6, iou_min=0.25):
@@ -150,21 +192,16 @@ def run(video, out_dir, mode, coverage, categories, extra, redacted=None):
     dst = redacted or os.path.join(out_dir, base + "_redacted.mp4")
     report = os.path.join(out_dir, base + "_report.json")
 
-    print("  candidate+confirm pass on the original ...", end="", flush=True)
-    faces, unconfirmed, fps = confirmed_faces(video)
-    tracks = link_tracks(faces)
-    print(" %d confirmed faces in %d track(s), %d unconfirmed "
-          "low-threshold candidates excluded"
-          % (len(faces), len(tracks), unconfirmed))
-    if not faces:
-        print("  no confirmed faces — use a clip with visible faces.")
-        return None
-
+    # Redact FIRST: the pipeline may normalize the input (VFR->CFR, HDR
+    # tonemap), and the attack must run on the normalized timeline. HDR
+    # output is forced to SDR so reference and redacted share one color
+    # domain — this changes encoding, never redaction strength.
     if redacted is None:
         parser = openscrub.build_parser()
         args = parser.parse_args([video, "-o", dst, "--report", report,
                                   "--categories", categories, "--mode", mode,
-                                  "--coverage", coverage, *extra])
+                                  "--coverage", coverage,
+                                  "--hdr-output", "sdr", *extra])
         args = openscrub._prep_args(args, parser)
         print("  redacting (mode=%s coverage=%s) ..." % (mode, coverage),
               end="", flush=True)
@@ -174,41 +211,69 @@ def run(video, out_dir, mode, coverage, categories, extra, redacted=None):
     else:
         print("  reusing redacted file: %s" % redacted)
 
+    reference, why = _pick_reference(video, dst)
+    if reference is None:
+        print("  REFUSING to grade: %s.\n  A misaligned reference compares "
+              "boxes against the wrong frames and\n  produces confident "
+              "nonsense — re-run without --redacted so the\n  pipeline's "
+              "normalized copy is available." % why)
+        return None
+    if reference != video:
+        print("  attacking against the %s (input was normalized)" % why)
+
+    print("  candidate+confirm pass on the reference ...", end="", flush=True)
+    faces, unconfirmed, fps = confirmed_faces(reference)
+    tracks = link_tracks([(t, b) for _n, t, b in faces])
+    print(" %d confirmed faces in %d track(s), %d unconfirmed "
+          "low-threshold candidates excluded"
+          % (len(faces), len(tracks), unconfirmed))
+    if not faces:
+        print("  no confirmed faces — use a clip with visible faces.")
+        return None
+
     rec = _sface()
     det = openscrub.FaceDetector(_Quiet(), thresh=0.5)
-    cap_o, cap_r = cv2.VideoCapture(video), cv2.VideoCapture(dst)
     rows = []
     track_of = {}
     for ti, tr in enumerate(tracks):
         for t, box in tr:
             track_of[(t, tuple(box))] = ti
     embeds_by_track = {}
-    for t, box in faces:
-        cap_o.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
-        cap_r.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
+    by_frame = {}
+    for n, t, box in faces:
+        by_frame.setdefault(n, []).append((t, box))
+    # LOCKSTEP decode: same frame index in both files, no seeks (seeks
+    # land on the wrong frame on some codec/build combos and did exactly
+    # that here before the frame-count check existed).
+    cap_o, cap_r = cv2.VideoCapture(reference), cv2.VideoCapture(dst)
+    n = 0
+    while True:
         ok_o, fo = cap_o.read()
         ok_r, fr = cap_r.read()
         if not (ok_o and ok_r):
-            continue
-        h, w = fo.shape[:2]
-        x1, y1 = max(0, box[0]), max(0, box[1])
-        x2, y2 = min(w, box[2]), min(h, box[3])
-        if x2 <= x1 or y2 <= y1:
-            continue
-        co, cr = fo[y1:y2, x1:x2], fr[y1:y2, x1:x2]
-        eo, er = _embed(rec, co), _embed(rec, cr)
-        sim = _cos(eo, er)
-        pixdiff = float(np.abs(co.astype(np.int16)
-                               - cr.astype(np.int16)).mean())
-        still = len(det.find(fr[max(0, y1 - 20):y2 + 20,
-                                max(0, x1 - 20):x2 + 20])) > 0
-        ti = track_of.get((t, tuple(box)))
-        if eo is not None and ti is not None:
-            embeds_by_track.setdefault(ti, []).append(eo)
-        rows.append({"t": round(t, 2), "box": [x1, y1, x2, y2], "track": ti,
-                     "similarity": None if sim is None else round(sim, 4),
-                     "pix_diff": round(pixdiff, 2),
-                     "still_detectable": bool(still)})
+            break
+        for t, box in by_frame.get(n, []):
+            h, w = fo.shape[:2]
+            x1, y1 = max(0, box[0]), max(0, box[1])
+            x2, y2 = min(w, box[2]), min(h, box[3])
+            if x2 <= x1 or y2 <= y1:
+                continue
+            co, cr = fo[y1:y2, x1:x2], fr[y1:y2, x1:x2]
+            eo, er = _embed(rec, co), _embed(rec, cr)
+            sim = _cos(eo, er)
+            pixdiff = float(np.abs(co.astype(np.int16)
+                                   - cr.astype(np.int16)).mean())
+            still = len(det.find(fr[max(0, y1 - 20):y2 + 20,
+                                    max(0, x1 - 20):x2 + 20])) > 0
+            ti = track_of.get((t, tuple(box)))
+            if eo is not None and ti is not None:
+                embeds_by_track.setdefault(ti, []).append(eo)
+            rows.append({"t": round(t, 2), "box": [x1, y1, x2, y2],
+                         "track": ti,
+                         "similarity": None if sim is None else round(sim, 4),
+                         "pix_diff": round(pixdiff, 2),
+                         "still_detectable": bool(still)})
+        n += 1
     cap_o.release()
     cap_r.release()
 
@@ -237,6 +302,7 @@ def run(video, out_dir, mode, coverage, categories, extra, redacted=None):
     return {
         "video": os.path.basename(video), "mode": mode,
         "coverage": coverage,
+        "reference": os.path.basename(reference),
         "faces": len(rows), "tracks": len(tracks),
         "unconfirmed_candidates": unconfirmed,
         "still_detectable": sum(1 for r in rows if r["still_detectable"]),

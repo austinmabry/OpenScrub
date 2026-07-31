@@ -56,7 +56,15 @@ Key classes/functions (locate with grep, line numbers drift):
 - `FaceDetector` — three tiers: optional ONNX model (CenterFace or SCRFD,
   auto-recognized by output-layer count: 4 → centerface, 6/9 → scrfd;
   decoders validated against reference output) → YuNet DNN
-  (auto-downloaded ~230KB, zero-setup default) → Haar fallback. Model
+  (auto-downloaded ~230KB, zero-setup default) → Haar fallback.
+  EDGE ASSIST: find() mirror-pads the frame (BORDER_REFLECT_101,
+  `_edge_pad` = max(48, 8% long side)) before every backend — a face
+  half out of the frame border reflects into a symmetric full face the
+  detectors score normally (a real border subject went entirely
+  undetected on benchmark footage while 20 interior faces were found).
+  Boxes map back by subtracting the pad; detections <25% inside the
+  real frame are mirror phantoms of interior faces and are dropped.
+  Union-only on real footage (819 faces vs 795 pre-assist, same clip). Model
   resolution: `--face-model` → `$OPENSCRUB_FACE_MODEL` → built-in. A model
   that fails to load falls back LOUDLY to YuNet. An optional model runs
   ALONGSIDE YuNet and detections are UNIONED (nms-merged) — a model

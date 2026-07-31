@@ -5081,36 +5081,64 @@ class FaceDetector:
         dframe = (cv2.resize(frame, (max(1, int(w * s)), max(1, int(h * s))))
                   if s < 1.0 else frame)
         dh, dw = dframe.shape[:2]
+        # EDGE ASSIST: mirror-pad before detecting. A face clipped by the
+        # frame border shows the detector half a face, and every backend
+        # scores that below threshold — a real subject half out of the
+        # right edge went completely undetected on benchmark footage while
+        # 20 interior faces were found. Reflection completes the clipped
+        # half with its own mirror image, which detectors score like a
+        # normal (symmetric) face sitting across the border. Boxes are
+        # mapped back below; anything living mostly in the pad is a mirror
+        # phantom of an interior face (which the normal pass already
+        # covers) and is dropped.
+        pad = self._edge_pad(dw, dh)
+        dframe = cv2.copyMakeBorder(dframe, pad, pad, pad, pad,
+                                    cv2.BORDER_REFLECT_101)
+        pdh, pdw = dframe.shape[:2]
         raw = []
         if self.net is not None or self.ort is not None:
             raw += (self._find_centerface(dframe) if self.arch == "centerface"
                     else self._find_scrfd(dframe))
         if self.yunet is not None:
-            if self.size != (dw, dh):
-                self.yunet.setInputSize((dw, dh))
-                self.size = (dw, dh)
+            if self.size != (pdw, pdh):
+                self.yunet.setInputSize((pdw, pdh))
+                self.size = (pdw, pdh)
             _, faces = self.yunet.detect(dframe)
             for f in (faces if faces is not None else []):
                 x, y, fw, fh, conf = f[0], f[1], f[2], f[3], float(f[-1])
                 raw.append([x, y, x + fw, y + fh, conf])
         if (raw or self.net is not None or self.ort is not None
                 or self.yunet is not None):
-            out = [(x1 / s, y1 / s, x2 / s, y2 / s, conf)
-                   for x1, y1, x2, y2, conf in _nms_boxes(raw)]
+            boxes = _nms_boxes(raw)
         else:
-            out = []
+            boxes = []
             gray = cv2.cvtColor(dframe, cv2.COLOR_BGR2GRAY)
             for (x, y, fw, fh) in self.haar.detectMultiScale(gray, 1.1, 5,
                                                              minSize=(36, 36)):
                 if 0.8 >= self.thresh:   # Haar has no score; gate by threshold
-                    out.append((x / s, y / s, (x + fw) / s,
-                                (y + fh) / s, 0.8))
+                    boxes.append((x, y, x + fw, y + fh, 0.8))
+        out = []
+        for x1, y1, x2, y2, conf in boxes:
+            x1, y1, x2, y2 = x1 - pad, y1 - pad, x2 - pad, y2 - pad
+            bw, bh = x2 - x1, y2 - y1
+            ix = max(0.0, min(x2, dw) - max(x1, 0))
+            iy = max(0.0, min(y2, dh) - max(y1, 0))
+            if bw <= 0 or bh <= 0 or ix * iy < 0.25 * bw * bh:
+                continue                 # mirror phantom, mostly in the pad
+            out.append((max(0, x1) / s, max(0, y1) / s,
+                        min(dw, x2) / s, min(dh, y2) / s, conf))
         expanded = []
         for x1, y1, x2, y2, conf in out:
             ex, ey = (x2 - x1) * self.expand, (y2 - y1) * self.expand
             expanded.append((max(0, x1 - ex), max(0, y1 - ey),
                              min(w, x2 + ex), min(h, y2 + ey), conf))
         return expanded
+
+    @staticmethod
+    def _edge_pad(dw, dh):
+        """Mirror-pad width for edge-clipped faces: covers faces up to
+        ~2x the pad in size whose visible sliver is narrower than the pad."""
+        return max(48, int(0.08 * max(dw, dh)))
 
     def _forward(self, blob):
         """Run the optional ONNX face model and return its output arrays as

@@ -2361,6 +2361,47 @@ def test_merge_tail_extends_through_supporting_scans():
     assert m.t_end == pytest.approx(0.8), m.t_end
 
 
+def test_face_detector_edge_assist_geometry():
+    """Detection runs on a mirror-padded frame so a face clipped by the
+    frame border (half out of frame — undetectable to every backend on
+    real benchmark footage) is completed by its own reflection. Boxes
+    map back by subtracting the pad; a detection living mostly IN the
+    pad is a mirror phantom of an interior face and must be dropped."""
+    class CB(openscrub.Callbacks):
+        def log(self, msg):
+            pass
+    fd = openscrub.FaceDetector(CB())
+    frame = np.full((400, 600, 3), 90, np.uint8)
+    pad = fd._edge_pad(600, 400)
+
+    class _Stub:
+        def __init__(self, faces):
+            self.faces = faces
+        def setInputSize(self, sz):
+            pass
+        def detect(self, img):
+            return None, np.array(self.faces, np.float32)
+
+    # a border-straddling detection (half real, half mirror) survives,
+    # clamped to the frame; a detection fully inside the pad is dropped
+    fd.yunet = _Stub([
+        [pad + 570, pad + 100, 60, 80, 0.9],   # face half off the right edge
+        [5, pad + 200, 40, 40, 0.9],           # phantom fully in the left pad
+    ])
+    fd.net = fd.ort = None
+    fd.size = None
+    boxes = [tuple(round(v) for v in b[:4]) for b in fd.find(frame)]
+    assert len(boxes) == 1, boxes
+    x1, y1, x2, y2 = boxes[0]
+    assert x2 == 600 and x1 >= 560, boxes    # clamped at the right border
+    # an interior detection maps back to its exact position
+    fd.yunet = _Stub([[pad + 100, pad + 120, 50, 60, 0.9]])
+    fd.size = None
+    (x1, y1, x2, y2, _c), = fd.find(frame)
+    assert abs(x1 - (100 - 50 * fd.expand)) < 1.5
+    assert abs(y1 - (120 - 60 * fd.expand)) < 1.5
+
+
 def test_blur_kernel_is_two_thirds_region():
     """Re-identification benchmark, close-up faces (200-750px): a
     1/3-width Gaussian left SFace similarity at 0.57-0.69 — above the
