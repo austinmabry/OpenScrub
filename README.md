@@ -557,7 +557,7 @@ values × 5 sampled frames):
     Frame leak rate:        0.00%  (0/320 sampled region-frames readable)
     Benign preservation:  100.0%   (43/43 non-PII samples left readable)
 
-Face re-identification (v1.0.78, default blur, SFace matcher, valid
+Face re-identification (v1.0.79, default blur, SFace matcher, valid
 same-person controls): **1 of 559 redacted faces re-identified (0.2 %)**
 across a handheld party clip at 1080p and native 4K, a public-domain
 close-up interview, and a mosaic-mode run — with mean post-redaction

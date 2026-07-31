@@ -98,7 +98,7 @@ where the answers are — see "Why the benchmark runs unassisted" below.
 A 100 % row on a fixed corpus means the corpus no longer finds leaks —
 not that leaks are impossible. The honest reading is the history below.
 
-### What building the benchmark caught (all fixed in 1.0.78)
+### What building the benchmark caught (all fixed in 1.0.78-1.0.79)
 
 The first runs of this harness measured the ONNX backend at **40.6 %
 recall with a 57.5 % frame leak rate**. Every point of the gap traced to
@@ -127,7 +127,7 @@ regression test:
 
 ## Measured: face re-identification
 
-OpenScrub v1.0.78, default blur mode, SFace matcher, same-person
+OpenScrub v1.0.79, default blur mode, SFace matcher, same-person
 threshold 0.55. "Re-identified" = the redacted face still matched the
 identity embedding taken from the unredacted original. All three rows
 have a valid control (the recognizer reliably re-identifies the same
@@ -168,7 +168,7 @@ was fixed twice along the way: VFR/HDR inputs are now attacked on the
 pipeline's normalized timeline (misaligned frames once produced
 confident nonsense — the "leaked faces" were a curtain), and
 non-discriminative crops are excluded by the flat-patch floor above.
-All numbers in this table were re-measured on the final 1.0.78 build
+All numbers in this table were re-measured on the 1.0.79 build
 after those fixes.
 
 Two candidate clips (a street scene with small oblique faces, a
