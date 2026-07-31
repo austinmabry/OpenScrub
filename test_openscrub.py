@@ -2415,9 +2415,14 @@ def test_blur_kernel_is_two_thirds_region():
     try:
         frame = np.full((400, 400, 3), 128, np.uint8)
         openscrub.blur_region(frame, 50, 50, 350, 350, "blur")
+        # narrow-but-tall frame-border sliver: the kernel must scale with
+        # the LONG side — width-scaled it hit the k=31 floor and border
+        # half-faces re-identified at 0.55-0.71 through the blur
+        openscrub.blur_region(frame, 0, 50, 40, 250, "blur")
     finally:
         openscrub._gauss_big = orig
     assert seen and seen[0] >= (2 * 300 // 3) | 1, seen
+    assert len(seen) == 2 and seen[1] >= (2 * 200 // 3) | 1, seen
 
 
 def test_group_lines_splits_columns():

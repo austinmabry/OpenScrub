@@ -2736,14 +2736,16 @@ def blur_region(frame, x1, y1, x2, y2, mode, shape="rect"):
         filled = cv2.resize(small, (x2 - x1, y2 - y1),
                             interpolation=cv2.INTER_NEAREST)
     else:
-        # kernel = 2/3 region width (was 1/3): the re-identification
-        # benchmark showed close-up faces (200-750px) surviving a 1/3-width
-        # blur at SFace similarity 0.57-0.69 — above the 0.55 same-person
-        # bar. At 2/3 width the same faces measure 0.11-0.23, at or below
-        # the cross-person chance floor: a blurred face carries no more
-        # identity than a random stranger's. Small faces were already safe
-        # (the 112px embed crop upsamples them); this closes the close-up.
-        k = max(31, ((2 * (x2 - x1) // 3) | 1))
+        # kernel = 2/3 of the region LONG SIDE (was 1/3 width, then 2/3
+        # width): the re-identification benchmark caught both steps. Close-up
+        # faces (200-750px) survived a 1/3-width blur at SFace similarity
+        # 0.57-0.69; 2/3 width dropped them to 0.11-0.23, at or below the
+        # cross-person chance floor. Then frame-border face SLIVERS (a
+        # 32x101 half-face at x=0) re-identified at 0.55-0.71 through the
+        # width-scaled kernel — a narrow-but-tall region got the k=31 floor
+        # against 100+px of content. Scaling by the long side drops the
+        # same slivers to 0.15-0.57. Square faces are unaffected.
+        k = max(31, ((2 * max(x2 - x1, y2 - y1) // 3) | 1))
         filled = _gauss_big(roi, k)
     if shape == "ellipse":
         # elliptical mask hugs a face: no smeared background corners, which
@@ -2822,7 +2824,7 @@ def blur_silhouette(frame, x1, y1, x2, y2, mode, polys, poly_box,
                            interpolation=cv2.INTER_LINEAR)
         filled = cv2.resize(small, (rw, rh), interpolation=cv2.INTER_NEAREST)
     else:
-        k = max(31, ((2 * rw // 3) | 1))
+        k = max(31, ((2 * max(rw, rh) // 3) | 1))
         filled = _gauss_big(roi, k)
     cv2.copyTo(filled, mask, roi)
 
@@ -3130,7 +3132,7 @@ def _blur_yuv10(y, u, v, x1, y1, x2, y2, mode, shape="rect"):
             filled = cv2.resize(small, (px2 - px1, py2 - py1),
                                 interpolation=cv2.INTER_NEAREST)
         else:
-            k = max(kmin, ((2 * (px2 - px1) // 3) | 1))
+            k = max(kmin, ((2 * max(px2 - px1, py2 - py1) // 3) | 1))
             filled = _gauss_big(roi, k)
         if shape == "ellipse":
             rw, rh = px2 - px1, py2 - py1
@@ -3210,7 +3212,7 @@ def _blur_silhouette_yuv10(y, u, v, x1, y1, x2, y2, mode, polys,
             filled = cv2.resize(small, (px2 - px1, py2 - py1),
                                 interpolation=cv2.INTER_NEAREST)
         else:
-            k = max(kmin, ((2 * (px2 - px1) // 3) | 1))
+            k = max(kmin, ((2 * max(px2 - px1, py2 - py1) // 3) | 1))
             filled = _gauss_big(roi, k)
         m = mask
         if m.shape != roi.shape:            # chroma planes are half-res
