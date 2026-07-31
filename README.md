@@ -549,7 +549,7 @@ own numbers instead of trusting ours. It measures what a reader of the
 output actually cares about: is the planted PII still *readable*, and
 can a face recognizer still *identify* the person?
 
-Text PII (v1.0.78, CPU, corpus v2 — 8 scenarios including dark mode,
+Text PII (v1.0.79, CPU, corpus v2 — 8 scenarios including dark mode,
 sensor noise, 2.5° rotation and 120 kbps re-compression; 64 planted
 values × 5 sampled frames):
 

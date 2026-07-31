@@ -71,7 +71,7 @@ people's faces and publish the frames.
 
 ## Measured: text PII
 
-OpenScrub v1.0.78, CPU only (no GPU), corpus v2 (8 scenarios), 5 frames
+OpenScrub v1.0.79, CPU only (no GPU), corpus v2 (8 scenarios), 5 frames
 sampled per planted value. Higher is better for recall and benign
 preservation; lower is better for leak rate:
 
