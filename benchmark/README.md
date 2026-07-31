@@ -135,21 +135,41 @@ faces in the *unredacted* footage, so a 0 % result is meaningful):
 
 | Footage | Faces attacked | Re-identified | Still detected as a face | Control |
 |---|---|---|---|---|
-| Handheld 1080p party clip, five subjects, constant motion ([Pexels 7100826](https://www.pexels.com/video/7100826/), downscaled from 4K) | 125 | **0 (0.0 %)** | 0.0 % | 0.888 |
-| The same party clip at native 4K (3840×2160 — larger faces, more recoverable detail) | 128 | **0 (0.0 %)** | 0.0 % | 0.887 |
-| Public-domain interview, large frontal close-up faces, 1080×1920 ([Wikimedia Commons](https://commons.wikimedia.org/wiki/File:Interview_with_a_Marshall_Center_professor_(999984).webm)) | 133 | **0 (0.0 %)** | 0.7 % | 0.691 |
-| Same party clip, `--mode mosaic` | 125 | **0 (0.0 %)** | 4.8 % | 0.888 |
+| Handheld 1080p party clip, five subjects, constant motion ([Pexels 7100826](https://www.pexels.com/video/7100826/), downscaled from 4K) | 125 | **0 (0.0 %)** | 0.8 % | 0.880 |
+| The same party clip at native 4K (3840×2160 — larger faces, more recoverable detail) | 129 | **0 (0.0 %)** | 2.3 % | 0.895 |
+| Public-domain interview, large frontal close-up faces, 1080×1920 ([Wikimedia Commons](https://commons.wikimedia.org/wiki/File:Interview_with_a_Marshall_Center_professor_(999984).webm)) | 203 | **1 of 180 graded (0.6 %)** ¹ | 0.5 % | 0.695 |
+| Same party clip, `--mode mosaic` | 125 | **0 (0.0 %)** | 4.8 % | 0.880 |
+
+¹ 4 of the 203 attacked crops were excluded as *degenerate* (their
+embeddings match a featureless flat patch at ≥ 0.5 — they carry no
+identity to protect or leak; excluded openly, like unconfirmed
+candidates). The one residual match is an extreme close-up crop where
+the face itself IS covered — the 0.63 similarity rides on the
+subject's uniform insignia and neck below the blur. Face redaction
+covered the face; identifying clothing is what the `person` category
+and `--coverage concealed` exist for. We publish it rather than
+excluding it because the recognizer scored it, and the rule here is
+that the numbers include what the attack found.
 
 Mean post-redaction similarity sat **below the cross-person chance
-floor** in all three runs — a redacted face matches its own original no
+floor** in every run — a redacted face matches its own original no
 better than a random stranger's face does.
 
-This table also records a caught defect: the interview clip's close-up
+This table also records caught defects. The interview clip's close-up
 faces (200–750 px) were initially re-identified at **8.3 % straight
 through the old blur** — a large face keeps enough low-frequency
-identity when the blur kernel is 1/3 of the region. The kernel is now
-2/3 of the region (pinned by test), which also drove
-"still detected as a face" from 99.2 % to 0 % on the party clip.
+identity when the blur kernel is 1/3 of the region; the kernel is now
+2/3 of the region's long side (pinned by test). Frame-border
+half-faces went **entirely undetected** by every detection backend
+until detection ran on a mirror-padded frame, and once detected, the
+narrow slivers re-identified through a width-scaled kernel — both
+fixed, both found by this harness on real footage. The harness itself
+was fixed twice along the way: VFR/HDR inputs are now attacked on the
+pipeline's normalized timeline (misaligned frames once produced
+confident nonsense — the "leaked faces" were a curtain), and
+non-discriminative crops are excluded by the flat-patch floor above.
+All numbers in this table were re-measured on the final 1.0.78 build
+after those fixes.
 
 Two candidate clips (a street scene with small oblique faces, a
 multi-person interview) produced **invalid controls** — the recognizer

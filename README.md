@@ -558,11 +558,14 @@ values × 5 sampled frames):
     Benign preservation:  100.0%   (43/43 non-PII samples left readable)
 
 Face re-identification (v1.0.78, default blur, SFace matcher, valid
-same-person controls): **0 of 511 redacted faces re-identified** across
-a handheld party clip at 1080p and native 4K, a public-domain close-up
-interview, and a mosaic-mode run — with post-redaction similarity below the
-*cross-person chance floor*, i.e. a redacted face matches its own
-original no better than a stranger's face does.
+same-person controls): **1 of 559 redacted faces re-identified (0.2 %)**
+across a handheld party clip at 1080p and native 4K, a public-domain
+close-up interview, and a mosaic-mode run — with mean post-redaction
+similarity below the *cross-person chance floor*, i.e. a redacted face
+matches its own original no better than a stranger's face does. The one
+residual is published, not hidden: an extreme close-up whose face IS
+covered — the match rides on uniform insignia below the blur (what the
+`person` category exists for).
 
 Numbers on a fixed corpus mean the corpus no longer finds leaks — not
 that leaks are impossible. The benchmark README lists every defect the
