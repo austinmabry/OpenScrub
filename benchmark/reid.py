@@ -30,6 +30,14 @@ number on real footage):
                   "re-identified" rate with things that are not faces.
                   Confirmed faces are the attack surface; the
                   unconfirmed count is reported for transparency.
+                  Confirmation transfers IDENTITY, not GEOMETRY: the
+                  graded box is the candidate CLIPPED to its confirming
+                  faces' neighborhood (union + 25 %). A real 190x490
+                  candidate at 0.38 confidence was confirmed by the
+                  properly-blurred face at its bottom (IoU 0.49) and
+                  then "re-identified" at 0.70 — on the subject's
+                  bucket hat and the foliage above the face, content
+                  no face detector ever endorsed.
   3. TRACKS       IoU-link confirmed faces over time into per-person
                   tracks (multi-person footage!).
   4. CONTROL      same-track original-vs-original similarity. If the
@@ -143,13 +151,34 @@ def confirmed_faces(video, every=0.5, low=0.3, confirm=0.6):
             cand = [c[:4] for c in det_low.find(fr)]
             conf = [c[:4] for c in det_std.find(fr)]
             for b in cand:
-                if any(_iou(b, c) >= 0.4 for c in conf):
-                    out.append((n, n / fps, [int(v) for v in b]))
-                else:
-                    unconfirmed += 1
+                stds = [c for c in conf if _iou(b, c) >= 0.4]
+                if stds:
+                    rb = _clip_to_confirmed(b, stds)
+                    if rb[2] - rb[0] >= 12 and rb[3] - rb[1] >= 12:
+                        out.append((n, n / fps, rb))
+                        continue
+                unconfirmed += 1
         n += 1
     cap.release()
     return out, unconfirmed, fps
+
+
+def _clip_to_confirmed(cand, stds, expand=0.25):
+    """Confirmation transfers identity, not geometry: grade the candidate
+    only where it stays near the standard-threshold faces that confirmed
+    it (their union grown 25 %). A loose 0.3-threshold candidate can
+    extend far past the face it overlaps — on real footage a 190x490
+    candidate was 51 % hat-and-foliage above a correctly blurred face,
+    and 'matched' at 0.70 on the hat. Tight candidates are unchanged
+    (the clip region contains them entirely)."""
+    ux1 = min(s[0] for s in stds)
+    uy1 = min(s[1] for s in stds)
+    ux2 = max(s[2] for s in stds)
+    uy2 = max(s[3] for s in stds)
+    ex = (ux2 - ux1) * expand
+    ey = (uy2 - uy1) * expand
+    return [int(max(cand[0], ux1 - ex)), int(max(cand[1], uy1 - ey)),
+            int(min(cand[2], ux2 + ex)), int(min(cand[3], uy2 + ey))]
 
 
 def _frame_count(path):
