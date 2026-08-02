@@ -1299,6 +1299,8 @@ def smooth_dense_tracks(dets, fps, video, cum=None, win_start=0.0, cb=None):
     def _fill_to(k_end):
         # sequential read, caching grays for needed frames; never seeks
         while _seq["pos"] <= k_end:
+            if _seq["pos"] % 90 == 0 and cb.cancelled():
+                raise PipelineCancelled()
             ok, fr = cap.read()
             if not ok:
                 _seq["pos"] = 10 ** 9    # EOF: stop trying
@@ -1342,6 +1344,8 @@ def smooth_dense_tracks(dets, fps, video, cum=None, win_start=0.0, cb=None):
     _order = sorted(tracks.items(),
                     key=lambda kv: min(d.t_start for d in kv[1]))
     for n_done, (tid, samples) in enumerate(_order):
+        if cb.cancelled():
+            raise PipelineCancelled()
         _evict_below(max(0, int((min(d.t_start for d in samples)
                                  - LEAD_MAX - 0.3) * _fps_g)))
         cb.progress("post", n_done, n_total)
@@ -1730,7 +1734,7 @@ def _iou(a, b):
 
 
 def _track_person_dense(video, box, t_ref, t0, t1, det, log,
-                        step_frames=2):
+                        step_frames=2, cancelled=None):
     """Follow the PERSON inside a user-drawn box using the person
     detector itself: per-frame detections give body-tight boxes (and
     silhouette polygons from -seg models), so the blur hugs the body
@@ -1884,6 +1888,8 @@ def _track_person_dense(video, box, t_ref, t0, t1, det, log,
                 # step (from frame ZERO on a single-keyframe export)
                 rev = _RevReader(cap, fps)
             while True:
+                if cancelled is not None and cancelled():
+                    raise PipelineCancelled()
                 t2 = t + direction * step
                 if t2 < t0 - 1e-6 or t2 > t1 + 1e-6:
                     break
@@ -2308,7 +2314,8 @@ def track_manual_region(video, box, t_ref, t0, t1, cb=None,
             # 2-frame cadence the outline visibly STEPS/flickers at half
             # the frame rate (real footage) — detect EVERY frame instead
             ps = _track_person_dense(video, box, t_ref, t0, t1,
-                                     person_det, log, step_frames=1)
+                                     person_det, log, step_frames=1,
+                                     cancelled=(cb.cancelled if cb else None))
         except Exception as e:
             log("      track: person-detector path failed (%s) — using "
                 "the generic tracker" % e)
@@ -2383,6 +2390,8 @@ def track_manual_region(video, box, t_ref, t0, t1, cb=None,
                 # step (from frame ZERO on a single-keyframe export)
                 rev = _RevReader(cap, fps)
             while True:
+                if cb is not None and cb.cancelled():
+                    raise PipelineCancelled()
                 t2 = t + direction * step
                 if t2 < t0 - 1e-6 or t2 > t1 + 1e-6:
                     break
@@ -2634,6 +2643,8 @@ def group_persons(dets, video, cb=None):
 
     feats_by = {}
     for n_done, (idx, tid, d) in enumerate(reqs):
+        if cb.cancelled():
+            raise PipelineCancelled()
         if time.time() - _last_log >= 3.0:
             _last_log = time.time()
             cb.log("        …%d/%d face samples embedded"
@@ -5948,15 +5959,39 @@ def normalize_vfr(args, cb):
                   if tonemap else [])
         attempts = ([["-fps_mode", "cfr", "-r", str(target)],
                      ["-vsync", "cfr", "-r", str(target)]] if cfr else [[]])
+        stderr_tail = ""
         for cfrargs in attempts:
-            p = subprocess.run(["ffmpeg", "-y", "-loglevel", "error",
-                                "-i", inp, *cfrargs, *tmargs, *vargs,
-                                *(extra or []), "-c:a", "copy", outp],
-                               capture_output=True, text=True)
+            # Popen + poll, NOT subprocess.run: these encodes (VFR->CFR
+            # resample, HDR tonemap) run for MINUTES on 4K input, and a
+            # blocking run() made the Cancel button dead for the whole
+            # "preparing" stage — a real user clicked it ten times.
+            # On cancel the partial output is DELETED so the mtime cache
+            # can never adopt a truncated copy.
+            p = subprocess.Popen(["ffmpeg", "-y", "-loglevel", "error",
+                                  "-i", inp, *cfrargs, *tmargs, *vargs,
+                                  *(extra or []), "-c:a", "copy", outp],
+                                 stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, text=True)
+            while True:
+                try:
+                    _, err = p.communicate(timeout=0.5)
+                    break
+                except subprocess.TimeoutExpired:
+                    if cb.cancelled():
+                        p.terminate()
+                        try:
+                            p.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            p.kill()
+                        try:
+                            os.remove(outp)
+                        except OSError:
+                            pass
+                        raise PipelineCancelled()
             if p.returncode == 0:
                 return
-        raise RuntimeError("input normalization failed: "
-                           + (p.stderr or "").strip()[-300:])
+            stderr_tail = (err or "").strip()[-300:]
+        raise RuntimeError("input normalization failed: " + stderr_tail)
 
     codec = nvenc_available(getattr(args, "encoder", "auto"), cb)
     sdr_vargs = ((["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "18"]

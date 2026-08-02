@@ -1736,8 +1736,13 @@ async function refresh(){
   let a="";
   if(j.phase=="scanning"||j.phase=="rendering")
    a=`<button class="danger" onclick="cancelJob()">Cancel</button>`;
-  if(j.phase=="review")
-   a=`<button onclick="loadReview()">Open review</button>`;
+  if(j.phase=="review"){
+   // no interstitial button: review is the ONLY next step after a scan,
+   // so open it directly — both on a live scan finishing and on
+   // selecting a job that is already waiting in review
+   a="";
+   loadReview();
+  }
   if(j.phase=="done"&&j.has_output)
    a=`<a href="api/jobs/${CUR}/download"><button>Download redacted video</button></a>
     <a href="api/jobs/${CUR}/report"><button class="sec">Download audit report</button></a>
