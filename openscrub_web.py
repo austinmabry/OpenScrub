@@ -653,10 +653,40 @@ def list_jobs():
     return jsonify([job_public(j) for j in js])
 
 
+DELETE_MARKER = ".delete_pending"
+
+
+def _reap_job_dir(jdir, jid="?", retries=2, delay=0.8):
+    """rmtree with retries. A just-closed review session can still hold a
+    streaming handle on the video for a moment (and holds a LOCK on it on
+    Windows), so the first attempt can fail transiently — a real user's
+    delete failed exactly this way."""
+    import shutil as _sh
+    err = None
+    for i in range(retries):
+        try:
+            _sh.rmtree(jdir)
+            return True
+        except OSError as e:
+            err = e
+            time.sleep(delay)
+    # log the detail server-side only: OSError text contains filesystem
+    # paths, which don't belong in an HTTP response body
+    print(f"[web] job {jid} delete incomplete: {err}", flush=True)
+    return False
+
+
 @app.route("/api/jobs/<jid>", methods=["DELETE"])
 def job_delete(jid):
     """Delete a job and every file it owns (upload, normalized video,
-    report, thumbnails, output). Running jobs must be cancelled first."""
+    report, thumbnails, output). Running jobs must be cancelled first.
+    Deletion is GUARANTEED, not merely attempted: if a file is still
+    held open (Windows locks, a streaming handle, a busy network share),
+    a marker is written and background retries + the startup and
+    retention sweeps finish the removal — the old behavior popped the
+    job from the list FIRST and then failed, leaving an orphaned folder
+    the UI could no longer reach, which rose from the dead as a zombie
+    review job at the next restart."""
     with JOBS_LOCK:
         job = JOBS.get(jid)
         if job is None:
@@ -664,18 +694,34 @@ def job_delete(jid):
         if job.get("phase") in ("queued", "scanning", "rendering",
                                 "queued_render"):
             abort(409, "job is queued or running — cancel it first")
-        JOBS.pop(jid, None)
-    import shutil as _sh
+    if _reap_job_dir(job["dir"], jid):
+        with JOBS_LOCK:
+            JOBS.pop(jid, None)
+        return jsonify({"ok": True})
+    # couldn't remove everything now: mark the dir so every future sweep
+    # (background retries below, startup, retention) knows it is condemned,
+    # take it out of the UI, and keep trying quietly
     try:
-        _sh.rmtree(job["dir"])
-    except OSError as e:
-        # log the detail server-side only: OSError text contains filesystem
-        # paths, which don't belong in an HTTP response body
-        print(f"[web] job {jid} delete incomplete: {e}", flush=True)
-        return jsonify({"ok": False,
-                        "error": "some job files could not be removed — "
-                                 "see the server log"}), 500
-    return jsonify({"ok": True})
+        with open(os.path.join(job["dir"], DELETE_MARKER), "w") as f:
+            f.write(str(time.time()))
+    except OSError:
+        pass
+    with JOBS_LOCK:
+        JOBS.pop(jid, None)
+
+    def _retry():
+        for _ in range(10):
+            time.sleep(30)
+            if not os.path.isdir(job["dir"]):
+                return
+            if _reap_job_dir(job["dir"], jid, retries=1):
+                print(f"[web] job {jid} delete completed on retry",
+                      flush=True)
+                return
+    threading.Thread(target=_retry, daemon=True).start()
+    return jsonify({"ok": True, "pending": True,
+                    "note": "some files were still in use; removal will "
+                            "complete automatically"})
 
 
 @app.route("/api/jobs/<jid>")
@@ -1656,7 +1702,11 @@ async function loadJobs(){
 async function delJob(id){
  if(!confirm("Delete this job and ALL of its files — upload, report, and rendered output?\\n\\nThis cannot be undone."))return;
  const r=await fetch("api/jobs/"+id,{method:"DELETE"});
- if(!r.ok){alert(await r.text());return;}
+ if(!r.ok){
+  let m="could not delete the job";
+  try{const e=await r.json();m=e.error||e.description||m;}catch(_){}
+  alert(m);return;
+ }
  if(CUR===id){CUR=null;if(POLL)clearInterval(POLL);detail.innerHTML="";}
  JOBSJSON="";loadJobs();
 }
@@ -3150,7 +3200,15 @@ def rehydrate_jobs():
     for jid in sorted(os.listdir(JOBS_DIR)):
         jdir = os.path.join(JOBS_DIR, jid)
         rep = os.path.join(jdir, "report.json")
-        if not os.path.isdir(jdir) or not os.path.exists(rep):
+        if not os.path.isdir(jdir):
+            continue
+        if os.path.exists(os.path.join(jdir, DELETE_MARKER)):
+            # the user deleted this job but a file was still held open at
+            # the time — finish the removal instead of resurrecting the
+            # job as a zombie (restarts release whatever held the lock)
+            _reap_job_dir(jdir, jid, retries=1)
+            continue
+        if not os.path.exists(rep):
             continue
         if jid in JOBS:
             continue
@@ -3188,7 +3246,12 @@ def retention_sweep(days):
     cutoff = time.time() - days * 86400
     for jid in os.listdir(JOBS_DIR):
         p = os.path.join(JOBS_DIR, jid)
-        if os.path.isdir(p) and os.path.getmtime(p) < cutoff:
+        if not os.path.isdir(p):
+            continue
+        if os.path.exists(os.path.join(p, DELETE_MARKER)):
+            _reap_job_dir(p, jid, retries=1)     # condemned: age-independent
+            continue
+        if os.path.getmtime(p) < cutoff:
             _sh.rmtree(p, ignore_errors=True)
             with JOBS_LOCK:
                 JOBS.pop(jid, None)
