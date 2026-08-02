@@ -1018,13 +1018,22 @@ def probe_camera_motion(path, sample_windows=14, pairs_per_window=4):
     win = None
     positions = ([int(total * i / sample_windows) for i in range(sample_windows)]
                  if total > sample_windows * (pairs_per_window + 1) else [0])
+    fps_p = cap.get(cv2.CAP_PROP_FPS) or 30.0
     for pos in positions:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, pos)
+        # verified positioning; positions ascend, so _grab_frame's
+        # forward-roll memory turns this into one sequential pass on
+        # files where seeking is slow (single-keyframe exports decode
+        # from frame zero on EVERY raw seek)
+        first = _grab_frame(cap, pos / fps_p, fps_p)
+        if first is None:
+            continue
         prev = None
-        for _ in range(pairs_per_window + 1):
-            ok, frame = cap.read()
-            if not ok:
-                break
+        frame = first
+        for i in range(pairs_per_window + 1):
+            if i > 0:
+                ok, frame = cap.read()
+                if not ok:
+                    break
             g = cv2.cvtColor(cv2.resize(frame, (320, max(2, int(
                 frame.shape[0] * 320 / frame.shape[1])))),
                 cv2.COLOR_BGR2GRAY).astype(np.float32)
@@ -1458,6 +1467,53 @@ def _vittrack_factory(log):
     return make
 
 
+_grab_state = {}     # id(cap) -> {"pos": next-frame idx or None, "slow": bool}
+
+
+class _RevReader:
+    """Chunked frame provider for BACKWARD iteration. Stepping backward
+    with one seek per frame decodes keyframe-to-target EVERY step — and a
+    real single-keyframe 4K export decodes from frame ZERO every step, so
+    a 10-second backward track cost hundreds of full-file decodes. This
+    reads the file in forward CHUNKS (one verified position + sequential
+    reads), serves frames from the chunk cache, and reloads the previous
+    chunk when iteration walks below it. Memory is bounded by `budget`;
+    chunk loads total at most a handful of file passes on the worst file
+    and exactly one seek per chunk on a healthy one."""
+
+    def __init__(self, cap, fps, budget_bytes=300 * 1024 * 1024):
+        self.cap, self.fps = cap, fps or 30.0
+        self.cache = {}
+        self.budget = budget_bytes
+        self.n = None
+
+    def get(self, t):
+        k = int(round(max(t, 0.0) * self.fps))
+        fr = self.cache.get(k)
+        if fr is not None:
+            return fr
+        lo = max(0, k - (self.n - 1 if self.n else 0))
+        f0 = _grab_frame(self.cap, lo / self.fps, self.fps)
+        if f0 is None:
+            return None
+        if self.n is None:
+            self.n = max(8, int(self.budget // max(1, f0.nbytes)))
+            lo = max(0, k - self.n + 1)
+            if lo != k:                  # re-position with the real chunk
+                f0 = _grab_frame(self.cap, lo / self.fps, self.fps)
+                if f0 is None:
+                    return None
+        self.cache = {lo: f0}
+        idx = lo
+        while idx < k:
+            ok, f = self.cap.read()
+            if not ok:
+                break
+            idx += 1
+            self.cache[idx] = f
+        return self.cache.get(k)
+
+
 def _grab_frame(cap, t, fps):
     """Fetch the frame at time t from an open VideoCapture, ROBUSTLY.
 
@@ -1476,6 +1532,11 @@ def _grab_frame(cap, t, fps):
     file. Returns the frame or None."""
     fps = fps or 30.0
     target = int(round(max(t, 0.0) * fps))
+    st = _grab_state.setdefault(id(cap), {"pos": None, "slow": False})
+
+    def _done(fr):
+        st["pos"] = target + 1          # cap will read target+1 next
+        return fr
 
     def _pts_frame():
         # index of the frame just decoded, from the reported packet PTS;
@@ -1500,16 +1561,39 @@ def _grab_frame(cap, t, fps):
             fr, got = f, got + 1
         return fr
 
+    # FORWARD ROLL, no seek: when the capture's position is known (from a
+    # prior verified grab) and the target is at/ahead of it, reading
+    # forward is always correct and never worse than seeking. On a real
+    # single-keyframe 4K export every seek decoded from frame ZERO — the
+    # demuxer has no closer keyframe to land on — so ascending access
+    # patterns (walk-backs' spans, embedding grabs, probes) went
+    # quadratic. Once a seek MEASURES slow (>2s) the file is marked and
+    # any forward-reachable target rolls instead.
+    if st["pos"] is not None and 0 <= target - st["pos"] + 1 <= (
+            10 ** 9 if st["slow"] else 300):
+        got = st["pos"] - 1
+        fr = _roll_to(None, got)
+        # the stored position can be STALE (callers may raw-read the same
+        # cap between grabs; id() can be recycled after release) — accept
+        # the roll only when the landed frame's own PTS confirms it, and
+        # fall through to the seek path otherwise
+        if fr is not None and abs(_pts_frame() - target) <= 1:
+            return _done(fr)
+        st["pos"] = None                # stale/EOF: state unknown
+
+    _t0 = time.time()
     cap.set(cv2.CAP_PROP_POS_MSEC, max(t, 0.0) * 1000)
     ok, fr = cap.read()
+    if time.time() - _t0 > 2.0:
+        st["slow"] = True
     if ok and fr is not None:
         got = _pts_frame()
         if got < 0 or abs(got - target) <= 1:
-            return fr                   # verified (or unverifiable) hit
+            return _done(fr)            # verified (or unverifiable) hit
         if got < target:
             fr = _roll_to(fr, got)      # landed early: walk the gap
             if fr is not None:
-                return fr
+                return _done(fr)
         # landed past the target (or the walk hit EOF): try from earlier
     for back in (int(fps), int(4 * fps), int(12 * fps), target):
         start = max(0, target - back)
@@ -1525,7 +1609,8 @@ def _grab_frame(cap, t, fps):
             continue                    # snapped past: seek earlier
         fr = _roll_to(fr, got)
         if fr is not None:
-            return fr
+            return _done(fr)
+    st["pos"] = None
     return None
 
 
@@ -1792,6 +1877,12 @@ def _track_person_dense(video, box, t_ref, t0, t1, det, log,
                 # robust prime: positions the decoder just past t_ref's
                 # frame even when random POS_MSEC seek fails on this file
                 _grab_frame(cap, t_ref, fps)
+                rev = None
+            else:
+                # backward: chunked forward reads served in reverse — a
+                # per-step backward seek decodes keyframe-to-target every
+                # step (from frame ZERO on a single-keyframe export)
+                rev = _RevReader(cap, fps)
             while True:
                 t2 = t + direction * step
                 if t2 < t0 - 1e-6 or t2 > t1 + 1e-6:
@@ -1805,7 +1896,7 @@ def _track_person_dense(video, box, t_ref, t0, t1, det, log,
                             break
                         fr = f0
                 else:
-                    fr = _frame(t2)
+                    fr = rev.get(t2)
                 if fr is None:
                     break
                 # 1. PROPAGATE the pixel anchor (MaskAnyone principle:
@@ -2285,6 +2376,12 @@ def track_manual_region(video, box, t_ref, t0, t1, cb=None,
                 # robust prime: positions the decoder just past t_ref's
                 # frame even when random POS_MSEC seek fails on this file
                 _grab_frame(cap, t_ref, fps)
+                rev = None
+            else:
+                # backward: chunked forward reads served in reverse — a
+                # per-step backward seek decodes keyframe-to-target every
+                # step (from frame ZERO on a single-keyframe export)
+                rev = _RevReader(cap, fps)
             while True:
                 t2 = t + direction * step
                 if t2 < t0 - 1e-6 or t2 > t1 + 1e-6:
@@ -2298,7 +2395,7 @@ def track_manual_region(video, box, t_ref, t0, t1, cb=None,
                             break
                         fr = fr0_
                 else:
-                    fr = _frame(t2)
+                    fr = rev.get(t2)
                 if fr is None:
                     break
                 ok, bb = trk.update(cv2.resize(fr, None,
@@ -2544,23 +2641,40 @@ def group_persons(dets, video, cb=None):
         fr = _fetch(idx)
         if fr is None:
             continue
-        det.setInputSize((fr.shape[1], fr.shape[0]))
-        _, rows = det.detect(fr)
-        if rows is None:
-            continue
         sb = (d.cbox[0] + d.aoff[0], d.cbox[1] + d.aoff[1],
               d.cbox[2] + d.aoff[0], d.cbox[3] + d.aoff[1])
+        # re-detect in a CROP around the known box, not the full frame:
+        # only detections overlapping sb are ever used (IoU gate below),
+        # and full-frame YuNet at 4K cost seconds per sample — 225
+        # samples of it was the third hotspot the single-keyframe export
+        # exposed. The crop is the box grown ~1.5x on each side, so a
+        # slightly-shifted re-detection still lands inside.
+        fh, fw = fr.shape[:2]
+        mw = max(48, int(1.5 * (sb[2] - sb[0])))
+        mh = max(48, int(1.5 * (sb[3] - sb[1])))
+        ox1 = max(0, int(sb[0]) - mw)
+        oy1 = max(0, int(sb[1]) - mh)
+        ox2 = min(fw, int(sb[2]) + mw)
+        oy2 = min(fh, int(sb[3]) + mh)
+        crop = fr[oy1:oy2, ox1:ox2]
+        if crop.size == 0:
+            continue
+        det.setInputSize((crop.shape[1], crop.shape[0]))
+        _, rows = det.detect(crop)
+        if rows is None:
+            continue
+        sb_rel = (sb[0] - ox1, sb[1] - oy1, sb[2] - ox1, sb[3] - oy1)
         rbest, riou = None, 0.2
         for r in rows:
             rb = (r[0], r[1], r[0] + r[2], r[1] + r[3])
-            iou = _box_iou(rb, sb)
+            iou = _box_iou(rb, sb_rel)
             if iou > riou:
                 rbest, riou = r, iou
         if rbest is None:
             continue
         if float(rbest[2]) < 32 or float(rbest[3]) < 32:
             continue        # too small to identify: noise embedding
-        f = rec.feature(rec.alignCrop(fr, rbest)).flatten()
+        f = rec.feature(rec.alignCrop(crop, rbest)).flatten()
         n = float(np.linalg.norm(f))
         if n > 0:
             feats_by.setdefault(tid, []).append(f / n)
