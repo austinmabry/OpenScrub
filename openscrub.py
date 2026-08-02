@@ -2489,45 +2489,85 @@ def group_persons(dets, video, cb=None):
     rec = _make_sface(sface)
     det = _make_yunet(yunet, (320, 320), 0.5)
     cap = cv2.VideoCapture(video)
+    fpsv = cap.get(cv2.CAP_PROP_FPS) or 30.0
     cb.log("      person grouping: matching %d face track(s) by identity…"
            % len(tracks))
     _last_log = time.time()
-    embs = {}
-    for n_done, (tid, samples) in enumerate(tracks.items()):
-        if time.time() - _last_log >= 3.0:
-            _last_log = time.time()
-            cb.log("        …track %d/%d embedded"
-                   % (n_done + 1, len(tracks)))
+    # Collect every needed frame up front and fetch in ASCENDING order
+    # with forward-only decoding. Per-sample seeks decoded a real
+    # single-keyframe 4K export from frame ZERO on every embedding grab
+    # (the second quadratic site that file exposed, after the onset
+    # walk-back): 3 grabs x 75 tracks of full-file decodes. Sorted
+    # forward reads cost at most one pass of the file; on files where
+    # seeking IS cheap the first large jump still seeks, and only a
+    # measured-slow seek (>2 s) switches to roll-forward.
+    reqs = []
+    for tid, samples in tracks.items():
         best = sorted(samples, key=lambda d: -d.confidence)[:3]
-        feats = []
         for d in best:
             t = min(max(d.last_seen, d.t_start), d.t_end)
-            fr = _grab_frame(cap, t, cap.get(cv2.CAP_PROP_FPS) or 30.0)
-            if fr is None:
-                continue
-            det.setInputSize((fr.shape[1], fr.shape[0]))
-            _, rows = det.detect(fr)
-            if rows is None:
-                continue
-            sb = (d.cbox[0] + d.aoff[0], d.cbox[1] + d.aoff[1],
-                  d.cbox[2] + d.aoff[0], d.cbox[3] + d.aoff[1])
-            rbest, riou = None, 0.2
-            for r in rows:
-                rb = (r[0], r[1], r[0] + r[2], r[1] + r[3])
-                iou = _box_iou(rb, sb)
-                if iou > riou:
-                    rbest, riou = r, iou
-            if rbest is None:
-                continue
-            if float(rbest[2]) < 32 or float(rbest[3]) < 32:
-                continue    # too small to identify: noise embedding
-            f = rec.feature(rec.alignCrop(fr, rbest)).flatten()
-            n = float(np.linalg.norm(f))
-            if n > 0:
-                feats.append(f / n)
-        if feats:
-            e = np.mean(feats, axis=0)
-            embs[tid] = e / np.linalg.norm(e)
+            reqs.append((int(round(t * fpsv)), tid, d))
+    reqs.sort(key=lambda r: r[0])
+    _pos = {"i": 0, "slow": False}
+    _memo = {"idx": -1, "fr": None}
+
+    def _fetch(idx):
+        if idx == _memo["idx"]:
+            return _memo["fr"]
+        gap = idx - _pos["i"]
+        if gap < 0:
+            return None                  # behind (rounding dupe): skip
+        if gap > 300 and not _pos["slow"]:
+            t0 = time.time()
+            fr = _grab_frame(cap, idx / fpsv, fpsv)
+            if time.time() - t0 > 2.0:
+                _pos["slow"] = True      # sparse keyframes: stop seeking
+            if fr is not None:
+                _pos["i"] = idx + 1      # _grab_frame just read frame idx
+                _memo.update(idx=idx, fr=fr)
+                return fr
+        fr = None
+        while _pos["i"] <= idx:
+            ok, fr = cap.read()
+            if not ok:
+                return None
+            _pos["i"] += 1
+        _memo.update(idx=idx, fr=fr)
+        return fr
+
+    feats_by = {}
+    for n_done, (idx, tid, d) in enumerate(reqs):
+        if time.time() - _last_log >= 3.0:
+            _last_log = time.time()
+            cb.log("        …%d/%d face samples embedded"
+                   % (n_done + 1, len(reqs)))
+        fr = _fetch(idx)
+        if fr is None:
+            continue
+        det.setInputSize((fr.shape[1], fr.shape[0]))
+        _, rows = det.detect(fr)
+        if rows is None:
+            continue
+        sb = (d.cbox[0] + d.aoff[0], d.cbox[1] + d.aoff[1],
+              d.cbox[2] + d.aoff[0], d.cbox[3] + d.aoff[1])
+        rbest, riou = None, 0.2
+        for r in rows:
+            rb = (r[0], r[1], r[0] + r[2], r[1] + r[3])
+            iou = _box_iou(rb, sb)
+            if iou > riou:
+                rbest, riou = r, iou
+        if rbest is None:
+            continue
+        if float(rbest[2]) < 32 or float(rbest[3]) < 32:
+            continue        # too small to identify: noise embedding
+        f = rec.feature(rec.alignCrop(fr, rbest)).flatten()
+        n = float(np.linalg.norm(f))
+        if n > 0:
+            feats_by.setdefault(tid, []).append(f / n)
+    embs = {}
+    for tid, feats in feats_by.items():
+        e = np.mean(feats, axis=0)
+        embs[tid] = e / np.linalg.norm(e)
     cap.release()
     # centroid-linkage: big stable tracks seed clusters; each remaining
     # track joins only if it matches the cluster's AVERAGE identity. This
