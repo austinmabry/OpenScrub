@@ -1264,18 +1264,60 @@ def smooth_dense_tracks(dets, fps, video, cum=None, win_start=0.0, cb=None):
 
     _fps_g = (cap.get(cv2.CAP_PROP_FPS) or 30.0) if cap is not None else 30.0
 
+    # The onset walks probe BACKWARD from each track's first sample, one
+    # POS_MSEC seek per probe. On a normal file each seek decodes from a
+    # nearby keyframe; a real 4K export with ONE keyframe (common from
+    # screen recorders and render pipelines) decoded the file from frame
+    # ZERO on every probe — ~37 probes x 75 tracks made a 10-second clip
+    # take hours. Every track's onset is known BEFORE the walks start, so
+    # decode the video ONCE, sequentially (the renderer's access pattern,
+    # correct and fast on any file), caching half-scale grays only for
+    # frames inside some track's walk span and evicting behind the
+    # onset-sorted processing order. Memory stays bounded by one span
+    # (~LEAD_MAX seconds of half-scale grays), not the file.
+    gray_cache = {}
+    _seq = {"pos": 0}
+    _span_lo = {}                # frame index -> lowest span start needing it
+    if cap is not None and tracks:
+        for samples in tracks.values():
+            t0 = min(d.t_start for d in samples)
+            lo_t = max(0.0, t0 - LEAD_MAX - 0.2, win_start - 0.01)
+            lo = max(0, int(lo_t * _fps_g) - 2)
+            hi = int(round(t0 * _fps_g)) + 2
+            for k in range(lo, hi + 1):
+                _span_lo[k] = min(_span_lo.get(k, lo), lo)
+
+    def _fill_to(k_end):
+        # sequential read, caching grays for needed frames; never seeks
+        while _seq["pos"] <= k_end:
+            ok, fr = cap.read()
+            if not ok:
+                _seq["pos"] = 10 ** 9    # EOF: stop trying
+                return
+            idx = _seq["pos"]
+            _seq["pos"] += 1
+            if idx in _span_lo:
+                g = cv2.resize(cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY), None,
+                               fx=SCALE, fy=SCALE)
+                gray_cache[idx] = cv2.GaussianBlur(g, (3, 3), 0)
+
     def _gray(t):
         if cap is None:
             return None
-        fr = _grab_frame(cap, t, _fps_g)     # verified seek (see there)
-        if fr is None:
-            return None
-        g = cv2.resize(cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY), None,
-                       fx=SCALE, fy=SCALE)
-        # light smoothing before matching: sub-pixel motion at this scale
-        # decorrelates fine texture (measured 1.0 -> 0.48 on a half-pixel
-        # offset), while a smoothed match stays >0.8 present and ~0 absent
-        return cv2.GaussianBlur(g, (3, 3), 0)
+        k = int(round(t * _fps_g))
+        if k not in gray_cache and k >= _seq["pos"] - 1:
+            _fill_to(k)
+        # light smoothing happened at cache time: sub-pixel motion at this
+        # scale decorrelates fine texture (measured 1.0 -> 0.48 on a
+        # half-pixel offset); a smoothed match stays >0.8 present, ~0 absent
+        for kk in (k, k - 1, k + 1):     # PTS rounding tolerance
+            if kk in gray_cache:
+                return gray_cache[kk]
+        return None
+
+    def _evict_below(k):
+        for kk in [kk for kk in gray_cache if kk < k]:
+            del gray_cache[kk]
 
     # This is the longest silent stretch of a dense scan (the onset walk-back
     # re-reads the video per track), so report progress: the bar moves via
@@ -1285,7 +1327,14 @@ def smooth_dense_tracks(dets, fps, video, cum=None, win_start=0.0, cb=None):
     _last_log = time.time()
     n_gaps, n_lead, lead_s = 0, 0, 0.0
     added = []
-    for n_done, (tid, samples) in enumerate(tracks.items()):
+    # onset order makes the sequential cache a single forward pass: every
+    # later track's span starts at or after this one's, so frames behind
+    # the current span are never needed again
+    _order = sorted(tracks.items(),
+                    key=lambda kv: min(d.t_start for d in kv[1]))
+    for n_done, (tid, samples) in enumerate(_order):
+        _evict_below(max(0, int((min(d.t_start for d in samples)
+                                 - LEAD_MAX - 0.3) * _fps_g)))
         cb.progress("post", n_done, n_total)
         if time.time() - _last_log >= 3.0:
             _last_log = time.time()
