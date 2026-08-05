@@ -1,0 +1,48 @@
+<Container version="2">
+  <Name>OpenScrub-Intel</Name>
+  <Repository>pharmhero/openscrub:intel</Repository>
+  <Registry>https://hub.docker.com/r/pharmhero/openscrub</Registry>
+  <Network>bridge</Network>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+
+  <Icon>https://raw.githubusercontent.com/austinmabry/OpenScrub/main/assets/icon-128.png</Icon>
+
+  <!-- OpenScrub serves its own TLS (self-signed by default) -->
+  <WebUI>https://[IP]:[PORT:8384]/</WebUI>
+
+  <Overview>Local video redaction with human review — Intel GPU build. Detects and blurs PII in videos and screen recordings — faces, whole people (silhouette body masking), license plates, names, SSNs, emails, addresses, card numbers, and more, plus your own custom regex categories — with OpenVINO-accelerated detection (OCR, faces, plates, person models) and Quick Sync hardware encoding on any Intel iGPU (Gen 9+) or Arc card. Pass /dev/dri through (preconfigured below) to enable the GPU; without it everything still runs on the CPU. The image ships Intel's media driver — no host driver install needed. Everything runs on this server; no footage leaves your network. Best-effort redaction: always review output before sharing.</Overview>
+
+  <Support>https://github.com/austinmabry/OpenScrub/issues</Support>
+  <Project>https://github.com/austinmabry/OpenScrub</Project>
+  <ReadMe>https://raw.githubusercontent.com/austinmabry/OpenScrub/main/README.md</ReadMe>
+  <TemplateURL>https://raw.githubusercontent.com/austinmabry/OpenScrub/main/templates/openscrub-intel.xml</TemplateURL>
+
+  <Category>MediaApp:Video Security: Tools:Utilities</Category>
+  <ExtraSearchTerms>redaction blur privacy PII PHI face license plate anonymize deface quicksync openvino arc igpu</ExtraSearchTerms>
+  <License>Apache-2.0</License>
+  <MinVer>6.9</MinVer>
+  <Requires>Optional: an Intel iGPU (Gen 9+) or Arc card for hardware encoding and OpenVINO inference — the /dev/dri device below hands it to the container. Runs CPU-only without it.</Requires>
+  <Date>2026-08-05</Date>
+  <Changes>Initial Community Applications release of the Intel build.</Changes>
+
+  <Config Name="WebUI Port" Target="8384" Default="8384" Mode="tcp"
+          Description="HTTPS web interface (self-signed certificate — your browser warns once, or install your own cert in App settings)."
+          Type="Port" Display="always" Required="true" Mask="false"/>
+  <Config Name="Appdata" Target="/root/.local/share/OpenScrub"
+          Default="/mnt/user/appdata/openscrub" Mode="rw"
+          Description="Jobs (contains the sensitive uploads and reports!), review decisions, certificates, zones, downloaded models, encryption vault. Everything OpenScrub stores lives here — the container itself is disposable."
+          Type="Path" Display="always" Required="true" Mask="false"/>
+  <Config Name="Intel GPU" Target="/dev/dri" Default="/dev/dri"
+          Description="Intel GPU device for Quick Sync encoding and OpenVINO inference. Remove on a server without an Intel GPU — OpenScrub falls back to CPU automatically."
+          Type="Device" Display="always" Required="false" Mask="false"/>
+  <Config Name="Access token (optional)" Target="OPENSCRUB_TOKEN" Default=""
+          Description="Leave empty for open access on your LAN, or set a secret to require it on every request (recommended if others use your network). The WebUI URL becomes https://ip:8384/?token=SECRET on first visit."
+          Type="Variable" Display="always" Required="false" Mask="true"/>
+  <Config Name="Media" Target="/media" Default="/mnt/user/media" Mode="ro"
+          Description="Optional read-only mount of your media share so the 'path on the server' picker can process files without uploading them through the browser."
+          Type="Path" Display="always" Required="false" Mask="false"/>
+  <Config Name="OPENSCRUB_MEDIA_ROOT" Target="OPENSCRUB_MEDIA_ROOT" Default="/media"
+          Description="Confines the server-path picker to this directory tree. Leave set to /media to match the Media mount; clear it to allow any container path."
+          Type="Variable" Display="advanced" Required="false" Mask="false"/>
+</Container>
