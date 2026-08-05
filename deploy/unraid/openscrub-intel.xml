@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Unraid Community Apps template for the OpenScrub Intel (Quick Sync /
+     OpenVINO) image. Lives at templates/openscrub-intel.xml in your
+     template repository (github.com/austinmabry/unraid-templates) — the
+     TemplateURL below must match that raw path exactly. -->
+<Container version="2">
+  <Name>OpenScrub-Intel</Name>
+  <Repository>pharmhero/openscrub:intel</Repository>
+  <Registry>https://hub.docker.com/r/pharmhero/openscrub</Registry>
+  <Network>bridge</Network>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+
+  <Icon>https://raw.githubusercontent.com/austinmabry/OpenScrub/main/assets/icon-256.png</Icon>
+
+  <!-- OpenScrub serves TLS with a self-signed certificate by default,
+       so the WebUI link is https. The container port is fixed at 8384. -->
+  <WebUI>https://[IP]:[PORT:8384]</WebUI>
+
+  <Overview>
+Local video redaction with a human review step. OpenScrub scans videos
+and screen recordings for PII — faces, whole people (silhouette-precise
+body masking), license plates, and on-screen text such as names, phone
+numbers, SSNs, emails, addresses and card numbers, plus your own custom
+regex categories — then blurs, boxes or pixelates it. Every detection is
+shown as a thumbnail you approve or reject before the final render, and
+each run produces an audit report with input/output hashes. Spoken-PII
+detection can suggest audio mute spans from a local transcription.
+Nothing ever leaves your server.
+
+This is the Intel build: hardware (Quick Sync) video encoding and
+OpenVINO-accelerated detection on any Intel iGPU (Gen 9+) or Arc card.
+Pass /dev/dri through (preconfigured below) to enable the GPU — without
+it everything still works on the CPU. The image ships Intel's media
+driver; the host needs no extra driver install.
+
+First browser visit shows a certificate warning (self-signed TLS —
+footage stays private on your LAN); accept it to continue. Detection
+models download on first use and persist in appdata.
+  </Overview>
+
+  <Support>https://github.com/austinmabry/OpenScrub/issues</Support>
+  <Project>https://github.com/austinmabry/OpenScrub</Project>
+  <TemplateURL>https://raw.githubusercontent.com/austinmabry/unraid-templates/main/templates/openscrub-intel.xml</TemplateURL>
+  <ReadMe>https://raw.githubusercontent.com/austinmabry/OpenScrub/main/README.md</ReadMe>
+
+  <Category>Tools:Utilities MediaApp:Video Security:</Category>
+  <ExtraSearchTerms>redact redaction blur faces privacy PII anonymize license plate video scrub</ExtraSearchTerms>
+
+  <Requires>Optional: an Intel iGPU (Gen 9+) or Arc card for hardware encode/inference — pass /dev/dri (preconfigured). Works CPU-only without it. Internet access on first use to download detection models (persisted in appdata).</Requires>
+
+  <License>Apache-2.0</License>
+  <MinVer>6.9</MinVer>
+
+  <Screenshot>https://raw.githubusercontent.com/austinmabry/OpenScrub/main/assets/screenshots/editor-home.png</Screenshot>
+  <Screenshot>https://raw.githubusercontent.com/austinmabry/OpenScrub/main/assets/screenshots/track-object.png</Screenshot>
+
+  <Changes>Initial Community Apps listing.</Changes>
+  <Date>2026-08-05</Date>
+
+  <Config Name="WebUI" Target="8384" Default="8384" Mode="tcp"
+          Description="HTTPS port for the web interface (self-signed TLS by default)."
+          Type="Port" Display="always" Required="true" Mask="false"/>
+  <Config Name="Appdata" Target="/root/.local/share/OpenScrub"
+          Default="/mnt/user/appdata/openscrub" Mode="rw"
+          Description="Persistent data: jobs, reports, downloaded detection models, settings, certificates."
+          Type="Path" Display="always" Required="true" Mask="false"/>
+  <Config Name="Intel GPU" Target="/dev/dri" Default="/dev/dri"
+          Description="Intel GPU device for Quick Sync encoding and OpenVINO inference. Remove if the server has no Intel GPU — OpenScrub falls back to CPU automatically."
+          Type="Device" Display="always" Required="false" Mask="false"/>
+</Container>

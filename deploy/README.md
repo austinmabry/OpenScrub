@@ -117,7 +117,60 @@ Target repository: `coollabsio/coolify`
 Fork it, upload `openscrub.yaml` into `templates/compose/`, add
 `assets/icon-256.png` as `public/svgs/openscrub.png`, and open the PR.
 
-## 9. PikaPods (no files needed)
+## 9. Unraid Community Apps — `deploy/unraid/`
+
+Target: the **Community Apps submission portal** at
+<https://ca.unraid.net/submit> — Unraid replaced the old forum-thread
+process with a self-service portal, so there is no fork-and-PR here.
+Instead you host a small "template repository" on your own GitHub account
+and register it once.
+
+**Step 1 — create your template repository.** On GitHub, create a new
+public repository named `unraid-templates` under your account (the
+TemplateURL inside the XML assumes `austinmabry/unraid-templates` on
+branch `main` — if you pick a different name, update that one line).
+Unraid publishes a starter you can compare against:
+<https://github.com/unraid/unraid-community-apps-starter>.
+
+**Step 2 — add two files** (browser upload is fine — Add file → Upload
+files):
+
+- `ca_profile.xml` at the repository ROOT — copy from
+  `deploy/unraid/ca_profile.xml`. This is the repository-level profile
+  (who you are, what the repo contains, where support lives).
+- `templates/openscrub-intel.xml` — copy from
+  `deploy/unraid/openscrub-intel.xml`. One XML file per app; this one
+  lists the Intel image with the `/dev/dri` device preconfigured.
+
+**Step 3 — submit.** Sign in at <https://ca.unraid.net/submit> (an
+Unraid forum account works), click **Start Submission**, and point it at
+your `unraid-templates` repository. The portal live-scans the repo:
+it parses the template XML, validates `ca_profile.xml`, checks for
+duplicate listings, and previews the listing exactly as users will see
+it. Fix anything it flags (edit the file on GitHub, then **Validate**
+and **Scan** again), then submit. After moderator review it publishes
+into the feed users browse from the Apps tab on their servers.
+
+**Template notes:**
+
+- Unraid exposes the port directly, so the template keeps OpenScrub's
+  default self-signed HTTPS (`WebUI` is `https://[IP]:[PORT:8384]`) and
+  the Overview warns about the one-time certificate prompt.
+- The Intel GPU is passed as a **Device** config (`/dev/dri`) rather
+  than an Extra Parameter, so users see it as a normal template field
+  and can remove it on GPU-less hardware — OpenScrub degrades to CPU
+  loudly and automatically.
+- Appdata maps `/root/.local/share/OpenScrub` →
+  `/mnt/user/appdata/openscrub` (jobs, reports, models, settings,
+  certificates).
+- A CUDA template can join the same repository later as
+  `templates/openscrub-cuda.xml` (the README's Unraid/NVIDIA
+  instructions already describe that setup manually); submit the Intel
+  one first and add the second in place — the portal rescans your repo.
+- The `<Date>` and `<Changes>` fields are yours to bump when you edit
+  the template after publication.
+
+## 10. PikaPods (no files needed)
 
 Go to https://www.pikapods.com and use their "Suggest an app" form. If
 accepted, they host OpenScrub for paying users and share revenue with you.
