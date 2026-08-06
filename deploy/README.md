@@ -74,16 +74,23 @@ Fork it, create `apps/openscrub/`, upload `config.json` and
 `assets/icon-512.png` from this repository renamed to `logo.jpg` (convert
 to JPEG first, or use PNG if their guide now allows it). Open the PR.
 
-## 4. TrueNAS Community Apps — `deploy/truenas/`
+## 4. TrueNAS Community Apps — `deploy/truenas/openscrub/`
 
 Target repository: `truenas/apps`
 
-This store wraps apps in their own template library, so the files here
-(`app.yaml` + reference `docker-compose.yml`) are your *starting point*, not
-the final layout. Open a PR with a new folder under `ix-dev/community/openscrub/`
-mirroring a simple existing app (look at one like `actual-budget`), pasting
-the metadata from `app.yaml`. Their reviewers actively help first-time
-submitters shape it — it's normal for this one to take a few rounds.
+`deploy/truenas/openscrub/` is the COMPLETE app in their real layout —
+app.yaml, README.md, ix_values.yaml, questions.yaml,
+templates/docker-compose.yaml (Jinja2), and
+templates/test_values/basic-values.yaml. Fork `truenas/apps`, open the
+fork in github.dev (press "." on the fork page), create
+`ix-dev/community/openscrub/`, and paste each file in unchanged. The
+lib_version/lib_version_hash in app.yaml pin their template library —
+their CI recalculates the hash, so leave them as committed. Commit,
+then Contribute → Open pull request (title: "Add OpenScrub (community
+train)"), fill their app-addition template. CI test-deploys the app
+with basic-values.yaml; reviewers actively help first-time submitters —
+a few rounds is normal. Bump the image tag in ix_values.yaml and
+app_version in app.yaml to the current release before submitting.
 
 ## 5. Umbrel — `deploy/umbrel/openscrub/`
 
