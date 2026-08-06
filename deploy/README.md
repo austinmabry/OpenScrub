@@ -78,7 +78,17 @@ to JPEG first, or use PNG if their guide now allows it). Open the PR.
 
 Target repository: `truenas/apps`
 
-`deploy/truenas/openscrub/` is the COMPLETE app in their real layout —
+Three complete apps in their real layout — `deploy/truenas/openscrub/`
+(CPU), `deploy/truenas/openscrub-nvidia/` (`:<version>-cuda` image +
+the standard `gpus` question), and `deploy/truenas/openscrub-intel/`
+(`:<version>-intel` image + `gpus`). GPU allocation uses TrueNAS's own
+`definitions/gpu_configuration` reference — their library wires the
+allocated GPU (NVIDIA runtime or Intel /dev/dri) into the container, so
+the templates need no device plumbing. Submit the CPU app FIRST and let
+that PR settle the structure with reviewers; then submit the two GPU
+apps together in a second PR that reuses the blessed layout.
+
+Each folder is the COMPLETE app —
 app.yaml, README.md, ix_values.yaml, questions.yaml,
 templates/docker-compose.yaml (Jinja2), and
 templates/test_values/basic-values.yaml. Fork `truenas/apps`, open the
