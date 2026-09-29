@@ -193,7 +193,9 @@ docker run -d -p 8384:8384 \
 
 (or `ghcr.io/austinmabry/openscrub:latest` — use whichever registry
 pulls faster for you). Published tags are refreshed **weekly** with the
-latest OS security patches, not just at releases.
+latest OS security patches, not just at releases — the refresh only
+changes a small top layer, so a weekly re-pull downloads the patch delta,
+not the whole image.
 
 Tesseract, FFmpeg, and the face model are baked in; jobs, certificates,
 zones, and downloaded plate models live in the mounted volume, so the
