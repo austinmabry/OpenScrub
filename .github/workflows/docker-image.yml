@@ -17,11 +17,17 @@ name: Docker image
 on:
   release:
     types: [published]
-  # Weekly security refresh: rebuild the LATEST RELEASE with --no-cache so
-  # the apt dist-upgrade layer re-runs and published tags absorb the Debian/
-  # Ubuntu security patches that shipped since the release was cut. Same
-  # code, fresher packages — this is what keeps Docker Scout counts down
-  # between releases.
+  # Weekly security refresh: rebuild the LATEST RELEASE so published tags
+  # absorb the Debian/Ubuntu security patches that shipped since the release
+  # was cut. Same code, fresher packages — this is what keeps Docker Scout
+  # counts down between releases. The refresh must NOT use --no-cache: that
+  # rebuilt every layer with a new digest, so every user re-downloaded the
+  # near-complete image (~10 GB for :cuda) every Monday, and Unraid's
+  # auto-update recreated their container for a "new" image with the same
+  # code. Instead the Dockerfiles end with a small `apt-get dist-upgrade`
+  # layer keyed on the SECURITY_REFRESH build-arg (the run id): only that
+  # layer rebuilds, the heavy layers keep their digests and the pull is
+  # just the patch delta.
   schedule:
     - cron: "17 8 * * 1"
   workflow_dispatch:
@@ -91,7 +97,8 @@ jobs:
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          no-cache: ${{ github.event_name == 'schedule' }}
+          build-args: |
+            SECURITY_REFRESH=${{ github.run_id }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           # registry build cache: unchanged layers (base, apt, the pip
@@ -157,7 +164,8 @@ jobs:
         with:
           context: .
           file: Dockerfile.cuda
-          no-cache: ${{ github.event_name == 'schedule' }}
+          build-args: |
+            SECURITY_REFRESH=${{ github.run_id }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           # registry build cache: the multi-GB CUDA/Paddle layers keep their
@@ -220,7 +228,8 @@ jobs:
           context: .
           file: Dockerfile.intel
           platforms: linux/amd64
-          no-cache: ${{ github.event_name == 'schedule' }}
+          build-args: |
+            SECURITY_REFRESH=${{ github.run_id }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           cache-from: type=registry,ref=ghcr.io/austinmabry/openscrub:buildcache-intel

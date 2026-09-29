@@ -25,8 +25,10 @@
 FROM python:3.12-slim
 
 # dist-upgrade pulls the latest Debian security patches even when the base
-# image tag lags behind; the weekly scheduled rebuild (docker-image.yml)
-# re-runs this layer with --no-cache so published tags keep absorbing fixes
+# image tag lags behind. This layer is cached across builds; the weekly
+# security refresh re-runs a SEPARATE small layer at the top of the image
+# (see the end of this file) so published tags keep absorbing fixes
+# without invalidating the heavy layers below.
 RUN apt-get update \
  && apt-get dist-upgrade -y \
  && apt-get install -y --no-install-recommends tesseract-ocr ffmpeg \
@@ -60,6 +62,20 @@ COPY openscrub.py openscrub_web.py openscrub_setup.py openscrub_update.py \
      openscrub_vault.py zones_ui.py install.py test_openscrub.py ./
 COPY assets/openscrub.ico assets/
 RUN pip install --no-cache-dir --no-deps .
+
+# ---- security refresh layer: the ONLY layer the weekly scheduled rebuild
+# (docker-image.yml) invalidates. SECURITY_REFRESH is a cache-buster (the
+# workflow passes the run id); everything below it stays cached, so a
+# refresh republishes tags whose multi-GB dependency layers keep their
+# exact digests — users re-download only this small patch layer. The
+# earlier --no-cache refresh rebuilt every layer with new digests and
+# forced a near-full image re-pull on every user, every week.
+ARG SECURITY_REFRESH=0
+RUN echo "security refresh ${SECURITY_REFRESH}" \
+ && apt-get update \
+ && apt-get dist-upgrade -y \
+ && rm -rf /var/lib/apt/lists/* \
+ && pip install --no-cache-dir --upgrade pip setuptools wheel
 
 # tells the web UI it runs in a container: the update notice becomes
 # inform-only ("pull the new image") instead of offering the in-place
