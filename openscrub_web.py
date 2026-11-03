@@ -185,7 +185,42 @@ def active_cert_pair():
     ensure_self_signed()
     return AUTO_CERT, AUTO_KEY, "self-signed"
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 ** 3   # 8 GB uploads
+
+
+def _max_upload_bytes(cli_value=None):
+    """Upload cap in bytes, or None for unlimited. Priority:
+    --max-upload-gb > $OPENSCRUB_MAX_UPLOAD_GB > 8 GB default.
+    0 (either source) = unlimited. A real 18 GB plate-removal job hit the
+    hard-coded cap as a bare '413 Request Entity Too Large' with no path
+    forward — the limit is now a dial, and the 413 explains the dial."""
+    raw = cli_value if cli_value is not None else \
+        os.environ.get("OPENSCRUB_MAX_UPLOAD_GB", "")
+    try:
+        gb = float(raw)
+    except (TypeError, ValueError):
+        gb = 8.0
+    if gb == 0:
+        return None                      # explicit 0 = unlimited
+    if gb < 0:
+        gb = 8.0
+    return int(gb * 1024 ** 3)
+
+
+app.config["MAX_CONTENT_LENGTH"] = _max_upload_bytes()   # default 8 GB
+
+
+@app.errorhandler(413)
+def _too_large(e):
+    cap = app.config.get("MAX_CONTENT_LENGTH")
+    gb = cap / 1024 ** 3 if cap else 0
+    return jsonify({"error":
+        "upload exceeds this server's %.0f GB limit. Raise it with "
+        "--max-upload-gb N (or OPENSCRUB_MAX_UPLOAD_GB=N in Docker, "
+        "0 = unlimited) and restart — or better for very large files: "
+        "put the file where the server can read it (Docker: a mounted "
+        "folder) and use the 'path on the server' box instead of "
+        "uploading through the browser." % gb}), 413
+
 
 TOKEN = None
 JOBS = {}          # id -> job dict
@@ -3038,6 +3073,8 @@ def index():
                     for c in load_custom_cats())
     if extra:
         page = page.replace('face:"#ec4899"', 'face:"#ec4899"%s' % extra)
+    page = page.replace("%%MAXUP%%",
+                        str(app.config.get("MAX_CONTENT_LENGTH") or 0))
     return page.replace("%%VERSION%%", openscrub.VERSION)
 
 
@@ -3280,8 +3317,14 @@ def main():
     ap.add_argument("--retain-days", type=int, default=7,
                     help="auto-delete job folders (which contain PII) after "
                          "this many days (default 7; 0 = keep forever)")
+    ap.add_argument("--max-upload-gb", default=None,
+                    help="largest browser upload accepted, in GB (default 8; "
+                         "0 = unlimited; env OPENSCRUB_MAX_UPLOAD_GB works "
+                         "too). Very large files are better served in place "
+                         "via the 'path on the server' box than uploaded.")
     args = ap.parse_args()
     TOKEN = args.token or None
+    app.config["MAX_CONTENT_LENGTH"] = _max_upload_bytes(args.max_upload_gb)
     os.makedirs(JOBS_DIR, exist_ok=True)
     import atexit
     atexit.register(_vault_lock_atexit)
@@ -3335,13 +3378,26 @@ def main():
         cert, key, mode = active_cert_pair()
         ssl_ctx = (cert, key)
         scheme = "https"
+    in_docker = _in_container()
+    # Inside a container lan_ip() returns the CONTAINER's bridge address
+    # (172.17.x.x) — unreachable from a macOS/Windows host, where only the
+    # published port on localhost works. A real Mac user followed that IP
+    # straight to a dead end while the server sat healthy on localhost:8384
+    # (and Python's block-buffered stdout kept this whole banner invisible
+    # in `docker logs` — the images now set PYTHONUNBUFFERED=1).
+    url_host = "localhost" if in_docker else lan_ip()
     print("openscrub web — open from any device on your LAN:")
     if TOKEN:
-        print(f"    {scheme}://{lan_ip()}:{args.port}/?token={TOKEN}")
+        print(f"    {scheme}://{url_host}:{args.port}/?token={TOKEN}")
     else:
-        print(f"    {scheme}://{lan_ip()}:{args.port}/")
+        print(f"    {scheme}://{url_host}:{args.port}/")
         print("    (open access: no token — everyone on this network can use it;")
         print("     add --token <secret> if you ever want a gate back)")
+    if in_docker:
+        print("    Docker: open the PUBLISHED port on localhost (or this")
+        print("    machine's LAN IP from other devices). The container's")
+        print("    internal 172.17.x.x address is NOT reachable from a")
+        print("    Mac/Windows host.")
     if vault_enabled():
         print("Encryption: vault is LOCKED — unlock in the web UI "
               "(Encryption panel) to access jobs."
@@ -3359,6 +3415,9 @@ def main():
             print("    HTTPS with your installed custom certificate.")
     else:
         print("    WARNING: plain HTTP — PII crosses the network unencrypted.")
+    sys.stdout.flush()      # the banner must reach redirected logs NOW, not
+    # when an 8KB block buffer eventually fills (a container ran "silent"
+    # for minutes and the user debugged a healthy server)
     _serve(args.host, args.port, ssl_ctx)
 
 

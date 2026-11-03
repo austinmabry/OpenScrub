@@ -1035,9 +1035,19 @@ function unionCats(){
  const u={};S.wins.forEach(w=>Object.keys(w.cats).forEach(c=>u[c]=true));
  return Object.keys(u);
 }
+const MAXUP=+"%%MAXUP%%"||0;  // server upload cap in bytes (0 = unlimited),
+                              // injected at serve time like %%VERSION%%
 async function startScan(){
  if(!S.dur){alert("Load a video first.");return;}
  if(!S.file&&!$("spath").value.trim()){alert("Choose a file or server path.");return;}
+ if(S.file&&MAXUP>0&&S.file.size>MAXUP){
+  alert("This file is "+(S.file.size/1073741824).toFixed(1)+" GB — over the "
+   +"server's "+(MAXUP/1073741824).toFixed(0)+" GB upload limit, so the "
+   +"upload would be rejected. Either restart the server with a higher "
+   +"limit (--max-upload-gb N, or OPENSCRUB_MAX_UPLOAD_GB=N in Docker; "
+   +"0 = unlimited), or — better for files this big — put the file where "
+   +"the server can read it and use the 'path on the server' box instead "
+   +"of uploading.");return;}
  const cats=unionCats();
  const nTrk=S.wins.reduce((a,w)=>a+((w.track||[]).length),0);
  if(!cats.length&&!nTrk

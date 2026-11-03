@@ -153,7 +153,20 @@ RUN echo "security refresh ${SECURITY_REFRESH}" \
 # inform-only ("pull the new image") instead of offering the in-place
 # updater, whose writes would vanish on the next container recreate
 ENV OPENSCRUB_IN_DOCKER=1
+# Unbuffered stdout: without this, Python block-buffers prints in a non-TTY
+# container and `docker logs` stays EMPTY for minutes — a real Mac user
+# debugged a perfectly healthy server because the startup banner (and any
+# crash traceback stuck behind it) never appeared.
+ENV PYTHONUNBUFFERED=1
 
 EXPOSE 8384
+# Lets `docker ps`/Docker Desktop show whether the server actually answers
+# (the reported failure looked identical whether the server was up or not).
+# Scheme-agnostic: tries the default self-signed HTTPS, then --http.
+HEALTHCHECK --interval=60s --timeout=10s --start-period=90s --retries=3 \
+  CMD python -c "import urllib.request,ssl;\
+ctx=ssl._create_unverified_context();\
+exec('try:\n urllib.request.urlopen(\"https://127.0.0.1:8384/\",context=ctx,timeout=8)\nexcept Exception:\n urllib.request.urlopen(\"http://127.0.0.1:8384/\",timeout=8)')"
+
 VOLUME ["/root/.local/share/OpenScrub"]
 CMD ["openscrub-web", "--host", "0.0.0.0"]

@@ -2731,3 +2731,45 @@ def test_person_seg_migration_lives_in_init():
         if det.seg:
             assert det.ort is not None and det.net is None, \
                 "seg models must ALWAYS run on onnxruntime"
+
+
+def test_upload_cap_configurable_and_413_explains_the_way_out(monkeypatch):
+    """A real 18 GB plate-removal upload died as a bare '413 Request
+    Entity Too Large' with no path forward. The cap is a dial now
+    (--max-upload-gb / OPENSCRUB_MAX_UPLOAD_GB, 0 = unlimited) and the
+    413 body is JSON that names BOTH remedies — raising the cap and the
+    'path on the server' box, which is the right route for huge files."""
+    import openscrub_web
+    mb = openscrub_web._max_upload_bytes
+    monkeypatch.delenv("OPENSCRUB_MAX_UPLOAD_GB", raising=False)
+    assert mb() == 8 * 1024 ** 3                 # default unchanged
+    assert mb("40") == 40 * 1024 ** 3            # CLI value wins
+    assert mb("0") is None                       # explicit 0 = unlimited
+    assert mb("garbage") == 8 * 1024 ** 3        # junk falls back, closed
+    monkeypatch.setenv("OPENSCRUB_MAX_UPLOAD_GB", "20")
+    assert mb() == 20 * 1024 ** 3                # env honored
+    assert mb("40") == 40 * 1024 ** 3            # CLI still beats env
+    old = openscrub_web.app.config["MAX_CONTENT_LENGTH"]
+    try:
+        openscrub_web.app.config["MAX_CONTENT_LENGTH"] = 1024
+        client = openscrub_web.app.test_client()
+        r = client.post("/api/jobs", data=b"x" * 4096,
+                        content_type="application/octet-stream")
+        assert r.status_code == 413
+        j = r.get_json()
+        assert j and "path on the server" in j["error"]
+        assert "max-upload-gb" in j["error"]
+    finally:
+        openscrub_web.app.config["MAX_CONTENT_LENGTH"] = old
+
+
+def test_index_injects_upload_cap_for_preflight():
+    """The editor refuses an over-cap file BEFORE uploading (an 18 GB
+    upload must not run for an hour just to bounce): index() replaces
+    the %%MAXUP%% placeholder with the live byte cap."""
+    import openscrub_web
+    client = openscrub_web.app.test_client()
+    html = client.get("/").data.decode()
+    assert "%%MAXUP%%" not in html
+    cap = openscrub_web.app.config["MAX_CONTENT_LENGTH"] or 0
+    assert f'const MAXUP=+"{cap}"||0' in html

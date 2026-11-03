@@ -191,6 +191,13 @@ docker run -d -p 8384:8384 \
   pharmhero/openscrub:latest
 ```
 
+then open **https://localhost:8384** on the machine running Docker
+(other devices: `https://<that machine's LAN IP>:8384`). Do NOT use the
+container's internal `172.17.x.x` address — on macOS and Windows,
+containers run inside a VM and that IP is unreachable from the host;
+only the published port works. The browser warns once about the
+self-signed certificate — choose Advanced → Proceed.
+
 (or `ghcr.io/austinmabry/openscrub:latest` — use whichever registry
 pulls faster for you). Published tags are refreshed **weekly** with the
 latest OS security patches, not just at releases — the refresh only
@@ -464,6 +471,11 @@ then gates every request (recommended). Either way this is LAN-grade
 protection — never expose the port to the internet. The jobs folder on
 the server contains PII (uploads + reports); protect it accordingly.
 `--retain-days` auto-deletes finished job folders (default 7 days).
+Browser uploads are capped at 8 GB by default — raise or remove the cap
+with `--max-upload-gb N` (`OPENSCRUB_MAX_UPLOAD_GB=N` as an env var for
+Docker; `0` = unlimited). For files that large, the "path on the
+server" box is the better route anyway: the server reads the file in
+place and nothing crosses the network.
 
 ## HDR support
 
@@ -757,6 +769,8 @@ Two reasoning layers prevent "flash of PII" from intermittent OCR misses:
 | Non-people masked by the person category | raise --person-threshold to 0.6 |
 | Blur box clips edges of text | --pad 12 |
 | Small text missed entirely | install paddleocr; record at native resolution |
+| Upload rejected: 413 Request Entity Too Large | raise `--max-upload-gb` / `OPENSCRUB_MAX_UPLOAD_GB` (0 = unlimited), or use the "path on the server" box — huge files shouldn't travel through the browser |
+| Docker: no logs, can't reach the UI | open https://localhost:8384 (the published port) — never the 172.17.x.x container IP; pull a current image so logs stream unbuffered |
 
 ## License
 
