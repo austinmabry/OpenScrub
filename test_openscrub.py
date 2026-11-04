@@ -3162,3 +3162,68 @@ def test_rehydrate_surfaces_reportless_upload_as_failed_job():
     finally:
         w.JOBS.pop(jid, None)
         shutil.rmtree(jdir, ignore_errors=True)
+
+
+def test_dense_merge_skips_pairwise_comparisons(monkeypatch):
+    """Per-frame detections must never enter the generic merge search."""
+    def forbidden(*args):
+        raise AssertionError(
+            "Dense detections must not require box comparisons"
+        )
+
+    monkeypatch.setattr(openscrub, "boxes_overlap", forbidden)
+
+    dets = [
+        openscrub.Detection(
+            i / 60, i / 60 + 0.005,
+            (100, 100, 160, 160),
+            "face", "face", 0.9,
+            dense=True
+        )
+        for i in range(1000)
+    ]
+
+    result = openscrub.merge_detections(dets, hold=0.8)
+
+    assert len(result) == len(dets)
+    assert all(a is b for a, b in zip(result, dets))
+    assert all(d.t_end - d.t_start < 0.01 for d in result)
+
+
+def test_mixed_merge_excludes_dense_candidates(monkeypatch):
+    """Sparse detections still merge, without searching dense samples."""
+    original_overlap = openscrub.boxes_overlap
+    calls = []
+
+    def counted_overlap(a, b):
+        calls.append((a, b))
+        return original_overlap(a, b)
+
+    monkeypatch.setattr(
+        openscrub, "boxes_overlap", counted_overlap
+    )
+
+    def make(t, dense):
+        return openscrub.Detection(
+            t, t + 0.01,
+            (100, 100, 160, 160),
+            "face", "face", 0.9,
+            dense=dense
+        )
+
+    sparse1 = make(0.0, False)
+    dense1 = make(0.1, True)
+    sparse2 = make(0.2, False)
+    dense2 = make(0.3, True)
+
+    result = openscrub.merge_detections(
+        [sparse1, dense1, sparse2, dense2],
+        hold=0.8
+    )
+
+    assert len(result) == 3
+    assert result[0] is sparse1
+    assert result[1] is dense1
+    assert result[2] is dense2
+    assert len(calls) == 1
+    assert abs(sparse1.t_end - 1.0) < 1e-9
