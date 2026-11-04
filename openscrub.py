@@ -36,7 +36,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.84"
+VERSION = "1.0.85"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -4298,6 +4298,38 @@ def download_plate_model(entry, dest_dir=None, cb=None, progress=None):
                           progress=progress)
 
 
+def autofetch_plate_model(cb=None):
+    """Fetch the RECOMMENDED plate model unattended, YuNet-style, and
+    return its path — or None on any failure (never raises; the caller
+    degrades to the fail-closed inert-category guard). Unattended fetch
+    is gated on THREE properties of the registry entry: recommended, a
+    permissive license (MIT/Apache/BSD — the AGPL person models must
+    stay an explicit user choice), and a PINNED sha256 (the TOFU
+    first-download pin is a user decision, not an automatic one).
+    Issue #18: a plate-only job on a fresh Docker install scanned with
+    no plate model and 'succeeded' having looked for nothing.
+    OPENSCRUB_NO_AUTOFETCH=1 disables it (air-gapped installs, tests)."""
+    if os.environ.get("OPENSCRUB_NO_AUTOFETCH"):
+        return None
+    log = (cb.log if cb else print)
+    try:
+        entry = next((m for m in load_model_registry("plate")
+                      if m.get("recommended")), None)
+        lic = str((entry or {}).get("license", "")).lower()
+        if (not entry or not (entry.get("sha256") or "").strip()
+                or not lic.startswith(("mit", "apache", "bsd"))):
+            return None
+        log("      plate detector: no model installed — downloading the "
+            "recommended one (%s, %s, sha256-pinned, ~9 MB)…"
+            % (entry.get("id"), entry.get("license")))
+        return download_model(entry, "plate", cb=cb)
+    except Exception as e:
+        log("      plate detector: automatic download failed (%s) — "
+            "download one in Settings → Detection models, or see "
+            "PLATES.md." % e)
+        return None
+
+
 COCO_NAMES = (
     "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train",
     "truck", "boat", "traffic light", "fire hydrant", "stop sign",
@@ -4362,44 +4394,18 @@ class PlateDetector:
         self.ort = None          # onnxruntime backend (end2end/NMS models)
         self._ort_in = None
         self._ort_out = None
-        # resolve model: explicit arg > env var > conventional locations
-        candidates = []
-        if model_path:
-            candidates.append(model_path)
-        env = os.environ.get(self.MODEL_ENV)
-        if env:
-            candidates.append(env)
-        here = os.path.dirname(os.path.abspath(__file__))
-        # read-only installs (pip / frozen) download models to the per-user
-        # data dir instead of next to the code — search both.
-        roots = [here]
-        if install_is_readonly():
-            roots.append(user_data_dir())
-        for r in roots:
-            candidates += [
-                os.path.join(r, "models", self.DEFAULT_BASE),
-                os.path.join(r, self.DEFAULT_BASE),
-            ]
-        # registry-downloaded models are saved as models/<registry-id>.onnx;
-        # search those too (recommended entries first), and pick up each
-        # model's declared input size from the registry.
-        reg_size = {}
-        try:
-            reg = load_model_registry(self.KIND)
-            for m in sorted(reg, key=lambda x: not x.get("recommended", False)):
-                for r in roots:
-                    mp = os.path.join(r, "models", "%s.onnx" % m.get("id"))
-                    candidates.append(mp)
-                    reg_size[mp] = int(m.get("input_size", 640) or 640)
-        except Exception:
-            pass
-        found = next((c for c in candidates if c and os.path.exists(c)), None)
+        found, reg_in = self.resolve_model(model_path)
         self.model_path = found
-        if found in reg_size:
-            self.INPUT = reg_size[found]
+        if reg_in:
+            self.INPUT = reg_in
         if not found:
-            self.log("      %s: no model found — %s category "
-                     "inactive. Place a YOLO ONNX at models/%s or set $%s."
+            # name the ONE-CLICK path first: the old message only offered
+            # a file path with a stale v8 filename, and a real user read
+            # it as "OpenScrub looks for the wrong model" (issue #18)
+            self.log("      %s: no model installed — %s category INACTIVE "
+                     "this scan. Download one in Settings → Detection "
+                     "models (one click, hash-verified), or place a YOLO "
+                     "ONNX at models/%s or set $%s."
                      % (self.LABEL, self.KIND, self.DEFAULT_BASE,
                         self.MODEL_ENV))
             return
@@ -4545,6 +4551,60 @@ class PlateDetector:
 
     def available(self):
         return self.net is not None or self.ort is not None
+
+    @classmethod
+    def resolve_model(cls, model_path=None):
+        """Resolve the model file this detector would load, WITHOUT
+        loading it — the exact candidate ladder __init__ uses: explicit
+        arg > env var > conventional filenames > registry-downloaded ids,
+        each searched across every root. Returns (path_or_None,
+        registry_input_size_or_None). Shared with the web app's
+        /api/model_status so the editor can warn BEFORE a scan that a
+        selected category has no model (issue #18)."""
+        candidates = []
+        if model_path:
+            candidates.append(model_path)
+        env = os.environ.get(cls.MODEL_ENV)
+        if env:
+            candidates.append(env)
+        here = os.path.dirname(os.path.abspath(__file__))
+        # read-only installs (pip / frozen) download models to the
+        # per-user data dir instead of next to the code — search both.
+        roots = [here]
+        if install_is_readonly():
+            roots.append(user_data_dir())
+        # the auto-download cache (~/.openscrub/models — where YuNet-style
+        # fetches land and where the Docker images bake the recommended
+        # plate model) is searched LAST, so explicit picks always win.
+        # NOTE it is itself a models dir, not a root with a models/ child.
+        cache = _model_dir()
+        for r in roots:
+            candidates += [
+                os.path.join(r, "models", cls.DEFAULT_BASE),
+                os.path.join(r, cls.DEFAULT_BASE),
+            ]
+        candidates.append(os.path.join(cache, cls.DEFAULT_BASE))
+        # registry-downloaded models are saved as models/<registry-id>.onnx;
+        # search those too (recommended entries first), and pick up each
+        # model's declared input size from the registry.
+        reg_size = {}
+        try:
+            reg = load_model_registry(cls.KIND)
+            for m in sorted(reg,
+                            key=lambda x: not x.get("recommended", False)):
+                size = int(m.get("input_size", 640) or 640)
+                for r in roots:
+                    mp = os.path.join(r, "models", "%s.onnx" % m.get("id"))
+                    candidates.append(mp)
+                    reg_size[mp] = size
+                mp = os.path.join(cache, "%s.onnx" % m.get("id"))
+                candidates.append(mp)
+                reg_size[mp] = size
+        except Exception:
+            pass
+        found = next((c for c in candidates if c and os.path.exists(c)),
+                     None)
+        return found, reg_size.get(found)
 
     def find(self, frame, detect_scale=1.0):
         """-> [(x1,y1,x2,y2,conf)] in full-frame pixels. Empty if no model.
@@ -6641,6 +6701,18 @@ def run_scan(args, cb=None):
     plater = (PlateDetector(cb, model_path=getattr(args, "plate_model", None),
                             thresh=getattr(args, "plate_threshold", 0.35))
               if "plate" in cats else None)
+    # Issue #18: a plate-only job on a fresh install ran with NO plate
+    # model — the category was silently inert and the job "succeeded"
+    # having looked for nothing. The recommended registry model is MIT
+    # and sha256-pinned, so a missing plate model now self-heals exactly
+    # like YuNet: fetched unattended on first use. (The Docker images
+    # bake it in, so this normally fires only on pip/source installs.)
+    # An explicitly chosen --plate-model is never substituted.
+    if (plater is not None and not plater.available()
+            and not getattr(args, "plate_model", None)
+            and autofetch_plate_model(cb)):
+        plater = PlateDetector(cb,
+                               thresh=getattr(args, "plate_threshold", 0.35))
     personer = (PersonDetector(cb,
                                model_path=getattr(args, "person_model", None),
                                thresh=getattr(args, "person_threshold", 0.5))
@@ -6674,6 +6746,34 @@ def run_scan(args, cb=None):
     if custom_res:
         cb.log("      custom categories: "
                + ", ".join(c for c, _ in custom_res))
+
+    # FAIL-CLOSED GUARD (issue #18): a selected category whose detector
+    # has no model detects NOTHING. Say so LOUDLY per category — and when
+    # EVERY selected category is in that state and no manual track boxes
+    # exist, refuse the scan outright: a job that cannot possibly find
+    # what it was asked for must not complete as if it had.
+    inert = []
+    if plater is not None and not plater.available():
+        inert.append("plate")
+    if personer is not None and not personer.available():
+        inert += [c for c in ("person", "screen") if c in cats]
+    if "mrn" in cats and mrn_re is None:
+        inert.append("mrn")          # its own log line already fired above
+    for c in inert:
+        if c != "mrn":
+            cb.log("      WARNING: the '%s' category is selected but has "
+                   "no model — it will detect NOTHING this scan. Download "
+                   "one in Settings → Detection models (one click)." % c)
+    has_tracks = any(w.get("track")
+                     for w in (getattr(args, "windows_data", None) or []))
+    if cats and not [c for c in cats if c not in inert] and not has_tracks:
+        raise RuntimeError(
+            "nothing to detect: every selected category (%s) is inactive "
+            "— each needs a detection model (or, for regex categories, a "
+            "pattern) that is not installed. Download a model in Settings "
+            "→ Detection models (a quality tier installs one too), then "
+            "Retry this job — the uploaded file is kept."
+            % ", ".join(sorted(inert)))
 
     cb.log(f"[3/4] Scanning (every {args.sample_interval}s or {args.scan_trigger}px of scroll"
            + (", self-tuning to screen activity and scroll speed)"

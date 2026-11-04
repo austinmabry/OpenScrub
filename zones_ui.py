@@ -635,6 +635,16 @@ function renderCats(){
    +'<option '+(S.mm[c]==="mosaic"?"selected":"")+'>mosaic</option>'
    +'<option '+(S.mm[c]==="inpaint"?"selected":"")+'>inpaint</option></select>'
    +'</div>';
+  // model-requiring categories: say so RIGHT HERE when the model is
+  // missing (issue #18: a plate-only scan ran against no model and
+  // found nothing — the only hint was one job-log line)
+  if(on&&((c==="plate"&&!MS.plate)||((c==="person"||c==="screen")&&!MS.person))){
+   h+='<div style="font-size:11px;color:#fbbf24;margin:-2px 0 3px 38px">'
+    +(c==="plate"&&MS.plate_autofetch
+      ?"no plate model installed yet &mdash; the recommended one downloads automatically when the scan starts"
+      :"needs a detection model &mdash; download one in Settings (header gear &rarr; Detection models) or this category detects NOTHING")
+    +'</div>';
+  }
  }
  const nTrk=(w.track||[]).length;
  const tact=S.cls==="trackobj"?"active":"";
@@ -1059,6 +1069,11 @@ const MAXUP=+"%%MAXUP%%"||0;  // server upload cap in bytes (0 = unlimited),
                               // injected at serve time like %%VERSION%%
 const FREEDISK=+"%%FREEDISK%%"||0; // server free disk at page load (bytes,
                               // 0 = unknown): refuse a doomed upload EARLY
+// which model-requiring detectors would actually find a model (issue #18):
+// optimistic defaults so nothing cries wolf before the fetch lands
+let MS={plate:true,person:true,plate_autofetch:true};
+fetch("/api/model_status").then(r=>r.json())
+ .then(d=>{MS=Object.assign(MS,d);if(S.dur)renderCats();}).catch(()=>{});
 async function startScan(){
  if(!S.dur){alert("Load a video first.");return;}
  if(!S.file&&!$("spath").value.trim()){alert("Choose a file or server path.");return;}
@@ -1095,6 +1110,19 @@ async function startScan(){
  if(!cats.length&&!nTrk
    &&!confirm("No categories are enabled and no objects are marked for "
    +"tracking — nothing will be detected. Start anyway?"))return;
+ // model-requiring categories with no model detect NOTHING (issue #18) —
+ // re-check live (a model may have been downloaded since page load)
+ try{MS=Object.assign(MS,await(await fetch("/api/model_status")).json());}catch(e){}
+ if((cats.includes("person")||cats.includes("screen"))&&!MS.person
+   &&!confirm("The person/screen categories need a detection model that "
+   +"isn't installed — they will detect NOTHING this scan.\n\nDownload one "
+   +"in Settings (header gear → Detection models), or pick a Detection "
+   +"quality tier there.\n\nStart the scan anyway?"))return;
+ if(cats.includes("plate")&&!MS.plate&&!MS.plate_autofetch
+   &&!confirm("The plate category needs a detection model that isn't "
+   +"installed and can't be fetched automatically — it will detect "
+   +"NOTHING this scan.\n\nDownload one in Settings → Detection "
+   +"models.\n\nStart anyway?"))return;
  const o={
   engine:$("engine").value,device:$("device").value,encoder:$("encoder").value,
   mode:$("mode").value,coverage:$("coverage").value,sample_interval:+$("si").value,scan_trigger:+$("st").value,

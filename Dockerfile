@@ -54,7 +54,7 @@ RUN pip install --no-cache-dir -r requirements.txt \
 # docker/prefetch_models.py itself changes; a sync test pins its table
 # to the engine's constants.
 COPY docker/prefetch_models.py ./
-RUN python prefetch_models.py yunet sface vittrack ppdet pprec pprec_yml
+RUN python prefetch_models.py yunet sface vittrack ppdet pprec pprec_yml plate_t640
 
 # ---- app layers: tiny, change every release
 COPY pyproject.toml README.md LICENSE NOTICE plate_models.json face_models.json person_models.json ./

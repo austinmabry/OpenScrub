@@ -58,6 +58,17 @@ MODELS = {
         "resolve/main/inference.yml",
         "5dfeb2777f6d0db8177d8128a8acfcf6e6276dc4ac73ea3bf0dc06d6a5e85d8e",
         "text_recognition_ppocrv5_mobile.yml"),
+    # the RECOMMENDED plate model (MIT, hash pinned in plate_models.json —
+    # this entry is pinned to the registry by the same sync test). Baked in
+    # so plate jobs work out of the box (issue #18: a fresh Docker install
+    # ran a plate-only scan with no model and found nothing). The filename
+    # is the registry id — PlateDetector.resolve_model searches the
+    # ~/.openscrub/models cache for <id>.onnx.
+    "plate_t640": (
+        "https://github.com/ankandrew/open-image-models/releases/download/"
+        "assets/yolo-v9-t-640-license-plates-end2end.onnx",
+        "c3c1026ca7d0585dd88084d68182dd897113712fa734ae1557ca70174440c076",
+        "oim-yolov9-t-640.onnx"),
 }
 
 

@@ -113,7 +113,19 @@ Key classes/functions (locate with grep, line numbers drift):
   on 7-col output. INERT without a model file (or if neither backend loads it).
   Model resolution: `--plate-model` arg → `$OPENSCRUB_PLATE_MODEL`
   → `models/plate_yolov8.onnx` → `models/<registry-id>.onnx` (recommended
-  first, adopts registry `input_size`).
+  first, adopts registry `input_size`) → the `_model_dir()` cache
+  (~/.openscrub/models, searched LAST — where Docker bakes models). The
+  ladder lives in the `resolve_model` classmethod (shared with the web's
+  /api/model_status). PLATE SELF-HEALS (#18): run_scan calls
+  `autofetch_plate_model` when plates are selected and nothing resolves —
+  unattended fetch is gated on recommended + permissive license
+  (MIT/Apache/BSD) + a PINNED sha256 (never TOFU, never AGPL — person
+  models stay manual). Docker images bake the recommended plate model
+  (prefetch key `plate_t640`, pinned to the registry by the sync test).
+  run_scan's INERT-CATEGORY GUARD then warns loudly per selected
+  category whose detector has no model, and REFUSES the scan when EVERY
+  selected category is inert and no manual track boxes exist — a job
+  that can't find what it was asked for must not "succeed".
 - `PersonDetector(PlateDetector)` — full-BODY person masking ("person"
   category): a face blur hides the face but clothing/build/gait still
   identify someone. Same dual-backend YOLO ONNX machinery as plates with

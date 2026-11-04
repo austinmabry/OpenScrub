@@ -7,6 +7,12 @@ import json
 import os
 import subprocess
 
+# the plate category self-heals by DOWNLOADING its model (issue #18) —
+# never from inside the test suite: e2e runs with default categories
+# would otherwise hit the network and change later tests' model state
+# (a real 9 MB download landed in models/ mid-suite before this guard)
+os.environ.setdefault("OPENSCRUB_NO_AUTOFETCH", "1")
+
 import cv2
 import numpy as np
 import pytest
@@ -2282,6 +2288,19 @@ def test_docker_prefetch_matches_engine_pins():
         "pprec_yml": (openscrub.PPREC_YML_URL, openscrub.PPREC_YML_SHA256,
                       "text_recognition_ppocrv5_mobile.yml"),
     }
+    # the baked plate model (issue #18) is pinned to the RECOMMENDED
+    # plate_models.json entry instead of an engine constant: url + sha256
+    # must match the registry, the filename must be the registry id (how
+    # PlateDetector.resolve_model finds it in the cache), and the entry
+    # must stay permissively licensed with a REAL pin (unattended
+    # fetch/bake must never ride on TOFU or a restrictive license).
+    rec = next(m for m in openscrub.load_model_registry("plate")
+               if m.get("recommended"))
+    assert rec.get("sha256"), "recommended plate model must be hash-pinned"
+    assert str(rec.get("license", "")).lower().startswith(
+        ("mit", "apache", "bsd"))
+    expect["plate_t640"] = (rec["download_url"], rec["sha256"],
+                            "%s.onnx" % rec["id"])
     assert pf.MODELS == expect
 
 
@@ -2949,6 +2968,122 @@ def test_upload_refused_when_disk_cannot_fit_it(monkeypatch):
     assert r.status_code == 507
     j = r.get_json()
     assert j and "disk space" in j["error"]
+
+
+def test_plate_autofetch_gates(monkeypatch, tmp_path):
+    """Issue #18: the plate category self-heals by fetching the
+    RECOMMENDED registry model unattended — but ONLY when that entry is
+    permissively licensed AND already sha256-pinned. TOFU pinning and
+    AGPL downloads remain explicit user decisions, and failures degrade
+    to None (the inert-category guard), never an exception."""
+    monkeypatch.delenv("OPENSCRUB_NO_AUTOFETCH", raising=False)
+    calls = []
+
+    def fake_download(entry, kind="plate", **kw):
+        calls.append(entry["id"])
+        p = tmp_path / ("%s.onnx" % entry["id"])
+        p.write_bytes(b"model")
+        return str(p)
+
+    monkeypatch.setattr(openscrub, "download_model", fake_download)
+
+    def reg(entries):
+        monkeypatch.setattr(openscrub, "load_model_registry",
+                            lambda kind="plate": entries)
+
+    good = {"id": "m1", "recommended": True, "license": "MIT",
+            "sha256": "ab" * 32, "download_url": "https://x/m1.onnx"}
+    reg([good])
+    assert openscrub.autofetch_plate_model() == str(tmp_path / "m1.onnx")
+    assert calls == ["m1"]
+    # no pin -> no unattended fetch (TOFU is a user decision)
+    reg([dict(good, sha256="")])
+    assert openscrub.autofetch_plate_model() is None
+    # restrictive license -> no unattended fetch
+    reg([dict(good, license="AGPL-3.0")])
+    assert openscrub.autofetch_plate_model() is None
+    # nothing recommended -> None
+    reg([dict(good, recommended=False)])
+    assert openscrub.autofetch_plate_model() is None
+    assert calls == ["m1"], "gated entries must never reach download_model"
+    # a download failure returns None instead of raising
+
+    def boom(entry, kind="plate", **kw):
+        raise RuntimeError("offline")
+    monkeypatch.setattr(openscrub, "download_model", boom)
+    reg([good])
+    assert openscrub.autofetch_plate_model() is None
+
+
+def test_resolve_model_searches_autofetch_cache(monkeypatch, tmp_path):
+    """The Docker images bake the recommended plate model into the
+    auto-download cache (~/.openscrub/models) — the resolution ladder
+    must search it (LAST, so explicit picks win) or the baked model is
+    invisible and plates stay inert in containers (issue #18)."""
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    monkeypatch.setattr(openscrub, "_model_dir", lambda: str(cache))
+    monkeypatch.delenv("OPENSCRUB_PLATE_MODEL", raising=False)
+    # a synthetic registry id, so a real model downloaded on this machine
+    # (repo models/, user data dir) can never satisfy the ladder early
+    monkeypatch.setattr(
+        openscrub, "load_model_registry",
+        lambda kind="plate": [{"id": "zz-test-plate-999",
+                               "recommended": True, "input_size": 416}])
+    found, size = openscrub.PlateDetector.resolve_model()
+    assert (found is None
+            or os.path.basename(found) == "plate_yolov8.onnx"), \
+        "only a conventional local file may resolve without the cache"
+    mf = cache / "zz-test-plate-999.onnx"
+    mf.write_bytes(b"model")
+    found, size = openscrub.PlateDetector.resolve_model()
+    if os.path.basename(found) != "plate_yolov8.onnx":   # no local override
+        assert found == str(mf)
+        assert size == 416      # input size adopted from the registry
+    # an explicit pick beats the cache
+    explicit = tmp_path / "mine.onnx"
+    explicit.write_bytes(b"model")
+    found, _ = openscrub.PlateDetector.resolve_model(str(explicit))
+    assert found == str(explicit)
+
+
+def test_scan_refuses_when_every_selected_category_is_inert(monkeypatch,
+                                                            tmp_path):
+    """Issue #18's real harm: a plate-only job with no plate model ran to
+    completion having detected nothing — fail OPEN. With no model
+    resolvable and autofetch unavailable, the scan must REFUSE loudly."""
+    monkeypatch.setattr(openscrub, "autofetch_plate_model",
+                        lambda cb=None: None)
+    monkeypatch.setattr(openscrub.PlateDetector, "resolve_model",
+                        classmethod(lambda cls, mp=None: (None, None)))
+    v = str(tmp_path / "clip.mp4")
+    make_video(v, [(300, "hello world")], seconds=0.5)
+    with pytest.raises(RuntimeError, match="nothing to detect"):
+        run(v, "--categories", "plate")
+
+
+def test_model_status_endpoint():
+    """The editor's 'will detect nothing' warnings ask the server which
+    detectors would find a model — same resolution ladder as the engine —
+    and whether a missing plate model self-heals."""
+    import openscrub_web as w
+    d = w.app.test_client().get("/api/model_status").get_json()
+    assert set(d) >= {"plate", "person", "plate_autofetch"}
+    assert all(isinstance(v, bool) for v in d.values())
+    # the shipped registry's recommended plate entry is MIT + pinned, so
+    # autofetch must be reported available
+    assert d["plate_autofetch"] is True
+
+
+def test_editor_warns_when_models_missing():
+    """The page must carry the issue-#18 warnings: a live model-status
+    fetch, inline amber notes on model-less checked categories, and
+    startScan confirms for person/screen."""
+    import zones_ui
+    page = zones_ui.ZONES_PAGE
+    assert "api/model_status" in page
+    assert "plate_autofetch" in page
+    assert "detect NOTHING" in page
 
 
 def test_editor_overlay_releases_video_controls():

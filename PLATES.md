@@ -28,8 +28,16 @@ train/export one.
 
 ## Getting a model
 
-The easiest path is the **built-in registry** (`plate_models.json`): curated,
-MIT-licensed YOLOv9 plate models from
+**Since v1.0.85 you usually don't have to do anything:** the first scan that
+selects the plate category and finds no model downloads the recommended
+registry model automatically (MIT-licensed, SHA-256-pinned — the same
+zero-setup treatment the face detector gets), and the Docker images ship it
+pre-installed. If the server is offline and no model is present, the scan
+refuses to run as a plate-only job (fail closed) and the log says how to fix
+it.
+
+To pick a different model, use the **built-in registry** (`plate_models.json`):
+curated, MIT-licensed YOLOv9 plate models from
 [ankandrew/open-image-models](https://github.com/ankandrew/open-image-models).
 In the web UI, pick one in the license-plate model section and click
 **Download** — the file's SHA-256 is pinned on first download and verified on

@@ -126,7 +126,7 @@ print('onnxruntime', ort.__version__, '| providers', provs)"
 # GPU PaddleOCR as its OCR engine; `--engine onnx` would fetch them at
 # first use.)
 COPY docker/prefetch_models.py ./
-RUN python prefetch_models.py yunet sface vittrack ppdet
+RUN python prefetch_models.py yunet sface vittrack ppdet plate_t640
 
 # ---- app layers: tiny, change every release
 COPY pyproject.toml README.md LICENSE NOTICE plate_models.json face_models.json person_models.json ./

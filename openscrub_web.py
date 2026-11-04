@@ -1300,6 +1300,39 @@ def models_select(kind):
     return jsonify({"ok": True, "selected": mid})
 
 
+@app.route("/api/model_status")
+def model_status():
+    """Whether the model-requiring detectors would find a model RIGHT NOW
+    (the same resolution ladder the engine runs — selected file first,
+    then conventional/registry/cache locations). Powers the editor's
+    'this category will detect nothing' warnings (issue #18). screen
+    rides the person model. plate_autofetch says whether a missing plate
+    model would self-heal at scan start (recommended registry entry is
+    permissively licensed and hash-pinned)."""
+    sel = load_model_select()
+    out = {}
+    for kind, cls in (("plate", openscrub.PlateDetector),
+                      ("person", openscrub.PersonDetector)):
+        mp = None
+        mid = sel.get(kind)
+        if mid:
+            mp = find_model_file("%s.onnx" % mid)
+        try:
+            out[kind] = bool(cls.resolve_model(mp)[0])
+        except Exception:
+            out[kind] = True        # can't tell -> don't cry wolf
+    try:
+        rec = next((m for m in openscrub.load_model_registry("plate")
+                    if m.get("recommended")), None)
+        out["plate_autofetch"] = bool(
+            rec and (rec.get("sha256") or "").strip()
+            and str(rec.get("license", "")).lower().startswith(
+                ("mit", "apache", "bsd")))
+    except Exception:
+        out["plate_autofetch"] = False
+    return jsonify(out)
+
+
 _model_dl = {"state": "idle", "pct": 0, "error": "", "id": "", "kind": ""}
 
 
