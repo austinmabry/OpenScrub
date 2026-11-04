@@ -355,7 +355,16 @@ Key classes/functions (locate with grep, line numbers drift):
   drawing while `txr` is the raw mapping used for handle hit tests so an
   off-view handle can't be grabbed at the clamped edge; ruler ticks
   adapt to the visible span down to 0.5s), iOS prime + seek-queue
-  live scrubbing. Categories default ALL OFF (every new window too —
+  live scrubbing. Preview modes: ▶ Play (DEFAULT — the zone overlay gets
+  pointer-events:none so the native video controls work; the old
+  draw-by-default swallowed every click and read as "draw tool stuck",
+  issue #17) / Draw / Select; Esc returns to Play, and picking any zone
+  class (category swatch / ignore / trackobj) auto-enters Draw. The
+  review box editor has the same idea: ▶ streams
+  /api/jobs/<id>/video (Range-aware send_file of the scan video) with
+  boxes repainted live (rAF playhead + throttled boxes_at polls,
+  pointer edits frozen while playing; pause → crisp frame_at + edits).
+  Categories default ALL OFF (every new window too —
   nothing is detected until the user checks a category or draws a zone;
   the summary line under Start shows an amber "nothing will be detected"
   warning while empty, and startScan confirms manual-only). Serialization:

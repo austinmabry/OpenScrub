@@ -218,6 +218,7 @@ details .inner .full{grid-column:1/-1}
    <span class="wname" id="wname">Window 1</span><span id="wtime"></span>
    <span class="mutd" id="wzsum"></span>
    <span class="sp"></span>
+   <button class="mini" id="mplay" onclick="setMode('play')">&#9654; Play</button>
    <button class="mini" id="mdraw" onclick="setMode('draw')">&#9998; Draw</button>
    <button class="mini" id="msel" onclick="setMode('select')">&#9635; Select</button>
    <button class="mini" onclick="undoZone()">&#8630; Undo</button>
@@ -653,8 +654,18 @@ function renderCats(){
 }
 function togCat(c,on){const w=selWin();if(on)w.cats[c]=true;else delete w.cats[c];
  renderCats();summary();}
-function setCls(c){S.cls=c;S.selZone=null;renderCats();draw();}
+function setCls(c){S.cls=c;S.selZone=null;
+ // picking a zone class IS the intent to draw — switch modes for the user
+ // (play is the default, so without this the first zone needs two clicks
+ // and nothing explains why the frame ignores the pointer)
+ if(S.mode!=="draw")setMode("draw");
+ renderCats();draw();}
 function hint(){
+ if(S.mode==="play"){
+  $("hint").innerHTML="&#9654; video controls active &mdash; "
+   +"&#9998; Draw adds zones, &#8857; track objects";
+  return;
+ }
  if(S.mode==="draw"&&S.cls==="trackobj"){
   $("hint").innerHTML='&#127919; scrub to a frame where the object is '
    +'clear, then draw ON it — the scan tracks and blurs it through '
@@ -730,7 +741,10 @@ function hookZC(){
   S.drag=null;
  });
  document.addEventListener("keydown",e=>{
-  if(e.key==="Escape"){S.anchor=null;S.fl=null;draw();}
+  if(e.key==="Escape"){
+   if(S.anchor){S.anchor=null;S.fl=null;draw();}
+   else if(S.mode!=="play")setMode("play");   // Esc closes the draw tool
+  }
   if((e.key==="Delete"||e.key==="Backspace")&&S.mode==="select"&&S.selZone
      &&document.activeElement.tagName!=="INPUT"
      &&document.activeElement.tagName!=="TEXTAREA"){
@@ -789,9 +803,15 @@ function draw(){
  hint();
 }
 function setMode(m){S.mode=m;S.anchor=null;S.selZone=null;
+ $("mplay").classList.toggle("on",m==="play");
  $("mdraw").classList.toggle("on",m==="draw");
  $("msel").classList.toggle("on",m==="select");
- $("zc").style.cursor=m==="draw"?"crosshair":"default";draw();}
+ // Play mode (the DEFAULT): the overlay lets clicks fall through to the
+ // video's native controls. Without it the canvas swallowed every click,
+ // so the video could not even be played and the draw tool looked
+ // impossible to close (issue #17). Zones still render on the overlay.
+ $("zc").style.pointerEvents=m==="play"?"none":"auto";
+ $("zc").style.cursor=m==="draw"?"crosshair":"default";hint();draw();}
 
 // ---------- windows ----------
 function winBar(){
@@ -1135,7 +1155,7 @@ async function startScan(){
  sum.textContent=S.file?"uploading… 0%":"submitting…";
  xhr.send(fd);
 }
-setMode("draw");loadCustomList();
+setMode("play");loadCustomList();   // play by default: drawing is opt-in (#17)
 </script>
 <script>
 %%APP_JS%%

@@ -2951,6 +2951,59 @@ def test_upload_refused_when_disk_cannot_fit_it(monkeypatch):
     assert j and "disk space" in j["error"]
 
 
+def test_editor_overlay_releases_video_controls():
+    """Issue #17: the zone overlay swallowed every click in both modes, so
+    a freshly loaded video could not even be played and the default draw
+    tool looked impossible to close. Play is a real mode now — the overlay
+    passes pointer events through to the native video controls — and it is
+    the DEFAULT; drawing is opt-in."""
+    import zones_ui
+    page = zones_ui.ZONES_PAGE
+    assert 'id="mplay"' in page                       # the ▶ Play button
+    assert 'setMode("play");loadCustomList' in page   # play is the default
+    assert 'pointerEvents=m==="play"?"none":"auto"' in page
+    assert "Esc closes the draw tool" in page         # Escape exits draw
+    # picking a zone class flips into draw mode by itself (play default
+    # must not make the first zone a two-click mystery)
+    assert 'if(S.mode!=="draw")setMode("draw")' in page
+
+
+def test_box_editor_has_playback():
+    """Issue #17 part two: 'you cannot play review and see hits' — the
+    review box editor was scrub-only. It now streams the job video with
+    the boxes repainted live."""
+    import openscrub_web
+    page = openscrub_web.PAGE
+    assert "beTogglePlay" in page and 'id="beVid"' in page
+    assert "api/jobs/${CUR}/video" in page
+
+
+def test_job_video_stream_supports_range():
+    """The playback route must stream the job's scan video with Range
+    support (browsers refuse to seek a <video> without it) and 404 once
+    the file is gone instead of erroring."""
+    import shutil
+    import openscrub_web as w
+    job = w.new_job("", {}, "clip.mp4")
+    client = w.app.test_client()
+    try:
+        path = os.path.join(job["dir"], "input.mp4")
+        with open(path, "wb") as f:
+            f.write(bytes(range(256)) * 16)
+        job["video"] = path
+        r = client.get(f"/api/jobs/{job['id']}/video")
+        assert r.status_code == 200
+        assert r.headers.get("Accept-Ranges") == "bytes"
+        r2 = client.get(f"/api/jobs/{job['id']}/video",
+                        headers={"Range": "bytes=0-99"})
+        assert r2.status_code == 206 and len(r2.data) == 100
+        os.remove(path)
+        assert client.get(f"/api/jobs/{job['id']}/video").status_code == 404
+    finally:
+        shutil.rmtree(job["dir"], ignore_errors=True)
+        w.JOBS.pop(job["id"], None)
+
+
 def test_rehydrate_surfaces_reportless_upload_as_failed_job():
     """A job that crashed before writing a report used to vanish from the
     UI at the next restart while its multi-GB upload stayed on disk — an

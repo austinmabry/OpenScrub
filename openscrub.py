@@ -36,7 +36,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.83"
+VERSION = "1.0.84"
 
 # ----------------------------------------------------------------------------
 # OCR backends

@@ -1064,6 +1064,19 @@ def job_frame_at(jid):
     return Response(buf.tobytes(), mimetype="image/jpeg")
 
 
+@app.route("/api/jobs/<jid>/video")
+def job_video_stream(jid):
+    """Range-aware stream of the job's scan video so review can PLAY the
+    footage with live boxes (issue #17: the box editor was scrub-only,
+    'you cannot play review and see hits'). Serves the same file frame_at
+    reads — for HDR/VFR jobs that is the normalized SDR scan copy, which
+    every browser can decode."""
+    job = JOBS.get(jid) or abort(404)
+    if not (job.get("video") and os.path.exists(job["video"])):
+        abort(404)
+    return send_file(job["video"], conditional=True)
+
+
 @app.route("/api/jobs/<jid>/detections", methods=["POST"])
 def job_save_edits(jid):
     job = JOBS.get(jid) or abort(404)
@@ -1972,11 +1985,13 @@ async function loadBoxEdit(fromReview){
      add:false,addAnchor:null,drag:null,scale:1,dur:mi.duration,
      win:[0,mi.duration],trk:false,muteArm:false,tlDrag:null,
      tlspans:[],audio:[],audioSel:-1};
- c.innerHTML=`<div class="row" style="margin-top:8px">t=
+ c.innerHTML=`<div class="row" style="margin-top:8px">
+  <button class="sec" id="bePlay" style="padding:3px 11px" title="Play the video with live boxes — pause to edit them" onclick="beTogglePlay()">&#9654;</button>t=
   <input type="range" id="beT" min="0" max="${Math.max(0.2,mi.duration-0.1).toFixed(1)}"
    step="0.1" value="0" style="flex:1" oninput="beScrub()"><span id="beL">0s</span></div>
   <div style="position:relative;display:inline-block;max-width:100%">
    <img id="beImg" style="max-width:100%;border-radius:8px">
+   <video id="beVid" style="max-width:100%;border-radius:8px;display:none" playsinline preload="none"></video>
    <canvas id="beCv" style="position:absolute;left:0;top:0;touch-action:none"></canvas></div>
   <canvas id="beTL" style="width:100%;height:72px;display:block;margin-top:6px;
    border-radius:6px;touch-action:none;cursor:crosshair"
@@ -2001,7 +2016,8 @@ async function loadBoxEdit(fromReview){
     <button class="sec" onclick="beApplyTimes()">Apply times</button></span>
    <span id="beTrkSt" style="display:none;font-size:13px;color:#fbbf24">tracking&#8230;</span>
    <button onclick="beSave()">Save changes &amp; re-render</button></div>
-  <p style="font-size:12px;color:#94a3b8;margin:4px 0 0">Click a red box to
+  <p style="font-size:12px;color:#94a3b8;margin:4px 0 0">&#9654; plays the
+   video with the boxes moving live (pause to edit). Click a red box to
    select — drag inside to move, a corner to resize, edit its from/to times,
    or remove its blur. &#65291; Add box: drag a static region. &#8857; Track object:
    drag the timeline handles to the part of the video you care about, scrub
@@ -2009,10 +2025,70 @@ async function loadBoxEdit(fromReview){
    followed and blurred through the window. &#128263; Audio span: drag on the
    timeline's bottom lane to silence (or bleep) that stretch of sound.</p>`;
  const img=document.getElementById("beImg");
- img.onload=()=>{const cv=document.getElementById("beCv");
+ img.onload=()=>{if(BE.playing)return;const cv=document.getElementById("beCv");
   cv.width=img.clientWidth;cv.height=img.clientHeight;
   BE.scale=img.clientWidth/(img.naturalWidth||1);beDraw();};
+ const bv=document.getElementById("beVid");
+ bv.addEventListener("pause",()=>{if(BE.playing)bePlayStop();});
+ bv.addEventListener("ended",()=>{if(BE.playing)bePlayStop();});
  beHook();tlHook();await tlInit();beScrub();
+}
+
+// ---- playback with live boxes (issue #17: review was scrub-only) ----
+async function beTogglePlay(){
+ const v=document.getElementById("beVid"),img=document.getElementById("beImg");
+ if(!v)return;
+ if(BE.playing){v.pause();return;}          // the pause handler cleans up
+ if(!v.src)v.src=`api/jobs/${CUR}/video`;
+ BE.playing=true;
+ v.style.display="block";img.style.display="none";
+ // boxes are view-only while playing: freeze pointer edits so a moving
+ // box can't be grabbed mid-flight
+ const cv=document.getElementById("beCv");cv.style.pointerEvents="none";
+ document.getElementById("bePlay").innerHTML="&#10074;&#10074;";
+ try{
+  if(v.readyState<1)await new Promise((res,rej)=>{
+   v.onloadedmetadata=res;
+   v.onerror=()=>rej(new Error("the browser cannot decode this file"));});
+  v.currentTime=BE.t||0;
+  await v.play();
+ }catch(e){
+  bePlayStop();
+  alert("Could not play the video in this browser ("+(e&&e.message||e)
+   +") — the scrub slider still works frame by frame.");
+  return;
+ }
+ if(v.clientWidth){cv.width=v.clientWidth;cv.height=v.clientHeight;
+  BE.scale=v.clientWidth/(v.videoWidth||1);}
+ // boxes come from the server per timestamp; refresh them on a throttle
+ // while rAF keeps the playhead, label and box painting per-frame smooth
+ let lastQ=0,inFlight=false;
+ const step=()=>{
+  if(!BE.playing)return;
+  BE.t=v.currentTime;
+  document.getElementById("beT").value=BE.t;
+  document.getElementById("beL").textContent=BE.t.toFixed(1)+"s";
+  const now=performance.now();
+  if(!inFlight&&now-lastQ>150){
+   inFlight=true;lastQ=now;
+   fetch(`api/jobs/${CUR}/boxes_at?t=${BE.t.toFixed(2)}&all=1`)
+    .then(r=>r.json())
+    .then(d=>{BE.ox=d.ox;BE.oy=d.oy;BE.raw=d.boxes;beFilter();})
+    .catch(()=>{}).finally(()=>{inFlight=false;});
+  }
+  beDraw();beTLDraw();
+  requestAnimationFrame(step);
+ };
+ requestAnimationFrame(step);
+}
+function bePlayStop(){
+ BE.playing=false;
+ const v=document.getElementById("beVid");
+ if(v){try{v.pause();}catch(e){}v.style.display="none";}
+ const img=document.getElementById("beImg");if(img)img.style.display="";
+ const b=document.getElementById("bePlay");if(b)b.innerHTML="&#9654;";
+ const cv=document.getElementById("beCv");if(cv)cv.style.pointerEvents="auto";
+ beScrub();   // crisp frame + authoritative boxes at the pause point
 }
 
 const TLC={name:"#3b82f6",dob:"#22c55e",phone:"#f59e0b",ssn:"#ef4444",
@@ -2158,6 +2234,12 @@ async function beTrackGo(box){
  },1500);
 }
 async function beScrub(){
+ const sl=document.getElementById("beT");if(!sl)return; // editor was closed
+ if(BE.playing){               // dragging the slider while playing = seek
+  const v=document.getElementById("beVid");
+  if(v)v.currentTime=+sl.value;
+  return;                      // the rAF loop keeps label/boxes in sync
+ }
  BE.sel=-1;document.getElementById("beRm").style.display="none";
  document.getElementById("beTimes").style.display="none";
  BE.t=+document.getElementById("beT").value;
@@ -2340,6 +2422,10 @@ async function cancelJob(){await fetch("api/jobs/"+CUR+"/cancel",{method:"POST"}
 // the three post-render views (compare, review, box editor) are mutually
 // exclusive: opening one closes the others instead of stacking them
 function showPanel(which){
+ // a playing box-editor video must be PAUSED before its DOM is wiped —
+ // an element removed via innerHTML can keep its audio running
+ try{const v=document.getElementById("beVid");
+  if(v&&!v.paused){BE.playing=false;v.pause();}}catch(e){}
  // "boxedit_rev" = the editor button INSIDE the review card: the editor
  // mounts in the review's own slot, so the review stays. Everything else
  // is standalone and closes the other panels.
