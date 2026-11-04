@@ -222,6 +222,54 @@ def _too_large(e):
         "uploading through the browser." % gb}), 413
 
 
+def _disk_free(path):
+    """Free bytes on the filesystem holding `path` (own def: tests stub it,
+    and every caller shares one failure mode)."""
+    import shutil as _sh
+    return _sh.disk_usage(path).free
+
+
+def _upload_disk_error(content_length):
+    """None, or a refusal message for an upload of `content_length` bytes
+    that cannot fit on disk. Uploads are spooled through the system temp
+    dir by the form parser and then copied into the job dir, so BOTH
+    filesystems need room — double on a shared one — plus 1 GB headroom.
+    Issue #16: each retry of a failed 18 GB job re-uploaded the file into
+    a fresh job dir until the disk silently filled. Unmeasurable free
+    space never blocks (same rule as the scan-copy verifier: the guard
+    acts only on a measured certainty)."""
+    cl = int(content_length or 0)
+    if cl <= 0:
+        return None
+    margin = 1 << 30
+    import tempfile
+    tmp = tempfile.gettempdir()
+    try:
+        same = os.stat(JOBS_DIR).st_dev == os.stat(tmp).st_dev
+    except OSError:
+        same = True                       # can't tell -> assume shared
+    try:
+        if same:
+            short = _disk_free(JOBS_DIR) < 2 * cl + margin
+        else:
+            short = (_disk_free(JOBS_DIR) < cl + margin
+                     or _disk_free(tmp) < cl + margin)
+    except OSError:
+        return None
+    if not short:
+        return None
+    try:
+        free_gb = _disk_free(JOBS_DIR) / 1024 ** 3
+    except OSError:
+        free_gb = 0.0
+    return ("not enough disk space on the server for this upload "
+            "(%.1f GB upload, %.1f GB free where jobs are stored — an "
+            "upload needs room for a temporary copy too). Delete old "
+            "jobs (each keeps its upload and output until deleted), or "
+            "use the 'path on the server' box, which reads the file in "
+            "place without copying it." % (cl / 1024 ** 3, free_gb))
+
+
 TOKEN = None
 JOBS = {}          # id -> job dict
 JOBS_LOCK = threading.Lock()
@@ -277,7 +325,7 @@ def new_job(video_path, options, name):
     job = {
         "id": jid, "dir": jdir, "video": video_path, "name": name,
         "options": options, "phase": "queued", "progress": 0.0,
-        "eta": None,
+        "eta": None, "size": 0,
         "log": [], "error": None, "output": None, "created": time.time(),
         "cancel": threading.Event(), "stats": {},
     }
@@ -290,6 +338,10 @@ def job_public(job):
     return {k: job[k] for k in ("id", "name", "phase", "progress", "error",
                                 "stats")} | {
         "eta": job.get("eta"),      # .get(): jobs rehydrated from disk lack it
+        # input size: lets the editor warn before re-uploading a file that
+        # is ALREADY on the server (issue #16 — each retry re-uploaded the
+        # same 18 GB until the disk filled)
+        "size": job.get("size") or 0,
         "log_tail": job["log"][-30:],
         "log_len": len(job["log"]),
         "has_output": bool(job["output"] and os.path.exists(job["output"])),
@@ -624,6 +676,18 @@ def enforce_vault_lock():
                    "access jobs")
 
 
+@app.before_request
+def refuse_upload_without_disk_room():
+    """Registered after auth on purpose, but still BEFORE the view runs:
+    by the time create_job touches request.files, werkzeug has already
+    spooled the whole upload into the temp dir — too late to protect the
+    disk. Checking the Content-Length header here reads nothing."""
+    if request.method == "POST" and request.path == "/api/jobs":
+        err = _upload_disk_error(request.content_length)
+        if err:
+            return jsonify({"error": err}), 507
+
+
 @app.after_request
 def set_cookie(resp):
     if TOKEN is not None and request.args.get("token") == TOKEN:
@@ -666,6 +730,10 @@ def create_job():
             path = os.path.join(job["dir"], "input" + ext)
             f.save(path)
             job["video"] = path
+            try:
+                job["size"] = os.path.getsize(path)
+            except OSError:
+                pass
             WORK_Q.put((job["id"], "scan"))
             jobs.append(job["id"])
     elif request.form.get("server_path"):
@@ -674,6 +742,10 @@ def create_job():
         if err:
             return jsonify({"error": err}), 400
         job = new_job(p, options, os.path.basename(p))
+        try:
+            job["size"] = os.path.getsize(p)
+        except OSError:
+            pass
         WORK_Q.put((job["id"], "scan"))
         jobs.append(job["id"])
     else:
@@ -757,6 +829,35 @@ def job_delete(jid):
     return jsonify({"ok": True, "pending": True,
                     "note": "some files were still in use; removal will "
                             "complete automatically"})
+
+
+@app.route("/api/jobs/<jid>/retry", methods=["POST"])
+def job_retry(jid):
+    """Re-run a failed or cancelled job's SCAN, reusing the file that is
+    already on the server. Before this existed, the only path after an
+    error was Start scan — which uploaded the same multi-GB file into a
+    fresh job dir on every attempt until the disk filled (issue #16)."""
+    with JOBS_LOCK:
+        job = JOBS.get(jid)
+        if job is None:
+            abort(404)
+        if job["phase"] not in ("error", "cancelled"):
+            return jsonify({"error": "only a failed or cancelled job can "
+                                     "be retried"}), 409
+        if not (job.get("video") and os.path.exists(job["video"])):
+            return jsonify({"error": "the job's video file is no longer "
+                                     "on the server — start a new "
+                                     "scan"}), 410
+        job["cancel"].clear()
+        job["error"] = None
+        job["output"] = None
+        job["progress"] = 0.0
+        job["eta"] = None
+        job["phase"] = "queued"
+        job["log"].append("— retrying scan (reusing the file already on "
+                          "the server — nothing is re-uploaded) —")
+    WORK_Q.put((jid, "scan"))
+    return jsonify({"ok": True})
 
 
 @app.route("/api/jobs/<jid>")
@@ -1731,9 +1832,16 @@ async function loadJobs(){
   `<div class="row" style="justify-content:space-between;padding:4px 0">
    <a href="#" onclick="openJob('${j.id}');return false">${j.name}</a>
    <span style="display:flex;gap:10px;align-items:center"><span class="badge">${j.phase}</span>
+   ${(j.phase=="error"||j.phase=="cancelled")?`<a href="#" title="Retry the scan — reuses the file already on the server, nothing is re-uploaded" style="text-decoration:none;font-size:15px" onclick="retryJob('${j.id}');return false">&#8635;</a>`:""}
    <a href="#" title="Delete this job and all of its files" style="text-decoration:none;font-size:15px" onclick="delJob('${j.id}');return false">&#128465;&#65039;</a></span></div>`).join(""):"none yet";
 }
 
+async function retryJob(id){
+ const r=await fetch("api/jobs/"+id+"/retry",{method:"POST"});
+ let j={};try{j=await r.json();}catch(e){}
+ if(!r.ok){alert(j.error||"could not retry the job");return;}
+ JOBSJSON="";loadJobs();if(typeof openJob==="function")openJob(id);
+}
 async function delJob(id){
  if(!confirm("Delete this job and ALL of its files — upload, report, and rendered output?\\n\\nThis cannot be undone."))return;
  const r=await fetch("api/jobs/"+id,{method:"DELETE"});
@@ -1821,6 +1929,12 @@ async function refresh(){
   let a="";
   if(j.phase=="scanning"||j.phase=="rendering")
    a=`<button class="danger" onclick="cancelJob()">Cancel</button>`;
+  if(j.phase=="error"||j.phase=="cancelled")
+   a=`<button onclick="retryJob(CUR)">Retry scan (no re-upload)</button>
+    <div style="width:100%;font-size:12px;color:#9ca3af">The uploaded file
+    is still on the server — Retry re-runs the scan without uploading it
+    again. Delete the job (&#128465;&#65039; in the list) to free its disk
+    space.</div>`;
   if(j.phase=="review"){
    // no interstitial button: review is the ONLY next step after a scan,
    // so open it directly — both on a live scan finishing and on
@@ -3075,6 +3189,15 @@ def index():
         page = page.replace('face:"#ec4899"', 'face:"#ec4899"%s' % extra)
     page = page.replace("%%MAXUP%%",
                         str(app.config.get("MAX_CONTENT_LENGTH") or 0))
+    # free disk at serve time, so the editor can refuse an upload that
+    # cannot fit BEFORE hours of transfer (issue #16: repeated 18 GB
+    # re-uploads filled the disk). The server-side guard on POST
+    # /api/jobs stays authoritative — this is only the early warning.
+    try:
+        free = _disk_free(JOBS_DIR)
+    except OSError:
+        free = 0                       # unknown -> preflight disabled
+    page = page.replace("%%FREEDISK%%", str(free))
     return page.replace("%%VERSION%%", openscrub.VERSION)
 
 
@@ -3245,9 +3368,41 @@ def rehydrate_jobs():
             # job as a zombie (restarts release whatever held the lock)
             _reap_job_dir(jdir, jid, retries=1)
             continue
-        if not os.path.exists(rep):
-            continue
         if jid in JOBS:
+            continue
+        if not os.path.exists(rep):
+            # NO report: the scan never completed (crashed or the server
+            # went down mid-scan). If the dir still holds an uploaded
+            # input, surface it as a FAILED job instead of skipping it —
+            # a skipped dir was an invisible orphan the UI could neither
+            # retry nor delete, silently eating an 18 GB upload per
+            # failed attempt (issue #16).
+            up = next((os.path.join(jdir, "input" + e)
+                       for e in sorted(MEDIA_EXTS)
+                       if os.path.exists(os.path.join(jdir, "input" + e))),
+                      None)
+            if not up:
+                continue
+            try:
+                size = os.path.getsize(up)
+            except OSError:
+                size = 0
+            job = {
+                "id": jid, "dir": jdir, "video": up,
+                "name": os.path.basename(up), "options": {},
+                "phase": "error", "progress": 0.0, "size": size,
+                "log": ["(recovered after server restart — the scan had "
+                        "not completed)"],
+                "error": "recovered after a server restart before the "
+                         "scan finished — Retry re-runs it with default "
+                         "settings (the uploaded file was kept), or "
+                         "Delete frees its disk space",
+                "output": None, "created": os.path.getmtime(jdir),
+                "cancel": threading.Event(), "stats": {},
+            }
+            with JOBS_LOCK:
+                JOBS[jid] = job
+            n += 1
             continue
         try:
             with open(rep, encoding="utf-8") as f:
@@ -3269,6 +3424,16 @@ def rehydrate_jobs():
                 "created": os.path.getmtime(jdir),
                 "cancel": threading.Event(), "stats": {},
             }
+            try:
+                # original upload size, for the editor's duplicate-upload
+                # warning (prov input may be the normalized scan copy)
+                orig = next((os.path.join(jdir, "input" + e)
+                             for e in sorted(MEDIA_EXTS)
+                             if os.path.exists(
+                                 os.path.join(jdir, "input" + e))), video)
+                job["size"] = os.path.getsize(orig)
+            except OSError:
+                pass
             with JOBS_LOCK:
                 JOBS[jid] = job
             n += 1

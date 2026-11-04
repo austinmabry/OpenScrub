@@ -477,6 +477,12 @@ Docker; `0` = unlimited). For files that large, the "path on the
 server" box is the better route anyway: the server reads the file in
 place and nothing crosses the network.
 
+A failed or cancelled job keeps its uploaded file: use its ↻ **Retry**
+button (jobs list or the job page) to re-run the scan without uploading
+again, or delete the job to free the space. The server also refuses an
+upload that cannot fit on its disk (and the editor warns before sending
+one), so repeated retries can never silently fill the drive.
+
 ## HDR support
 
 OpenScrub matches the output to the source:
@@ -771,6 +777,8 @@ Two reasoning layers prevent "flash of PII" from intermittent OCR misses:
 | Small text missed entirely | install paddleocr; record at native resolution |
 | Upload rejected: 413 Request Entity Too Large | raise `--max-upload-gb` / `OPENSCRUB_MAX_UPLOAD_GB` (0 = unlimited), or use the "path on the server" box — huge files shouldn't travel through the browser |
 | Docker: no logs, can't reach the UI | open https://localhost:8384 (the published port) — never the 172.17.x.x container IP; pull a current image so logs stream unbuffered |
+| Scan dies with an OpenCV `gather`/`-211` error on a plate/person model | fixed in v1.0.83 (OpenCV 5 loads these models but can't run them; they now self-test at load and run on onnxruntime) — update OpenScrub |
+| A scan failed and the disk is filling with re-uploads | use the job's ↻ Retry (reuses the uploaded file); delete failed jobs you don't need — each keeps its upload until deleted |
 
 ## License
 

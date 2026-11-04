@@ -2773,3 +2773,204 @@ def test_index_injects_upload_cap_for_preflight():
     assert "%%MAXUP%%" not in html
     cap = openscrub_web.app.config["MAX_CONTENT_LENGTH"] or 0
     assert f'const MAXUP=+"{cap}"||0' in html
+    # same mechanism for free disk: the editor refuses an upload that
+    # cannot fit before hours of transfer (issue #16)
+    assert "%%FREEDISK%%" not in html
+    assert 'const FREEDISK=+"' in html
+
+
+class _FakeOrtTensor:
+    def __init__(self, name):
+        self.name = name
+
+
+class _FakeOrtSession:
+    """Stands in for an onnxruntime InferenceSession in backend tests."""
+    def __init__(self, out=None):
+        self._out = out if out is not None else np.zeros((1, 5, 8400),
+                                                         np.float32)
+
+    def get_inputs(self):
+        return [_FakeOrtTensor("images")]
+
+    def get_outputs(self):
+        return [_FakeOrtTensor("output0")]
+
+    def get_providers(self):
+        return ["CPUExecutionProvider"]
+
+    def run(self, outs, feed):
+        return [self._out]
+
+
+def test_plate_cv2_backend_must_prove_inference_at_load(tmp_path,
+                                                        monkeypatch):
+    """Issue #16: OpenCV 5.0.0's ONNX importer ACCEPTS the end2end YOLOv9
+    plate models that 4.x rejected at readNetFromONNX — and then dies at
+    the FIRST forward ('gather2_layer ... (-211) some of indices are
+    outside of range'), killing the whole scan. A load that only proves
+    readNetFromONNX is therefore worthless: the cv2 backend must survive
+    a real blob->forward->decode before being trusted, and a model that
+    can't moves to onnxruntime (which is field-proven on these exports)."""
+    mp = tmp_path / "plate.onnx"
+    mp.write_bytes(b"fake")
+
+    class _Cv2LoadsButCannotRun:
+        def setInput(self, blob):
+            pass
+
+        def forward(self, *a):
+            raise RuntimeError("(-211:One of the arguments' values is out "
+                               "of range) some of indices are outside of "
+                               "range in function 'cv::dnn::gather'")
+
+    monkeypatch.setattr(openscrub, "_apply_cuda_dnn", lambda n: n)
+    monkeypatch.setattr(openscrub.cv2.dnn, "readNetFromONNX",
+                        lambda p: _Cv2LoadsButCannotRun())
+    monkeypatch.setattr(openscrub, "_ort_session",
+                        lambda p: _FakeOrtSession())
+    det = openscrub.PlateDetector(model_path=str(mp), thresh=0.5)
+    assert det.net is None, "a net that cannot run a forward is NOT loaded"
+    assert det.ort is not None and det.available()
+    assert det.find(np.zeros((480, 640, 3), np.uint8)) == []
+
+
+def test_plate_cv2_midscan_failure_rescues_onto_onnxruntime(tmp_path,
+                                                            monkeypatch):
+    """Belt and braces for the same class of failure: a cv2 net that
+    passes the load-time self-test but dies on a real frame mid-scan must
+    move to onnxruntime and keep scanning — and when onnxruntime cannot
+    take over, the scan must die LOUDLY (fail closed) rather than quietly
+    continue without the category."""
+    mp = tmp_path / "plate.onnx"
+    mp.write_bytes(b"fake")
+
+    class _Cv2DiesOnSecondForward:
+        def __init__(self):
+            self.calls = 0
+
+        def setInput(self, blob):
+            pass
+
+        def forward(self, *a):
+            self.calls += 1
+            if self.calls > 1:
+                raise RuntimeError("gather: index out of range mid-scan")
+            return np.zeros((1, 5, 8400), np.float32)
+
+    monkeypatch.setattr(openscrub, "_apply_cuda_dnn", lambda n: n)
+    monkeypatch.setattr(openscrub.cv2.dnn, "readNetFromONNX",
+                        lambda p: _Cv2DiesOnSecondForward())
+    monkeypatch.setattr(openscrub, "_ort_session",
+                        lambda p: _FakeOrtSession())
+    det = openscrub.PlateDetector(model_path=str(mp), thresh=0.5)
+    assert det.net is not None          # load self-test passed
+    frame = np.zeros((480, 640, 3), np.uint8)
+    assert det.find(frame) == []        # forward #2 dies -> rescued
+    assert det.ort is not None and det.net is None
+    assert det.find(frame) == []        # and it keeps working
+
+    # no rescue available -> the failure must surface, never go silent
+    def _no_ort(p):
+        raise RuntimeError("onnxruntime not installed")
+    monkeypatch.setattr(openscrub, "_ort_session", _no_ort)
+    monkeypatch.setattr(openscrub.cv2.dnn, "readNetFromONNX",
+                        lambda p: _Cv2DiesOnSecondForward())
+    det2 = openscrub.PlateDetector(model_path=str(mp), thresh=0.5)
+    assert det2.net is not None
+    with pytest.raises(RuntimeError):
+        det2.find(frame)
+
+
+def test_job_retry_reuses_upload_without_a_new_job():
+    """Issue #16, part two: after a failed scan the only path forward was
+    Start scan, which re-uploaded the same multi-GB file into a FRESH job
+    dir on every attempt until the disk filled. Retry re-queues the same
+    job on the file already on the server."""
+    import shutil
+    import openscrub_web as w
+    job = w.new_job("", {}, "clip.mp4")
+    client = w.app.test_client()
+    try:
+        path = os.path.join(job["dir"], "input.mp4")
+        with open(path, "wb") as f:
+            f.write(b"\x00" * 1024)
+        job["video"], job["size"] = path, 1024
+        job["phase"], job["error"] = "error", "boom"
+        n0 = len(w.JOBS)
+        r = client.post(f"/api/jobs/{job['id']}/retry")
+        assert r.status_code == 200
+        assert len(w.JOBS) == n0, "retry must reuse the job, not add one"
+        assert job["phase"] == "queued" and job["error"] is None
+        # guards: a running job can't be retried; a reaped file can't either
+        job["phase"] = "scanning"
+        assert client.post(f"/api/jobs/{job['id']}/retry").status_code == 409
+        job["phase"] = "error"
+        os.remove(path)
+        assert client.post(f"/api/jobs/{job['id']}/retry").status_code == 410
+        # the jobs list exposes name+size so the editor can warn before
+        # uploading a byte-identical duplicate
+        js = client.get("/api/jobs").get_json()
+        mine = next(j for j in js if j["id"] == job["id"])
+        assert mine["size"] == 1024
+    finally:
+        try:
+            w.WORK_Q.get_nowait()
+            w.WORK_Q.task_done()
+        except Exception:
+            pass
+        shutil.rmtree(job["dir"], ignore_errors=True)
+        w.JOBS.pop(job["id"], None)
+
+
+def test_upload_refused_when_disk_cannot_fit_it(monkeypatch):
+    """Issue #16, part three: an upload the disk cannot hold must be
+    refused from the Content-Length header — BEFORE werkzeug spools the
+    body to the temp dir — with JSON naming the way out. Unmeasurable
+    free space never blocks (the guard acts only on a measured
+    certainty, the scan-copy verifier's rule)."""
+    import openscrub_web as w
+    assert w._upload_disk_error(0) is None
+    monkeypatch.setattr(w, "_disk_free", lambda p: 10 * 1024 ** 2)
+    err = w._upload_disk_error(50 * 1024 ** 2)
+    assert err and "path on the server" in err and "disk space" in err
+    monkeypatch.setattr(w, "_disk_free", lambda p: 1 << 60)
+    assert w._upload_disk_error(50 * 1024 ** 2) is None
+
+    def _unmeasurable(p):
+        raise OSError("no statvfs here")
+    monkeypatch.setattr(w, "_disk_free", _unmeasurable)
+    assert w._upload_disk_error(50 * 1024 ** 2) is None
+    # the request path: refused before the view, as JSON, status 507
+    monkeypatch.setattr(w, "_disk_free", lambda p: 10 * 1024 ** 2)
+    client = w.app.test_client()
+    r = client.post("/api/jobs", data=b"x" * 4096,
+                    content_type="application/octet-stream")
+    assert r.status_code == 507
+    j = r.get_json()
+    assert j and "disk space" in j["error"]
+
+
+def test_rehydrate_surfaces_reportless_upload_as_failed_job():
+    """A job that crashed before writing a report used to vanish from the
+    UI at the next restart while its multi-GB upload stayed on disk — an
+    orphan the user could neither retry nor delete. It now rehydrates as
+    a failed job with its upload attached."""
+    import shutil
+    import openscrub_web as w
+    jid = "deadbeef16aa"
+    jdir = os.path.join(w.JOBS_DIR, jid)
+    os.makedirs(jdir, exist_ok=True)
+    try:
+        up = os.path.join(jdir, "input.mp4")
+        with open(up, "wb") as f:
+            f.write(b"\x00" * 2048)
+        w.rehydrate_jobs()
+        job = w.JOBS.get(jid)
+        assert job is not None, "report-less upload dirs must be recovered"
+        assert job["phase"] == "error" and job["video"] == up
+        assert job["size"] == 2048
+        assert "Retry" in job["error"] and "Delete" in job["error"]
+    finally:
+        w.JOBS.pop(jid, None)
+        shutil.rmtree(jdir, ignore_errors=True)

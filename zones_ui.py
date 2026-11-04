@@ -1037,6 +1037,8 @@ function unionCats(){
 }
 const MAXUP=+"%%MAXUP%%"||0;  // server upload cap in bytes (0 = unlimited),
                               // injected at serve time like %%VERSION%%
+const FREEDISK=+"%%FREEDISK%%"||0; // server free disk at page load (bytes,
+                              // 0 = unknown): refuse a doomed upload EARLY
 async function startScan(){
  if(!S.dur){alert("Load a video first.");return;}
  if(!S.file&&!$("spath").value.trim()){alert("Choose a file or server path.");return;}
@@ -1048,6 +1050,26 @@ async function startScan(){
    +"0 = unlimited), or — better for files this big — put the file where "
    +"the server can read it and use the 'path on the server' box instead "
    +"of uploading.");return;}
+ if(S.file&&FREEDISK>0&&S.file.size+1073741824>FREEDISK){
+  alert("This file is "+(S.file.size/1073741824).toFixed(1)+" GB but the "
+   +"server only has "+(FREEDISK/1073741824).toFixed(1)+" GB of disk free — "
+   +"the upload would fill the disk and be refused. Delete old jobs in the "
+   +"Jobs list below (each keeps its upload and output until deleted), or "
+   +"use the 'path on the server' box, which reads the file in place "
+   +"without copying it.");return;}
+ if(S.file){
+  // the same file may ALREADY be on the server: a failed job keeps its
+  // upload for Retry, and re-uploading stores another full copy — a real
+  // user disk filled up exactly this way (issue #16)
+  try{
+   const js=await(await fetch("/api/jobs")).json();
+   const dup=Array.isArray(js)&&js.find(j=>j.name===S.file.name&&j.size===S.file.size&&j.size>0);
+   if(dup&&!confirm("“"+S.file.name+"” ("+(S.file.size/1073741824).toFixed(1)
+    +" GB) is already on the server — job “"+dup.name+"”, status: "+dup.phase
+    +".\n\nA failed job has a ↻ Retry button in the Jobs list that re-runs "
+    +"the scan WITHOUT uploading again.\n\nUpload a duplicate copy anyway?"))return;
+  }catch(e){}
+ }
  const cats=unionCats();
  const nTrk=S.wins.reduce((a,w)=>a+((w.track||[]).length),0);
  if(!cats.length&&!nTrk

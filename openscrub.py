@@ -36,7 +36,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.82"
+VERSION = "1.0.83"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -4427,6 +4427,19 @@ class PlateDetector:
                     net.setPreferableTarget(cv2.dnn.DNN_TARGET_CUDA)
             except Exception:
                 pass
+            # LOADING IS NOT PROOF. OpenCV 5's ONNX importer ACCEPTS the
+            # end2end YOLOv9 graphs that 4.x rejected right here at
+            # readNetFromONNX ("Can't create layer ... NonMaxSuppression")
+            # — and then dies at the FIRST real inference inside the
+            # baked-in NMS machinery ("gather2_layer ... (-211) some of
+            # indices are outside of range", issue #16: Windows installer
+            # with OpenCV 5.0.0), killing the whole scan after the user
+            # waited out an 18 GB upload. So the probe runs the exact call
+            # sequence find() uses — blob, forward, decode — on a blank
+            # letterbox frame; a backend that cannot survive that is a
+            # load FAILURE, and the model moves to onnxruntime, which is
+            # field-proven on these exports.
+            self._selftest_cv2(net)
             self.net = net
             cv2_err = None
         except Exception as e:
@@ -4464,9 +4477,17 @@ class PlateDetector:
             # rather than killing the job. OPENSCRUB_CPU_DNN=1 forces CPU, the
             # same escape hatch the OpenCV DNN path honours.
             sess = _ort_session(found)
+            ort_in = sess.get_inputs()[0].name
+            ort_out = [o.name for o in sess.get_outputs()]
+            # same proof-of-inference the cv2 backend now gets: a model
+            # NEITHER backend can actually run must be rejected loudly at
+            # load (category INACTIVE), never trusted until mid-scan.
+            self._decode(np.asarray(
+                sess.run(ort_out, {ort_in: self._probe_blob()})[0]),
+                1.0, self.INPUT, self.INPUT)
             self.ort = sess
-            self._ort_in = sess.get_inputs()[0].name
-            self._ort_out = [o.name for o in sess.get_outputs()]
+            self._ort_in = ort_in
+            self._ort_out = ort_out
             self.log("      %s: loaded %s (onnxruntime, %s)"
                      % (self.LABEL, base, sess.get_providers()[0]))
         except Exception as e:
@@ -4475,6 +4496,52 @@ class PlateDetector:
                      "INACTIVE." % (self.LABEL, cv2_err, e, self.KIND))
             self.net = None
             self.ort = None
+
+    def _probe_blob(self):
+        """A blank letterbox frame in onnxruntime input layout (NCHW RGB
+        fp32, /255) — shared by both backends' load-time self-tests."""
+        canvas = np.full((self.INPUT, self.INPUT, 3), 114, np.uint8)
+        inp = np.ascontiguousarray(
+            canvas[:, :, ::-1].transpose(2, 0, 1)[None]).astype(np.float32)
+        inp /= 255.0
+        return inp
+
+    def _selftest_cv2(self, net):
+        """One REAL inference through a candidate OpenCV-DNN net, the same
+        call sequence find() runs (blob -> forward -> _decode). Raises on
+        any failure so __init__ treats the backend as unusable and falls
+        back to onnxruntime — a load probe alone proved worthless on
+        OpenCV 5, whose importer defers graph failures to the first
+        forward (issue #16)."""
+        canvas = np.full((self.INPUT, self.INPUT, 3), 114, np.uint8)
+        blob = cv2.dnn.blobFromImage(canvas, 1 / 255.0,
+                                     (self.INPUT, self.INPUT),
+                                     swapRB=True, crop=False)
+        net.setInput(blob)
+        self._decode(np.asarray(net.forward()), 1.0, self.INPUT, self.INPUT)
+
+    def _cv2_midscan_rescue(self, err):
+        """A cv2.dnn forward that passed the load-time self-test failed
+        mid-scan anyway. Dropping the detector silently would fail OPEN
+        (the category just stops blurring), so move the model to
+        onnxruntime and keep scanning; if onnxruntime cannot take over,
+        re-raise so the scan dies LOUDLY instead of shipping an
+        under-redacted video."""
+        self.log("      %s: OpenCV DNN inference failed mid-scan (%s) — "
+                 "moving the model to onnxruntime" % (self.LABEL, err))
+        try:
+            sess = _ort_session(self.model_path)
+            self._ort_in = sess.get_inputs()[0].name
+            self._ort_out = [o.name for o in sess.get_outputs()]
+            self.ort = sess
+            self.net = None
+            self.log("      %s: continuing on onnxruntime (%s)"
+                     % (self.LABEL, sess.get_providers()[0]))
+        except Exception as e2:
+            self.log("      %s: onnxruntime could not take over (%s) — "
+                     "failing the scan rather than continuing without the "
+                     "%s category" % (self.LABEL, e2, self.KIND))
+            raise err
 
     def available(self):
         return self.net is not None or self.ort is not None
@@ -4507,7 +4574,17 @@ class PlateDetector:
                                          (self.INPUT, self.INPUT),
                                          swapRB=True, crop=False)
             self.net.setInput(blob)
-            out = self.net.forward()
+            try:
+                out = self.net.forward()
+            except Exception as e:
+                # passed the load-time self-test but died on a real frame
+                # anyway: rescue onto onnxruntime (or raise, fail closed)
+                self._cv2_midscan_rescue(e)
+                inp = np.ascontiguousarray(
+                    canvas[:, :, ::-1].transpose(2, 0, 1)[None]
+                ).astype(np.float32)
+                inp /= 255.0
+                out = self.ort.run(self._ort_out, {self._ort_in: inp})[0]
         return self._decode(np.asarray(out), s, w, h)
 
     def _decode(self, out, s, w, h):
