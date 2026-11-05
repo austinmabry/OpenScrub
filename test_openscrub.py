@@ -3366,3 +3366,50 @@ def test_registry_doc_fields_refresh_but_pins_stay(monkeypatch, tmp_path):
     assert got["sha256"] == "ab" * 32
     assert got["download_url"] == "https://example.com/pinned.onnx"
     assert got["recommended"] == m0["recommended"]
+
+
+def test_server_path_intake_guard_precedes_size_lookup(monkeypatch, tmp_path):
+    """Code-scanning #21 (py/path-injection): create_job's server-path
+    branch calls os.path.getsize on the request path (the duplicate-upload
+    size, v1.0.83). server_path_error confines the path first, but CodeQL's
+    barrier analysis is function-local, so the single-startswith
+    containment guard must ALSO sit inline in create_job, before the sink
+    — the same convention server_video and waveform follow. Pin both the
+    behavior and that ordering."""
+    import inspect
+    import shutil
+    import openscrub_web as w
+    src = inspect.getsource(w.create_job)
+    guard = src.find("if not p.startswith(r.rstrip(os.sep) + os.sep):")
+    sink = src.find("os.path.getsize(p)")
+    assert guard != -1, "inline containment guard missing from create_job"
+    assert sink != -1 and guard < sink, "guard must precede the getsize sink"
+
+    media = tmp_path / "media"
+    media.mkdir()
+    inside = media / "clip.mp4"
+    inside.write_bytes(b"\x00" * 512)
+    outside = tmp_path / "elsewhere.mp4"
+    outside.write_bytes(b"\x00" * 64)
+    monkeypatch.setenv("OPENSCRUB_MEDIA_ROOT", str(media))
+    client = w.app.test_client()
+    n0 = len(w.JOBS)
+    r = client.post("/api/jobs", data={"server_path": str(outside),
+                                       "options": "{}"})
+    assert r.status_code == 400 and len(w.JOBS) == n0, \
+        "a path outside the media root must be refused, no job created"
+    r = client.post("/api/jobs", data={"server_path": str(inside),
+                                       "options": "{}"})
+    assert r.status_code == 200
+    jid = r.get_json()["jobs"][0]
+    try:
+        assert w.JOBS[jid]["size"] == 512
+    finally:
+        try:
+            w.WORK_Q.get_nowait()
+            w.WORK_Q.task_done()
+        except Exception:
+            pass
+        job = w.JOBS.pop(jid, None)
+        if job:
+            shutil.rmtree(job["dir"], ignore_errors=True)

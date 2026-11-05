@@ -800,6 +800,14 @@ defined — there was a real UnboundLocalError from ordering once.
   for GitHub/social use. The app sections are wrapped in `#appzone`/
   `#settingsview` — APP_CSS scopes its button/input/h2 overrides to
   those ids so editor styling stays untouched.
+- REQUEST PATHS (CodeQL py/path-injection): every route that turns a
+  request value into a filesystem path calls `server_path_error` AND
+  repeats its single-`startswith` containment guard INLINE before the
+  first filesystem call — CodeQL's barrier analysis is function-local and
+  only credits that exact shape. Today: `server_video`, `waveform`,
+  `create_job` (its server-path `getsize`, code-scanning #21, fixed
+  v1.0.88; test_server_path_intake_guard_precedes_size_lookup pins the
+  ordering). A new route that touches a request path must do the same.
 - `ASSET_DIR` = `<script dir>/assets`; `SCRIPT_DIR` = script dir (LICENSE
   lives there).
 - Jobs live in `openscrub_jobs/` next to the script. On startup there is a
