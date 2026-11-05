@@ -448,6 +448,9 @@ def build_args(job, for_render=False):
             "--face-shape", (o.get("face_shape")
                              if o.get("face_shape") in ("ellipse", "rect")
                              else "ellipse"),
+            "--scan-speed", (o.get("scan_speed")
+                             if o.get("scan_speed") in openscrub.SCAN_SPEEDS
+                             else "thorough"),
             "--categories", o.get("categories",
                                   "name,dob,phone,ssn,email,address,card,apikey,ipaddr,plate,face,person"),
             "-o", os.path.join(jdir, "output."

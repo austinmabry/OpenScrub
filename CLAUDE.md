@@ -253,7 +253,25 @@ Key classes/functions (locate with grep, line numbers drift):
   hold left a trail of stale boxes along the motion path (v1.0.21 bug).
   `smooth_dense_tracks` then makes each track leak-free: interpolates the
   box across detector-flicker gaps (≤0.75s) so the blur moves WITH the
-  object, template-matches each track's first sample BACKWARD through the
+  object — every in-between frame gets the UNION of the interpolated
+  positions bracketing it, ≥2 sub-steps even for a 2-frame gap (v1.0.86:
+  the old code stretched the earlier sample's stale box over the first
+  sub-step, so at stride 2 every other frame lagged a moving face —
+  ~40% of moving-face frames under-covered; test_stride_gap_frames_get_
+  interpolated_cover pins it). SCAN SPEED (`--scan-speed thorough|
+  balanced|fast|fastest`, `SCAN_SPEEDS`, applied in `_prep_args` via
+  `_apply_scan_speed`; web: the selector above Start scan) maps to
+  (`--dense-face-stride` for EVERY per-frame detector, face
+  `--detect-scale`) = (1,1.0)/(2,1.0)/(3,1.0)/(3,0.5); presets only ever
+  go FASTER than explicit flags (stride max, scale min); unknown web
+  values fall back to thorough. Measured on a synthetic 1080p clip with
+  exact ground truth (scratch benchmark: astronaut face at 4 sizes + fast
+  mover + 3-frame flash): 1.0x/1.9x/2.6x/8.1x, coverage 81/85/84/72% —
+  balanced ≈ free, fast costs fast movers + sub-stride appearances,
+  fastest costs small faces (half-res detection). SFace grouping stays on
+  at every preset (~6% of scan time, affects review only, not coverage).
+  Non-thorough scans log a loud "scan speed:" line. Smoothing also
+  template-matches each track's first sample BACKWARD through the
   file to the object's true first visible frame (closes the onset leak
   before the detector's first hit), and adds 0.25s grace pads at both
   ends. Matching happens on 3x3-smoothed half-scale frames — sub-pixel

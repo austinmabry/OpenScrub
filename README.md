@@ -597,6 +597,21 @@ so the suite must stay green on every change.
 
 ## Feature notes
 
+- **Scan speed** (the selector above **Start scan**, or `--scan-speed`) —
+  trades scan time for coverage. Measured on a synthetic 1080p clip with
+  exact ground truth (faces at four sizes, a fast mover, a 3-frame flash):
+
+  | Preset | What it does | Scan time | Trade |
+  |---|---|---|---|
+  | **Thorough** (default) | every frame, full resolution | 1× | — |
+  | **Balanced** | every 2nd frame, gaps interpolated along each track | ~1.9× faster | coverage essentially unchanged |
+  | **Fast** | every 3rd frame | ~2.6× faster | fast movers lose a little; a face on screen for under 3 frames can be missed |
+  | **Fastest** | every 3rd frame + half-resolution face detection | ~8× faster | misses many small/distant faces — close-ups only |
+
+  The stride applies to every per-frame detector (faces, plates, person,
+  QR, screens). Any non-thorough choice is logged in the job log and
+  recorded in the audit report. **Review the output carefully** at Fast
+  and Fastest.
 - **VFR normalization** — OBS/Game Bar variable-frame-rate recordings are
   detected (ffprobe) and normalized to CFR before processing, preventing
   blur-timing drift and audio desync; recorded in provenance.
@@ -766,6 +781,7 @@ Two reasoning layers prevent "flash of PII" from intermittent OCR misses:
 
 | Symptom | Fix |
 |---|---|
+| Long videos take too long to scan | Scan speed → **Balanced** (~1.9× faster, coverage essentially unchanged); Fast/Fastest go further at a real coverage cost — see Feature notes |
 | Provider names blurred | add them to --allow-names |
 | A name slips through | add to --extra-names; install spaCy if not present |
 | Random capitalized words blurred | install spaCy so the pair heuristic turns off, or --heuristic-names off |

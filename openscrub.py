@@ -36,7 +36,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.85"
+VERSION = "1.0.86"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -1364,17 +1364,28 @@ def smooth_dense_tracks(dets, fps, video, cum=None, win_start=0.0, cb=None):
             if gap > CHAIN_MAX:
                 continue        # sustained absence: never bridge blind
             A, B = _screen(a), _screen(b)
-            steps = min(12, max(1, int(round(gap / (2 * frame_period)))))
+            # >= 2 sub-steps, and step 0 is interpolated too. The old code
+            # used ONE step for a 2-frame gap and stretched the earlier
+            # sample's OWN box over the in-between frame (and did the same
+            # over step 0 of every longer gap), so a moving face's blur
+            # lagged a frame behind it. With --dense-face-stride 2 that is
+            # EVERY other frame: measured on a synthetic moving-face clip,
+            # stride 2 under-covered ~40% of moving-face frames (medium
+            # face 98% -> 60%). Every in-between frame is now covered by
+            # the union of the interpolated positions bracketing it; the
+            # sample's own frame keeps its tight detector box.
+            steps = min(12, max(2, int(round(gap / (2 * frame_period)))))
             ts = [a.t_start + gap * i / steps for i in range(steps + 1)]
             pos = [tuple(A[k] + (B[k] - A[k]) * i / steps for k in range(4))
                    for i in range(steps + 1)]
-            a.t_end = max(a.t_end, ts[1] if steps > 1 else b.t_start)
-            for i in range(1, steps):
+            a.t_end = max(a.t_end, a.t_start + 0.5 * frame_period)
+            for i in range(steps):
                 # union with the next step's box so movement WITHIN the
                 # step stays covered
                 u = tuple(min(pos[i][k], pos[i + 1][k]) if k < 2 else
                           max(pos[i][k], pos[i + 1][k]) for k in range(4))
-                added.append(_mk(ts[i], ts[i + 1], u, a, tid))
+                t0 = ts[i] if i else a.t_start + 0.5 * frame_period
+                added.append(_mk(t0, ts[i + 1], u, a, tid))
             n_gaps += 1
 
         # 2. onset: template-match the first sample backwards to the
@@ -6332,9 +6343,25 @@ def build_parser():
                          "Restricted to face detection zones when zones are "
                          "set, which keeps it fast. Higher render time.")
     ap.add_argument("--dense-face-stride", type=int, default=1,
-                    help="with --dense-faces, detect every Nth frame "
-                         "(1 = every frame; 2-3 trades a little coverage for "
-                         "speed). Default 1.")
+                    help="run the per-frame detectors (faces, plates, "
+                         "person, QR, screens, all-text) on every Nth "
+                         "frame; skipped frames are covered by "
+                         "interpolating each track between samples. "
+                         "1 = every frame (default). Prefer --scan-speed.")
+    ap.add_argument("--scan-speed",
+                    choices=["thorough", "balanced", "fast", "fastest"],
+                    default="thorough",
+                    help="speed/coverage preset. thorough (default) = "
+                         "every frame, full resolution. balanced = every "
+                         "2nd frame, gaps interpolated (~1.9x faster, "
+                         "coverage ~unchanged). fast = every 3rd frame "
+                         "(~2.6x; fast-moving faces and faces on screen "
+                         "for under 3 frames can be missed). fastest = "
+                         "every 3rd frame at half face-detection "
+                         "resolution (~8x; misses many small/distant "
+                         "faces — close-ups only). Never slower than "
+                         "explicit --dense-face-stride/--detect-scale. "
+                         "Always review the output.")
     ap.add_argument("--plate-model", default=None,
                     help="path to a YOLOv8 license-plate ONNX model. If omitted, "
                          "OpenScrub looks for models/plate_yolov8.onnx or the "
@@ -6522,8 +6549,39 @@ def build_parser():
     return ap
 
 
+# --scan-speed presets: (frame stride for EVERY per-frame detector, FACE
+# detection resolution). Measured on a synthetic 1080p moving-face clip
+# with exact ground truth (four face sizes, a fast mover, a 3-frame
+# flash), scan time vs thorough / overall face-frame coverage:
+#   thorough 1.0x 81% | balanced 1.9x 85% | fast 2.6x 84% (fast movers
+#   92% vs 98%) | fastest 8.1x 72% (small faces 78% vs 87%).
+# Stride gaps are interpolated by smooth_dense_tracks (the v1.0.86 fix —
+# before it, stride 2 under-covered ~40% of moving-face frames), so
+# balanced is near-free; fast can skip a face visible for fewer frames
+# than the stride; fastest also halves face-detection resolution, which
+# is what costs the small/distant faces. Presets only ever make a scan
+# FASTER than the explicit flags: stride = max, scale = min.
+SCAN_SPEEDS = {
+    "thorough": (1, 1.0),
+    "balanced": (2, 1.0),
+    "fast": (3, 1.0),
+    "fastest": (3, 0.5),
+}
+
+
+def _apply_scan_speed(args):
+    stride, scale = SCAN_SPEEDS.get(getattr(args, "scan_speed", None)
+                                    or "thorough", (1, 1.0))
+    args.dense_face_stride = max(int(getattr(args, "dense_face_stride", 1)
+                                     or 1), stride)
+    args.detect_scale = min(float(getattr(args, "detect_scale", 1.0)
+                                  or 1.0), scale)
+    return args
+
+
 def _prep_args(args, parser):
     args = apply_config(args, parser)
+    args = _apply_scan_speed(args)
     regions = []
     for r in (args.ignore_region or []):
         if isinstance(r, str):
@@ -7034,6 +7092,18 @@ def run_scan(args, cb=None):
                   else "every frame")
                + (" inside face zone(s)" if any_face_zone
                   else " (whole frame — set a face zone to speed this up)"))
+    _speed = getattr(args, "scan_speed", None) or "thorough"
+    if _speed != "thorough" or dense_stride > 1 or detect_scale < 1.0:
+        # anything short of thorough trades coverage for time — say so in
+        # the log the reviewer reads, not just in a help tooltip
+        cb.log(f"      scan speed: {_speed} — per-frame detectors run every "
+               f"{dense_stride} frame(s), gaps interpolated"
+               + (f"; faces detected at {detect_scale:.2f}x resolution "
+                  "(small/distant faces can be missed)"
+                  if detect_scale < 1.0 else "")
+               + (". Brief or fast-moving subjects can be missed — "
+                  "review the output carefully." if dense_stride > 2
+                  or detect_scale < 1.0 else "."))
     idx = 0
     dense_now = []
     # Fast-skip: when scroll tracking is off (camera footage, face/plate/

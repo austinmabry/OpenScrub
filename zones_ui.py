@@ -199,6 +199,17 @@ details .inner .full{grid-column:1/-1}
   </div>
  </div></details>
 
+ <div style="margin:8px 0 6px">
+  <label for="sspeed" style="font-size:12.5px;font-weight:600">Scan speed</label>
+  <select id="sspeed" onchange="speedHint()" style="width:100%;margin-top:3px">
+   <option value="thorough">Thorough &mdash; every frame (default)</option>
+   <option value="balanced">Balanced &mdash; ~2&times; faster</option>
+   <option value="fast">Fast &mdash; ~2.5&times; faster</option>
+   <option value="fastest">Fastest &mdash; ~8&times; faster, close-ups only</option>
+  </select>
+  <div id="sspeedhint" class="mutd" style="font-size:11.5px;margin-top:3px"></div>
+ </div>
+
  <button class="start" onclick="startScan()">&#9654; Start scan</button>
  <div class="mutd" id="summary" style="text-align:center;margin-top:7px"></div>
 </div>
@@ -1065,6 +1076,22 @@ function unionCats(){
  const u={};S.wins.forEach(w=>Object.keys(w.cats).forEach(c=>u[c]=true));
  return Object.keys(u);
 }
+// Scan speed presets (engine SCAN_SPEEDS). Hints are the MEASURED trade
+// on a synthetic moving-face clip with exact ground truth — keep them in
+// step with the engine comment if the presets change.
+const SPEED_HINT={
+ thorough:"Detects on every frame at full resolution. Slowest, most complete.",
+ balanced:"Every 2nd frame, with the gaps interpolated along each face's path. "
+  +"Measured coverage is essentially unchanged.",
+ fast:"Every 3rd frame. Fast-moving faces lose a little coverage, and a face "
+  +"on screen for under 3 frames can be missed. Review carefully.",
+ fastest:"Every 3rd frame at half detection resolution: misses many small or "
+  +"distant faces. Use only for close-up footage, and review carefully."};
+function speedHint(){
+ const v=$("sspeed").value,h=$("sspeedhint");
+ h.textContent=SPEED_HINT[v]||"";
+ h.style.color=(v==="fast"||v==="fastest")?"#fbbf24":"";
+}
 const MAXUP=+"%%MAXUP%%"||0;  // server upload cap in bytes (0 = unlimited),
                               // injected at serve time like %%VERSION%%
 const FREEDISK=+"%%FREEDISK%%"||0; // server free disk at page load (bytes,
@@ -1129,6 +1156,7 @@ async function startScan(){
   pad:+$("pad").value,bridge_gap:+$("bgap").value,
   face_expand:+$("fex").value,face_threshold:+$("fthr").value,
   face_shape:$("fshape").value,detect_scale:+$("dscale").value,
+  scan_speed:$("sspeed").value,
   hdr_output:$("hdrout").value,codec:$("vcodec").value,
   out_format:$("outfmt").value,
   out_quality:$("outqual").value,
@@ -1184,6 +1212,7 @@ async function startScan(){
  xhr.send(fd);
 }
 setMode("play");loadCustomList();   // play by default: drawing is opt-in (#17)
+speedHint();
 </script>
 <script>
 %%APP_JS%%

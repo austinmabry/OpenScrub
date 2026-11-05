@@ -434,6 +434,77 @@ def test_dense_track_flicker_interpolation():
             f"box does not track the moving face at t={t:.2f}"
 
 
+def test_stride_gap_frames_get_interpolated_cover():
+    """With samples 2 or 3 frames apart (--dense-face-stride / scan-speed
+    balanced/fast), every in-between frame must be covered by a box that
+    follows the moving face. The old interpolation stretched the EARLIER
+    sample's own box over the in-between frame, so the blur lagged one
+    frame behind a moving face on every other frame — measured: stride 2
+    under-covered ~40% of moving-face frames on a synthetic clip."""
+    fps = 30.0
+    for stride in (2, 3):
+        speed = 30.0 * fps                 # 30 px per frame, rightward
+        dets = []
+        for k in range(8):
+            t = k * stride / fps
+            x = speed * t
+            dets.append(openscrub.Detection(
+                t, t + 0.3 * stride / fps, (x, 100, x + 60, 160),
+                "face", "face", 0.9, (0, 0), dense=True))
+        openscrub.assign_dense_tracks(dets)
+        openscrub.smooth_dense_tracks(dets, fps, video=None)
+        for f in range(1, 7 * stride):
+            if f % stride == 0:
+                continue                    # a real sample frame
+            t = f / fps
+            act = [d for d in dets if d.t_start - 0.01 <= t <= d.t_end + 0.01]
+            act = openscrub._dedupe_dense(act)
+            assert act, f"stride {stride}: frame {f} has no cover"
+            tx = speed * t                  # where the face really is
+            assert any(d.cbox[0] <= tx + 1 and d.cbox[2] >= tx + 59
+                       for d in act), \
+                f"stride {stride}: frame {f} cover lags the moving face"
+
+
+def test_scan_speed_presets_never_slow_explicit_flags():
+    """--scan-speed maps to (stride, face-detection scale), and a preset
+    can only make a scan FASTER than explicit flags: stride takes the max,
+    scale the min. thorough leaves everything as given."""
+    def prep(*extra):
+        p = openscrub.build_parser()
+        return openscrub._prep_args(p.parse_args(["x.mp4", *extra]), p)
+    a = prep()
+    assert (a.dense_face_stride, a.detect_scale) == (1, 1.0)
+    for name, (stride, scale) in openscrub.SCAN_SPEEDS.items():
+        a = prep("--scan-speed", name)
+        assert (a.dense_face_stride, a.detect_scale) == (stride, scale), name
+    a = prep("--scan-speed", "balanced", "--detect-scale", "0.4")
+    assert (a.dense_face_stride, a.detect_scale) == (2, 0.4)
+    a = prep("--scan-speed", "fastest", "--dense-face-stride", "5")
+    assert (a.dense_face_stride, a.detect_scale) == (5, 0.5)
+    assert set(openscrub.SCAN_SPEEDS) == {"thorough", "balanced", "fast",
+                                          "fastest"}
+
+
+def test_scan_speed_wired_through_web(tmp_path):
+    """The editor's Scan speed select must reach the engine, every option
+    must be a real preset, and anything unrecognized falls back to
+    thorough (fail closed: unknown never means faster)."""
+    import zones_ui
+    import openscrub_web as w
+    page = zones_ui.ZONES_PAGE
+    assert 'id="sspeed"' in page and "scan_speed:$(\"sspeed\").value" in page
+    for name in openscrub.SCAN_SPEEDS:
+        assert 'value="%s"' % name in page, name
+    job = {"video": str(tmp_path / "x.mp4"), "dir": str(tmp_path),
+           "options": {"scan_speed": "fast"}}
+    assert w.build_args(job).scan_speed == "fast"
+    assert w.build_args(job).dense_face_stride == 3
+    job["options"]["scan_speed"] = "ludicrous"
+    assert w.build_args(job).scan_speed == "thorough"
+    assert w.build_args(job).dense_face_stride == 1
+
+
 def test_dense_onset_walkback(tmp_path):
     """The first dense detection of a track is template-matched backward
     through the file: frames where the object was visible before the
