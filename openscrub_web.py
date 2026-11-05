@@ -436,6 +436,10 @@ def build_args(job, for_render=False):
             "--clip-frac", o.get("clip_frac", "") or "",
             "--detect-windows-frac", o.get("detect_windows_frac", "") or "",
             "--mute-audio-tracks", o.get("mute_tracks", "") or "",
+            *(["--audio-lane-count", str(int(o["audio_lanes"]))]
+              if isinstance(o.get("audio_lanes"), int)
+              and not isinstance(o.get("audio_lanes"), bool)
+              and 0 < o["audio_lanes"] < 64 else []),
             "--hdr-output", (o.get("hdr_output")
                              if o.get("hdr_output") in ("match", "sdr")
                              else "match"),

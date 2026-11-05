@@ -664,7 +664,23 @@ Key classes/functions (locate with grep, line numbers drift):
   mute → gated volume filter + aac; bleep → filter_complex mixing a
   1 kHz tone (amix normalize=0). Both render() and render_hdr take
   `audio_spans`. Empty --mrn-regex style rule applies: spans only ever
-  SILENCE, never guess.
+  SILENCE, never guess. DECODABLE TRACKS ONLY (v1.0.88): iPhone
+  spatial-audio tracks (APAC, tag `apac`, ffprobe codec `unknown`) can be
+  neither decoded nor muxed into MP4 — copying every track made ffmpeg
+  quit at the first frame ("[Errno 32] Broken pipe" on a real iPhone
+  job). `probe_audio_tracks` + `_audio_track_usable` gate every track;
+  undecodable ones are DROPPED loudly and NEVER passed through (a copied
+  track would carry speech the spans mute). Kept tracks stream-copy only
+  if `_AUDIO_COPY_OK[container]` allows the codec, else re-encode to AAC.
+  MUTE LANES: the editor numbers lanes from the browser's audioTracks
+  (which hides undecodable tracks) and sends `audio_lanes` →
+  `--audio-lane-count`; mute numbers map onto all tracks or the
+  decodable ones, whichever the count matches, and ANY ambiguity removes
+  all audio (fail closed). Transcription maps the first decodable track
+  explicitly. Both renders capture ffmpeg stderr to a temp file and
+  raise `_ffmpeg_failure` with its tail — never a bare broken pipe.
+  test_render_survives_iphone_spatial_audio_track builds a synthetic
+  APAC track (mp4a→apac retag + hidden esds) in both track orders.
 - Install-location rules: `install_is_readonly()` (site-packages OR
   `sys.frozen`) switches every write path to `user_data_dir()`
   (%LOCALAPPDATA%/OpenScrub or ~/.local/share/OpenScrub): plate-model

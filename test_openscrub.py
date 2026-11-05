@@ -3413,3 +3413,138 @@ def test_server_path_intake_guard_precedes_size_lookup(monkeypatch, tmp_path):
         job = w.JOBS.pop(jid, None)
         if job:
             shutil.rmtree(job["dir"], ignore_errors=True)
+
+
+def _apac_clip(path, apac_first=False):
+    """Synthetic iPhone-style .mov: H.264 video + an AAC track + a track
+    tagged 'apac' (Apple spatial audio) that FFmpeg cannot identify or
+    decode. Built by retagging a second AAC sample entry 'mp4a' -> 'apac'
+    and hiding its esds config box — exactly how a real APAC entry reads
+    (ffprobe: codec_name=unknown, codec_tag_string=apac)."""
+    import struct
+    tmp = path + ".src.mov"
+    subprocess.run(["ffmpeg", "-v", "error", "-y",
+                    "-f", "lavfi", "-i", "testsrc2=duration=2:size=320x240:rate=30",
+                    "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+                    "-f", "lavfi", "-i", "sine=frequency=880:duration=2",
+                    "-map", "0:v", "-map", "1:a", "-map", "2:a",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+                    "-shortest", tmp], check=True)
+    b = bytearray(open(tmp, "rb").read())
+    hits = [i for i in range(4, len(b) - 4) if b[i:i + 4] == b"mp4a"
+            and 16 <= struct.unpack(">I", b[i - 4:i])[0] < 4096]
+    assert len(hits) == 2, hits
+    k = hits[0] if apac_first else hits[1]
+    b[k:k + 4] = b"apac"
+    j = b.find(b"esds", k)
+    assert 0 < j - k < 200
+    b[j:j + 4] = b"dapa"
+    open(path, "wb").write(b)
+    os.remove(tmp)
+
+
+def _audio_codecs(path):
+    out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a",
+                          "-show_entries", "stream=codec_name,codec_tag_string",
+                          "-of", "csv=p=0", path],
+                         capture_output=True, text=True).stdout
+    return [ln.strip() for ln in out.splitlines() if ln.strip()]
+
+
+def test_render_survives_iphone_spatial_audio_track(tmp_path):
+    """A real iPhone clip with a spatial-audio (APAC) track crashed the
+    render: every audio track was stream-copied into the MP4, ffmpeg
+    can't identify APAC ('Could not find tag for codec none'), quit at
+    the first frame, and the job died as '[Errno 32] Broken pipe'.
+    Undecodable tracks are now dropped loudly; the AAC track (the same
+    sound) survives — with and without audio redaction, in either
+    track order (some iPhones put the spatial track first)."""
+    for apac_first in (False, True):
+        src = str(tmp_path / f"iphone_{int(apac_first)}.mp4")
+        mov = src.replace(".mp4", ".mov")
+        _apac_clip(mov, apac_first=apac_first)
+        assert any("apac" in c for c in _audio_codecs(mov))
+        os.replace(mov, src)                 # run() derives names from .mp4
+        res, _ = run(src, "--categories", "face", "--encoder", "x264")
+        out = src.replace(".mp4", "_red.mp4")
+        assert _audio_codecs(out) == ["aac,mp4a"], _audio_codecs(out)
+        # redaction must also work, and actually silence the span — the
+        # undecodable track must NOT ride along unredacted
+        os.remove(out)
+        res, _ = run(src, "--categories", "face", "--encoder", "x264",
+                     "--audio-redact", "0.5-1.5")
+        assert _audio_codecs(out) == ["aac,mp4a"]
+        raw = subprocess.run(["ffmpeg", "-v", "error", "-i", out,
+                              "-map", "0:a:0", "-ac", "1", "-ar", "8000",
+                              "-f", "s16le", "-"],
+                             capture_output=True).stdout
+        a = np.abs(np.frombuffer(raw, np.int16).astype(int))
+        assert a[int(0.7 * 8000):int(1.3 * 8000)].max() == 0, "span not muted"
+        assert a[:int(0.4 * 8000)].max() > 1000, "kept audio lost"
+
+
+def test_audio_lane_mapping_fails_closed(monkeypatch):
+    """The editor numbers audio lanes from what the BROWSER lists, which
+    hides undecodable tracks. Mute numbers map onto whichever numbering
+    the lane count fits; an ambiguous mapping removes ALL audio (muting
+    the wrong track would keep the one the user asked to silence), and
+    an undecodable track never appears in any map."""
+    tracks = [{"codec": "unknown", "tag": "apac"},       # 1: APAC first
+              {"codec": "aac", "tag": "mp4a"},           # 2
+              {"codec": "aac", "tag": "mp4a"}]           # 3
+    monkeypatch.setattr(openscrub, "probe_audio_tracks", lambda s: tracks)
+    monkeypatch.setattr(openscrub, "_audio_track_usable",
+                        lambda s, i, c: c != "unknown")
+    f = openscrub.audio_ffmpeg_args
+    logs = []
+
+    def maps(**kw):
+        m, c = f("x.mov", [], log=logs.append, **kw)
+        return [m[i + 1] for i in range(0, len(m), 2) if m[i] == "-map"]
+    # browser hid APAC: 2 lanes = the 2 decodable tracks; lane 1 = file #2
+    assert maps(mute_tracks=(1,), lane_count=2) == ["1:a:2"]
+    # browser listed all 3: lane 1 = the APAC track (dropped anyway)
+    assert maps(mute_tracks=(1,), lane_count=3) == ["1:a:1", "1:a:2"]
+    # nothing muted: APAC never mapped, both AAC tracks kept
+    assert maps(lane_count=2) == ["1:a:1", "1:a:2"]
+    # ambiguous: 1 lane shown for a file with 3 tracks / 2 decodable
+    logs.clear()
+    assert f("x.mov", [], mute_tracks=(1,), lane_count=1,
+             log=logs.append) == ([], [])
+    assert any("removing ALL audio" in m for m in logs)
+    # a lane number out of range is also ambiguous -> all audio removed
+    assert f("x.mov", [], mute_tracks=(5,), lane_count=2) == ([], [])
+    # redaction path: filters only ever read decodable tracks
+    m, c = f("x.mov", [(0.0, 1.0, "mute")], lane_count=2)
+    graph = m[m.index("-filter_complex") + 1]
+    assert "[1:a:0]" not in graph and "[1:a:1]" in graph
+    assert "-c:a" in c and "aac" in c
+
+
+def test_audio_copy_respects_the_output_container(monkeypatch):
+    """Decodable tracks stream-copy only when the container can hold the
+    codec; otherwise they re-encode to AAC instead of failing the mux.
+    MKV takes anything decodable."""
+    tracks = [{"codec": "aac", "tag": "mp4a"},
+              {"codec": "opus", "tag": "Opus"}]
+    monkeypatch.setattr(openscrub, "probe_audio_tracks", lambda s: tracks)
+    monkeypatch.setattr(openscrub, "_audio_track_usable", lambda s, i, c: True)
+    m, c = openscrub.audio_ffmpeg_args("x", [], container=".mp4")
+    assert c == ["-c:a:0", "copy", "-c:a:1", "aac", "-b:a:1", "192k"]
+    m, c = openscrub.audio_ffmpeg_args("x", [], container=".mkv")
+    assert (m, c) == (["-map", "1:a?"], ["-c:a", "copy"])
+
+
+def test_encoder_failure_reports_ffmpegs_own_error(tmp_path, monkeypatch):
+    """When ffmpeg dies mid-render, the job must show ffmpeg's real
+    message, not the '[Errno 32] Broken pipe' Python sees writing to a
+    dead encoder (which is all a real failing iPhone job ever said)."""
+    src = str(tmp_path / "plain.mp4")
+    make_video(src, [(300, "hello")], seconds=1.0)
+    monkeypatch.setattr(openscrub, "audio_ffmpeg_args",
+                        lambda *a, **k: (["-map", "1:a:7"], ["-c:a", "copy"]))
+    with pytest.raises(RuntimeError) as ei:
+        run(src, "--categories", "face", "--encoder", "x264")
+    msg = str(ei.value)
+    assert "Broken pipe" not in msg
+    assert "matches no streams" in msg or "1:a:7" in msg, msg

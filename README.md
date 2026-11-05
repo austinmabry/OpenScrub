@@ -781,6 +781,7 @@ Two reasoning layers prevent "flash of PII" from intermittent OCR misses:
 
 | Symptom | Fix |
 |---|---|
+| Render fails with `[Errno 32] Broken pipe` on an iPhone clip | fixed in v1.0.88: iPhone spatial-audio tracks (APAC) can't be decoded or put in an MP4 — they're now dropped (the clip's normal AAC track carries the same sound), and any encoder failure shows ffmpeg's own error in the job log |
 | Long videos take too long to scan | Scan speed → **Balanced** (~1.9× faster, coverage essentially unchanged); Fast/Fastest go further at a real coverage cost — see Feature notes |
 | Provider names blurred | add them to --allow-names |
 | A name slips through | add to --extra-names; install spaCy if not present |

@@ -30,6 +30,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, asdict
 
@@ -3059,16 +3060,63 @@ def blur_silhouette(frame, x1, y1, x2, y2, mode, polys, poly_box,
     cv2.copyTo(filled, mask, roi)
 
 
-def probe_audio_streams(src):
-    """Number of audio streams in the file (0 if none / no ffprobe)."""
+def probe_audio_tracks(src):
+    """Per audio track, in file order: {"codec": ffprobe codec_name,
+    "tag": codec_tag_string}. [] if none / no ffprobe."""
     try:
         out = subprocess.run(
             ["ffprobe", "-v", "error", "-select_streams", "a",
-             "-show_entries", "stream=index", "-of", "csv=p=0", src],
+             "-show_entries", "stream=codec_name,codec_tag_string",
+             "-of", "json", src],
             capture_output=True, text=True, timeout=30).stdout
-        return len([ln for ln in out.splitlines() if ln.strip()])
+        return [{"codec": (s.get("codec_name") or "").lower(),
+                 "tag": s.get("codec_tag_string") or ""}
+                for s in json.loads(out or "{}").get("streams", [])]
     except Exception:
-        return 0
+        return []
+
+
+def probe_audio_streams(src):
+    """Number of audio streams in the file (0 if none / no ffprobe)."""
+    return len(probe_audio_tracks(src))
+
+
+# audio codecs FFmpeg always decodes natively — no probe needed
+_NATIVE_AUDIO = {"aac", "mp3", "mp2", "ac3", "eac3", "alac", "opus",
+                 "flac", "vorbis"}
+# codecs that may be STREAM-COPIED into each output container as-is;
+# anything else usable is re-encoded to AAC rather than failing the mux
+_AUDIO_COPY_OK = {".mp4": {"aac", "mp3", "ac3", "eac3", "alac"},
+                  ".mov": {"aac", "mp3", "ac3", "eac3", "alac"},
+                  ".mkv": None}         # None = any decodable codec
+
+
+def _audio_track_usable(src, i, codec):
+    """True if FFmpeg can DECODE audio track i — the precondition for
+    both redacting it and muxing it. Apple's spatial-audio track (APAC,
+    tag 'apac') on iPhone recordings reads as codec 'unknown': it can be
+    neither decoded nor muxed into MP4, and copying every track
+    unconditionally made ffmpeg quit at the first frame ('[Errno 32]
+    Broken pipe'). Unrecognized codecs are unusable outright; recognized
+    but uncommon ones must prove a short real decode."""
+    if codec in ("", "unknown", "none"):
+        return False
+    if codec in _NATIVE_AUDIO or codec.startswith("pcm_"):
+        return True
+    try:
+        r = subprocess.run(["ffmpeg", "-v", "error", "-i", src,
+                            "-map", f"0:a:{i}", "-t", "0.5",
+                            "-f", "null", "-"],
+                           capture_output=True, timeout=60)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def usable_audio_tracks(src):
+    """0-based indices of the audio tracks FFmpeg can decode, file order."""
+    return [i for i, t in enumerate(probe_audio_tracks(src))
+            if _audio_track_usable(src, i, t["codec"])]
 
 
 def probe_has_audio(src):
@@ -3076,7 +3124,8 @@ def probe_has_audio(src):
     return probe_audio_streams(src) > 0
 
 
-def audio_ffmpeg_args(src, spans, ain=1, mute_tracks=()):
+def audio_ffmpeg_args(src, spans, ain=1, mute_tracks=(), container=".mp4",
+                      lane_count=None, log=None):
     """ffmpeg (map_args, codec_args) for the render output's audio.
 
     spans: [(t0, t1, mode)] with mode "mute" or "bleep" — spoken names,
@@ -3084,28 +3133,77 @@ def audio_ffmpeg_args(src, spans, ain=1, mute_tracks=()):
     so the renderer can silence (or tone over) marked time ranges.
     mute_tracks: 1-based audio-track numbers to REMOVE from the output
     entirely (or "all") — multi-track sources (game + mic commentary,
-    camera + lav) keep their other tracks. ALL of the source's audio
-    tracks are carried through (not just the first, as before); span
-    redaction applies to every kept track. Audio re-encodes (aac) only
-    when spans exist — otherwise kept tracks stream-copy."""
+    camera + lav) keep their other tracks. Span redaction applies to
+    every kept track.
+
+    Only tracks FFmpeg can DECODE ever reach the output: an undecodable
+    track (iPhone spatial audio, APAC) can be neither redacted nor muxed,
+    so it is dropped LOUDLY — and never passed through, since a copied
+    track would carry speech the spans mute. Kept tracks stream-copy when
+    the container accepts their codec, else re-encode to AAC.
+
+    lane_count: how many audio lanes the editor showed. Browsers list
+    only playable tracks, so the editor's numbering can skip an
+    undecodable one; mute numbers resolve against whichever numbering
+    the lane count matches, and an ambiguous mapping drops ALL audio
+    (fail closed — muting the wrong track would leak the one asked for)."""
+    log = log or (lambda m: None)
     spans = [(float(a), float(b), (m or "mute"))
              for a, b, m in (spans or []) if float(b) > float(a) >= 0]
-    n = probe_audio_streams(src)
+    tracks = probe_audio_tracks(src)
+    n = len(tracks)
     if n == 0:
         return (["-map", f"{ain}:a?"], ["-c:a", "copy"])
     if mute_tracks == "all" or (mute_tracks and "all" in mute_tracks):
         return ([], [])                       # no audio in the output
-    muted = {int(x) for x in mute_tracks or ()}
-    kept = [i for i in range(n) if (i + 1) not in muted]
+    usable = [i for i, t in enumerate(tracks)
+              if _audio_track_usable(src, i, t["codec"])]
+    for i, t in enumerate(tracks):
+        if i not in usable:
+            log("      audio: track %d (%s) cannot be decoded — dropped "
+                "from the output%s" % (
+                    i + 1, t["tag"] or t["codec"] or "unknown codec",
+                    "; on iPhone spatial-audio recordings the AAC track "
+                    "carries the same sound" if t["tag"] == "apac" else ""))
+    muted_nums = sorted({int(x) for x in mute_tracks or ()})
+    if lane_count is None or lane_count == n:
+        number = list(range(n))               # lanes = every track
+    elif lane_count == len(usable):
+        number = usable                       # lanes = decodable tracks
+    else:
+        number = None
+    if muted_nums and (number is None
+                       or any(m < 1 or m > len(number) for m in muted_nums)):
+        log("      WARNING: the muted audio lane(s) %s can't be matched to "
+            "this file's tracks (editor showed %s lane(s); the file has %d "
+            "track(s), %d decodable) — removing ALL audio rather than "
+            "risk keeping the muted one"
+            % (",".join(map(str, muted_nums)), lane_count, n, len(usable)))
+        return ([], [])
+    muted = {number[m - 1] for m in muted_nums}
+    kept = [i for i in usable if i not in muted]
     if not kept:
+        if not usable:
+            log("      audio: no decodable audio track — the output has "
+                "no audio")
         return ([], [])
     if not spans:
-        if len(kept) == n:
-            return (["-map", f"{ain}:a?"], ["-c:a", "copy"])
-        maps = []
-        for i in kept:
+        allow = _AUDIO_COPY_OK.get(container.lower(),
+                                   _AUDIO_COPY_OK[".mp4"])
+        maps, codecs, copy_all = [], [], True
+        for k, i in enumerate(kept):
             maps += ["-map", f"{ain}:a:{i}"]
-        return (maps, ["-c:a", "copy"])
+            if allow is None or tracks[i]["codec"] in allow:
+                codecs += [f"-c:a:{k}", "copy"]
+            else:
+                copy_all = False
+                codecs += [f"-c:a:{k}", "aac", f"-b:a:{k}", "192k"]
+                log("      audio: track %d (%s) re-encoded to AAC — %s "
+                    "can't hold it as-is" % (i + 1, tracks[i]["codec"],
+                                             container.lstrip(".")))
+        if copy_all and len(kept) == n:
+            return (["-map", f"{ain}:a?"], ["-c:a", "copy"])
+        return (maps, ["-c:a", "copy"] if copy_all else codecs)
     allx = "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b, _ in spans)
     bx = "+".join(f"between(t,{a:.3f},{b:.3f})"
                   for a, b, m in spans if m == "bleep")
@@ -3128,6 +3226,26 @@ def audio_ffmpeg_args(src, spans, ain=1, mute_tracks=()):
             maps += ["-map", f"[o{k}]"]
     return (["-filter_complex", ";".join(fc)] + maps,
             ["-c:a", "aac", "-b:a", "192k"])
+
+
+def _ffmpeg_failure(err_file, what, rc=None, hint=""):
+    """RuntimeError carrying the TAIL of ffmpeg's own stderr (captured to
+    a temp file), so the job log names the real cause — 'Could not find
+    tag for codec ...' — instead of the '[Errno 32] Broken pipe' Python
+    sees when the encoder exits mid-stream."""
+    tail = ""
+    try:
+        err_file.seek(0)
+        lines = [ln.strip() for ln in err_file.read().decode(
+            "utf-8", "replace").splitlines() if ln.strip()]
+        tail = " | ".join(lines[-4:])[-600:]
+    except Exception:
+        pass
+    msg = "%s failed%s" % (what, (" (ffmpeg exit %s)" % rc)
+                           if rc is not None else "")
+    return RuntimeError(msg + (": " + tail if tail else
+                               " — ffmpeg gave no error message")
+                        + (" — " + hint if hint else ""))
 
 
 def parse_audio_spans(spec, mode="mute"):
@@ -3600,7 +3718,7 @@ def _rate_cap_args(codec, out_quality, w, h, fps):
 def render_hdr(src, dst, detections, cum, bands, fps, pad, mode,
                encoder, tags, band_margin=25, progress_every=60, cb=None,
                mode_map=None, face_shape="ellipse", audio_spans=None,
-               mute_tracks=(), out_quality="archival"):
+               mute_tracks=(), out_quality="archival", audio_lanes=None):
     """render(), but 10-bit end to end: decode the HDR source to raw
     yuv420p10le, blur the planes in place, encode 10-bit HEVC with the
     source's color tags (PQ/HLG + BT.2020) carried over. `hvc1` tagging
@@ -3654,8 +3772,11 @@ def render_hdr(src, dst, detections, cum, bands, fps, pad, mode,
     targs = [a for kv in (tags or {}).items() for a in kv]
     if os.path.splitext(dst)[1].lower() in (".mp4", ".mov"):
         targs += ["-tag:v", "hvc1"]          # QuickTime/Apple compatibility
-    amap, acodec = audio_ffmpeg_args(src, audio_spans,
-                                     mute_tracks=mute_tracks)
+    amap, acodec = audio_ffmpeg_args(
+        src, audio_spans, mute_tracks=mute_tracks,
+        container=os.path.splitext(dst)[1] or ".mp4",
+        lane_count=audio_lanes, log=cb.log)
+    ff_err = tempfile.TemporaryFile()   # see render(): names the cause
     enc = subprocess.Popen(
         ["ffmpeg", "-y", "-loglevel", "error",
          "-f", "rawvideo", "-pix_fmt", "yuv420p10le",
@@ -3667,7 +3788,7 @@ def render_hdr(src, dst, detections, cum, bands, fps, pad, mode,
          # flags, not metadata, so HDR signalling survives)
          "-map_metadata", "-1", "-map_chapters", "-1",
          *vargs, *targs, *acodec, dst],
-        stdin=subprocess.PIPE)
+        stdin=subprocess.PIPE, stderr=ff_err)
 
     buckets = {}
     for d in detections:
@@ -3741,7 +3862,13 @@ def render_hdr(src, dst, detections, cum, bands, fps, pad, mode,
         elif bx > 2:
             band(0, 0, bx + band_margin, h)
 
-        enc.stdin.write(buf.tobytes())
+        try:
+            enc.stdin.write(buf.tobytes())
+        except (BrokenPipeError, OSError):
+            rc = enc.wait()
+            err = _ffmpeg_failure(ff_err, "HDR encode", rc)
+            cleanup_partial()
+            raise err
         idx += 1
         if idx % progress_every == 0:
             cb.progress("render", idx, total)
@@ -3751,10 +3878,13 @@ def render_hdr(src, dst, detections, cum, bands, fps, pad, mode,
     dec.stdout.close()
     dec.wait()
     cb.progress("render", max(total, idx), max(total, idx))
-    enc.stdin.close()
+    try:
+        enc.stdin.close()
+    except (BrokenPipeError, OSError):
+        pass                        # exit code + stderr say why below
     rc = enc.wait()
     if rc != 0:
-        raise RuntimeError(f"HDR encode failed (ffmpeg exit {rc})")
+        raise _ffmpeg_failure(ff_err, "HDR encode", rc)
     cb.log(f"      HDR preserved: 10-bit HEVC, color tags "
            + (", ".join(f"{k.lstrip('-')}={v}" for k, v in (tags or {}).items())
               or "(none in source)"))
@@ -3764,7 +3894,7 @@ def render(src, dst, detections, cum, bands, fps, pad, mode, preview,
            encoder="auto", band_margin=25, progress_every=60, cb=None,
            mode_map=None, draw_scores=False, vcodec="h264",
            face_shape="ellipse", audio_spans=None, clip=None,
-           mute_tracks=(), out_quality="archival"):
+           mute_tracks=(), out_quality="archival", audio_lanes=None):
     # mode_map: {category: "blur"|"box"} overrides the global `mode` per
     # category. Lets you black-box the reversible-blur-vulnerable categories
     # (SSN, MRN, account numbers) while blurring faces, in one render.
@@ -3779,6 +3909,7 @@ def render(src, dst, detections, cum, bands, fps, pad, mode, preview,
 
     # --- output sink: single-pass ffmpeg pipe (NVENC if available) ---
     proc = None
+    ff_err = None
     out = None
     tmp_video = None
     codec = nvenc_available(encoder, cb)
@@ -3827,9 +3958,11 @@ def render(src, dst, detections, cum, bands, fps, pad, mode, preview,
             cb.log(f"      output trim: keeping {cs:.1f}s"
                    f"–{(ce if ce is not None else 'end')}"
                    + ("s" if ce is not None else ""))
-        amap, acodec = audio_ffmpeg_args(src, aspans_eff,
-                                         mute_tracks=mute_tracks)
-        if acodec != ["-c:a", "copy"]:
+        amap, acodec = audio_ffmpeg_args(
+            src, aspans_eff, mute_tracks=mute_tracks,
+            container=os.path.splitext(dst)[1] or ".mp4",
+            lane_count=audio_lanes, log=cb.log)
+        if aspans_eff and amap:
             cb.log("      audio: %d span(s) redacted (%s)" % (
                 len(aspans_eff),
                 ", ".join(sorted({m for _, _, m in aspans_eff}))))
@@ -3842,7 +3975,14 @@ def render(src, dst, detections, cum, bands, fps, pad, mode, preview,
                # ALL container and stream metadata
                "-map_metadata", "-1", "-map_chapters", "-1",
                *vargs, "-pix_fmt", "yuv420p", *acodec, dst]
-        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+        # ffmpeg's stderr goes to a temp FILE (a pipe could fill and
+        # deadlock the frame writes): when the encoder dies, its own
+        # error message is what the job log needs — a bare "[Errno 32]
+        # Broken pipe" diagnosed nothing
+        ff_err = tempfile.TemporaryFile()
+        gpu_hint = ("if it persists, try the x264 encoder"
+                    if codec.endswith(("_nvenc", "_qsv")) else "")
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=ff_err)
     else:
         if audio_spans:
             cb.log("      WARNING: audio redaction requires ffmpeg — the "
@@ -3957,7 +4097,15 @@ def render(src, dst, detections, cum, bands, fps, pad, mode, preview,
             band(0, 0, bx + band_margin, h)
 
         if proc is not None:
-            proc.stdin.write(frame.tobytes())
+            try:
+                proc.stdin.write(frame.tobytes())
+            except (BrokenPipeError, OSError):
+                # the encoder exited mid-stream: report ITS reason
+                rc = proc.wait()
+                err = _ffmpeg_failure(ff_err, "video encode", rc,
+                                      hint=gpu_hint)
+                cleanup_partial()
+                raise err
         else:
             out.write(frame)
         idx += 1
@@ -3969,10 +4117,14 @@ def render(src, dst, detections, cum, bands, fps, pad, mode, preview,
     cap.release()
     cb.progress("render", total, total)
     if proc is not None:
-        proc.stdin.close()
+        try:
+            proc.stdin.close()
+        except (BrokenPipeError, OSError):
+            pass                        # exit code + stderr say why below
         rc = proc.wait()
         if rc != 0:
-            raise RuntimeError(f"ffmpeg encode failed (exit {rc}) — try --encoder x264")
+            raise _ffmpeg_failure(ff_err, "video encode", rc,
+                                  hint=gpu_hint)
     else:
         out.release()
         os.replace(tmp_video, dst)
@@ -5872,11 +6024,18 @@ def transcribe_audio_pii(video, cats, cb, model_size="base", nlp=None,
     if not probe_has_audio(video):
         cb.log("      spoken-PII: no audio track — skipped")
         return [], []
-    import tempfile
+    # transcribe the first DECODABLE track explicitly: left to itself
+    # ffmpeg picks the "best" stream, which on an iPhone spatial-audio
+    # recording can be the undecodable APAC track
+    usable = usable_audio_tracks(video)
+    if not usable:
+        cb.log("      spoken-PII: no decodable audio track — skipped")
+        return [], []
     wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
     try:
         p = subprocess.run(
             ["ffmpeg", "-y", "-loglevel", "error", "-i", video,
+             "-map", f"0:a:{usable[0]}",
              "-vn", "-ac", "1", "-ar", "16000", wav],
             capture_output=True, text=True)
         if p.returncode != 0:
@@ -6502,7 +6661,15 @@ def build_parser():
                     help="audio tracks to remove from the output: comma "
                          "list of 1-based track numbers, or 'all'. "
                          "Multi-track sources (game + mic, camera + lav) "
-                         "keep their other tracks.")
+                         "keep their other tracks. Numbers count every "
+                         "track unless --audio-lane-count says otherwise.")
+    ap.add_argument("--audio-lane-count", type=int, default=None,
+                    help="how many audio lanes the web editor showed "
+                         "(set by the web UI). Browsers list only playable "
+                         "tracks, so --mute-audio-tracks numbers are "
+                         "matched against all tracks or the decodable ones, "
+                         "whichever this count fits; an ambiguous match "
+                         "removes ALL audio (fail closed).")
     ap.add_argument("--clip-start", type=float, default=0.0,
                     help="output trim: drop everything before this second — "
                          "the redacted output starts here")
@@ -8042,7 +8209,8 @@ def run_render(args, state, cb=None):
                    face_shape=getattr(args, "face_shape", "ellipse"),
                    mode_map=getattr(args, "mode_map", None),
                    audio_spans=aspans, mute_tracks=mute_tracks, cb=cb,
-                   out_quality=out_q)
+                   out_quality=out_q,
+                   audio_lanes=getattr(args, "audio_lane_count", None))
     else:
         render(args.video, dst, dets_r, state["cum"],
                state["bands"],
@@ -8052,7 +8220,8 @@ def run_render(args, state, cb=None):
                vcodec=getattr(args, "codec", "h264"),
                face_shape=getattr(args, "face_shape", "ellipse"),
                encoder=args.encoder, audio_spans=aspans, clip=clip,
-               mute_tracks=mute_tracks, cb=cb, out_quality=out_q)
+               mute_tracks=mute_tracks, cb=cb, out_quality=out_q,
+               audio_lanes=getattr(args, "audio_lane_count", None))
     if args.report:
         write_report(args.report, args, state, output_path=dst)
         cb.log(f"      audit report: {args.report} (contains PII text — protect it)")

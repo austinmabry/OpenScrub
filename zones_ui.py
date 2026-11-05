@@ -1173,6 +1173,10 @@ async function startScan(){
     ?((S.cin/S.dur).toFixed(4)+"-"+(S.cout/S.dur).toFixed(4)):"",
   mute_tracks:S.audio.length===1&&S.audio[0].muted?"all"
     :S.audio.map((a,i)=>a.muted?String(i+1):"").filter(Boolean).join(","),
+  // how many lanes the browser showed: it lists only playable tracks
+  // (iPhone spatial audio is hidden), so the engine needs this to map
+  // the mute numbers onto the file's real tracks — and fails closed
+  audio_lanes:S.audio.length,
   windows:S.wins.map(w=>({t0:+(w.t0/S.dur).toFixed(4),
     t1:+(w.t1/S.dur).toFixed(4),cats:Object.keys(w.cats),zones:w.zones,
     track:w.track||[]})),
