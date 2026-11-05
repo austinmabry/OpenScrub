@@ -492,7 +492,8 @@ def test_hdr_probe_and_tonemap(tmp_path):
                     "-f", "lavfi", "-i", "testsrc2=duration=1:size=320x240:rate=30",
                     "-c:v", "libx264", "-pix_fmt", "yuv420p",
                     "-color_primaries", "bt2020", "-color_trc", "smpte2084",
-                    "-colorspace", "bt2020nc", hdr], check=True)
+                    "-colorspace", "bt2020nc",
+                     "-x264-params", "colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc", hdr], check=True)
     is_hdr, desc = openscrub.probe_hdr(hdr)
     assert is_hdr and desc == "HDR10/PQ"
 
@@ -546,7 +547,8 @@ def _hdr_clip(path):
                     "-vf", "drawbox=x=50:y=260:w=400:h=60:color=white:t=fill",
                     "-c:v", "libx264", "-pix_fmt", "yuv420p",
                     "-color_primaries", "bt2020", "-color_trc", "smpte2084",
-                    "-colorspace", "bt2020nc", path], check=True)
+                    "-colorspace", "bt2020nc",
+                     "-x264-params", "colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc", path], check=True)
 
 
 def _vstream(path):
@@ -576,7 +578,8 @@ def test_hdr_output_preserved(tmp_path):
     subprocess.run(["ffmpeg", "-y", "-loglevel", "error",
                     "-i", src + ".tmp.mp4", "-c:v", "libx264",
                     "-color_primaries", "bt2020", "-color_trc", "smpte2084",
-                    "-colorspace", "bt2020nc", src], check=True)
+                    "-colorspace", "bt2020nc",
+                     "-x264-params", "colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc", src], check=True)
     _, dets = run(src, "--categories", "ssn", "--encoder", "x264")
     st = _vstream(src.replace(".mp4", "_red.mp4"))
     assert st["codec_name"] == "hevc", st

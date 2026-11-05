@@ -3623,6 +3623,23 @@ def render_hdr(src, dst, detections, cum, bands, fps, pad, mode,
              ["-c:v", "libx265", "-crf", q, "-preset", "fast",
               "-pix_fmt", "yuv420p10le"])
     vargs += _rate_cap_args(encoder, out_quality, w, h, fps)
+
+    # Explicitly signal HDR color properties in the x265 bitstream.
+    # Generic FFmpeg color flags alone are not reliable on every build.
+    if encoder == "libx265":
+        x265_names = {
+            "-color_primaries": "colorprim",
+            "-color_trc": "transfer",
+            "-colorspace": "colormatrix",
+        }
+        x265_tags = ":".join(
+            f"{x265_names[flag]}={value}"
+            for flag, value in (tags or {}).items()
+            if flag in x265_names
+        )
+        if x265_tags:
+            vargs += ["-x265-params", x265_tags]
+
     targs = [a for kv in (tags or {}).items() for a in kv]
     if os.path.splitext(dst)[1].lower() in (".mp4", ".mov"):
         targs += ["-tag:v", "hvc1"]          # QuickTime/Apple compatibility
