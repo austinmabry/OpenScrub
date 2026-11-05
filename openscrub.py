@@ -2743,6 +2743,7 @@ def merge_detections(dets, hold, scans=None, bridge_gap=4.0, fuzz=None,
     fail closed, never flash PII."""
     dets = sorted(dets, key=lambda d: d.t_start)
     merged = []
+    mergeable = []  # Non-dense detections only
 
     def contradicted(m, t_from, t_to):
         """True only if the gap contains STABLE different text — the same
@@ -2782,6 +2783,9 @@ def merge_detections(dets, hold, scans=None, bridge_gap=4.0, fuzz=None,
 
     for d in dets:
         d.last_seen = d.t_start
+        if getattr(d, 'dense', False):
+            merged.append(d)
+            continue
         if not getattr(d, "dense", False):
             # dense samples keep their sub-frame hold: stamping them with the
             # multi-second OCR hold leaves every PAST position blurred for
@@ -2789,7 +2793,7 @@ def merge_detections(dets, hold, scans=None, bridge_gap=4.0, fuzz=None,
             # moving face. Their continuity across detector flicker and the
             # onset gap is handled per-track by smooth_dense_tracks().
             d.t_end = d.t_start + hold
-        for m in reversed(merged):
+        for m in reversed(mergeable):
             if m.category != d.category or not boxes_overlap(m.cbox, d.cbox):
                 continue
             if getattr(d, "dense", False) or getattr(m, "dense", False):
@@ -2826,6 +2830,7 @@ def merge_detections(dets, hold, scans=None, bridge_gap=4.0, fuzz=None,
                 break
         else:
             merged.append(d)
+            mergeable.append(d)
 
     # Tail extension: a span ends `hold` after its LAST positive detection,
     # but the text often outlives that detection — under heavy compression
