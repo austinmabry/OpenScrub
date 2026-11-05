@@ -8,3 +8,7 @@ The Docker images published for this project additionally contain
 third-party components (FFmpeg, Tesseract OCR, PaddleOCR, spaCy,
 OpenCV, and others) under their own licenses; those components are
 aggregated alongside OpenScrub, not part of it.
+
+The third-party detection model files OpenScrub uses, including those
+pre-installed in the Docker images, are listed with their licenses,
+copyright notices, and full license texts in THIRD_PARTY_NOTICES.md.

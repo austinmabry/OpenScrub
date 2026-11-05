@@ -805,4 +805,7 @@ OpenScrub is licensed under the [Apache License 2.0](LICENSE)
 (© 2026 Austin Mabry — see [NOTICE](NOTICE)). The published Docker
 images additionally contain third-party components (FFmpeg, Tesseract
 OCR, PaddleOCR, spaCy, OpenCV, and others) under their own licenses;
-those are aggregated alongside OpenScrub, not relicensed by it.
+those are aggregated alongside OpenScrub, not relicensed by it. The
+detection model files OpenScrub uses — and the ones pre-installed in the
+Docker images — are listed with their licenses, copyright notices, and
+full license texts in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

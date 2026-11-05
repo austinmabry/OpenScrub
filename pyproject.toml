@@ -80,6 +80,10 @@ pattern = "VERSION = \"(?P<version>[^\"]+)\""
 "plate_models.json" = "plate_models.json"
 "face_models.json" = "face_models.json"
 "person_models.json" = "person_models.json"
+# third-party model licenses + copyright notices. Lands at the top of
+# site-packages beside the registries, so it gets a project-prefixed name
+# that can't collide with another package's notices file.
+"THIRD_PARTY_NOTICES.md" = "openscrub_THIRD_PARTY_NOTICES.md"
 # branded icon for the Start Menu shortcut openscrub-setup creates
 "assets/openscrub.ico" = "openscrub.ico"
 
@@ -110,5 +114,6 @@ include = [
     "README.md",
     "LICENSE",
     "NOTICE",
+    "THIRD_PARTY_NOTICES.md",
     "test_openscrub.py",
 ]

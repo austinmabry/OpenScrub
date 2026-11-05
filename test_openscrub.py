@@ -3301,3 +3301,68 @@ def test_mixed_merge_excludes_dense_candidates(monkeypatch):
     assert result[2] is dense2
     assert len(calls) == 1
     assert abs(sparse1.t_end - 1.0) < 1e-9
+
+
+def test_third_party_notices_cover_every_baked_model():
+    """Every model file the Docker images redistribute (the prefetch
+    table) must have its notice — license + copyright — in
+    THIRD_PARTY_NOTICES.md, identified by filename AND sha256, and the
+    notices file must ship everywhere: all three images, the sdist, the
+    wheel, and the Windows installer. Adding a model to the prefetch
+    without a notice fails here, not in a license audit."""
+    import importlib.util
+    here = os.path.dirname(os.path.abspath(__file__))
+    spec = importlib.util.spec_from_file_location(
+        "prefetch_models", os.path.join(here, "docker", "prefetch_models.py"))
+    pf = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pf)
+    notes = open(os.path.join(here, "THIRD_PARTY_NOTICES.md"),
+                 encoding="utf-8").read()
+    for key, (url, sha, fname) in pf.MODELS.items():
+        assert fname in notes, f"{key}: {fname} has no notice"
+        assert sha in notes, f"{key}: notice not tied to the shipped file"
+    assert "{{" not in notes, "unfilled license-text placeholder"
+    assert notes.count("Permission is hereby granted, free of charge") == 2
+    assert "TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION" \
+        in notes
+    for df in ("Dockerfile", "Dockerfile.intel", "Dockerfile.cuda"):
+        src = open(os.path.join(here, df), encoding="utf-8").read()
+        assert any(l.startswith("COPY ") and "THIRD_PARTY_NOTICES.md" in l
+                   for l in src.splitlines()), f"{df} must ship the notices"
+    py = open(os.path.join(here, "pyproject.toml"), encoding="utf-8").read()
+    sdist = py.split("[tool.hatch.build.targets.sdist]", 1)[1]
+    assert '"THIRD_PARTY_NOTICES.md",' in sdist      # wheel builds FROM it
+    assert '"THIRD_PARTY_NOTICES.md" = "openscrub_THIRD_PARTY_NOTICES.md"' \
+        in py
+    spec_src = open(os.path.join(here, "windows", "openscrub.spec"),
+                    encoding="utf-8").read()
+    assert '"THIRD_PARTY_NOTICES.md"' in spec_src
+
+
+def test_registry_doc_fields_refresh_but_pins_stay(monkeypatch, tmp_path):
+    """Read-only installs keep a per-user registry copy. A release that
+    corrects an entry's documentation (a wrong training-data attribution
+    once shipped) must reach existing copies — but a user's sha256 pin,
+    download_url, input_size and recommended flag are never touched."""
+    monkeypatch.setattr(openscrub, "install_is_readonly", lambda: True)
+    monkeypatch.setattr(openscrub, "user_data_dir", lambda: str(tmp_path))
+    shipped = json.load(open(os.path.join(
+        os.path.dirname(os.path.abspath(openscrub.__file__)),
+        "plate_models.json"), encoding="utf-8"))
+    mine = json.loads(json.dumps(shipped))
+    m0 = mine["models"][0]
+    m0["attribution"] = "stale text"
+    m0["notes"] = "stale notes"
+    m0["sha256"] = "ab" * 32                 # the user's own TOFU pin
+    m0["download_url"] = "https://example.com/pinned.onnx"
+    m0["recommended"] = not m0.get("recommended", False)
+    (tmp_path / "plate_models.json").write_text(json.dumps(mine),
+                                                encoding="utf-8")
+    p = openscrub.model_registry_path("plate")
+    got = json.load(open(p, encoding="utf-8"))["models"][0]
+    s0 = shipped["models"][0]
+    assert got["attribution"] == s0["attribution"]
+    assert got["notes"] == s0["notes"]
+    assert got["sha256"] == "ab" * 32
+    assert got["download_url"] == "https://example.com/pinned.onnx"
+    assert got["recommended"] == m0["recommended"]

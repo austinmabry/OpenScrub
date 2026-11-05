@@ -36,7 +36,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.86"
+VERSION = "1.0.87"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -4195,6 +4195,13 @@ def user_data_dir():
 MODEL_KINDS = ("plate", "face", "person")
 
 
+# Registry fields that are pure documentation, refreshed from the shipped
+# registry into per-user copies. Everything else (sha256 pins above all)
+# is the user's.
+_REGISTRY_DOC_FIELDS = ("label", "license", "attribution", "notes",
+                        "source_url")
+
+
 def model_registry_path(kind="plate"):
     """Path of the WRITABLE model registry for `kind` ("plate" or "face" —
     TOFU pins are written back here).
@@ -4235,8 +4242,26 @@ def model_registry_path(kind="plate"):
             have = {m.get("id") for m in mine.get("models", [])}
             new = [m for m in shipped.get("models", [])
                    if m.get("id") not in have]
+            changed = bool(new)
             if new:
                 mine.setdefault("models", []).extend(new)
+            # a release can CORRECT an existing entry's documentation (a
+            # wrong attribution once lived here for every user who had
+            # already seeded a copy) — refresh descriptive fields from
+            # the shipped registry, but never the security-relevant ones:
+            # sha256 pins, download_url, input_size and recommended stay
+            # exactly as the user's copy has them
+            shipped_by_id = {m.get("id"): m
+                             for m in shipped.get("models", [])}
+            for m in mine.get("models", []):
+                s = shipped_by_id.get(m.get("id"))
+                if not s:
+                    continue
+                for k in _REGISTRY_DOC_FIELDS:
+                    if k in s and m.get(k) != s[k]:
+                        m[k] = s[k]
+                        changed = True
+            if changed:
                 with open(user, "w", encoding="utf-8") as f:
                     json.dump(mine, f, indent=2)
     except Exception:

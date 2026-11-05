@@ -41,6 +41,8 @@ DATAS = [
     (os.path.join(ROOT, "face_models.json"), "."),
     (os.path.join(ROOT, "person_models.json"), "."),
     (os.path.join(ROOT, "LICENSE"), "."),
+    (os.path.join(ROOT, "NOTICE"), "."),
+    (os.path.join(ROOT, "THIRD_PARTY_NOTICES.md"), "."),
 ] + _ort_datas
 HIDDEN = [
     "cheroot", "cheroot.wsgi", "cheroot.ssl", "cheroot.ssl.builtin",
