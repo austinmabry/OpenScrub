@@ -797,6 +797,7 @@ Two reasoning layers prevent "flash of PII" from intermittent OCR misses:
 | Scan dies with an OpenCV `gather`/`-211` error on a plate/person model | fixed in v1.0.83 (OpenCV 5 loads these models but can't run them; they now self-test at load and run on onnxruntime) — update OpenScrub |
 | "plate detector: no model installed" / plates never blurred | since v1.0.85 the recommended plate model auto-downloads at scan start (Docker images ship it); person/screen models are a one-click download in Settings → Detection models — the editor warns when a checked category has no model, and a job whose every category lacks one refuses to run |
 | A scan failed and the disk is filling with re-uploads | use the job's ↻ Retry (reuses the uploaded file); delete failed jobs you don't need — each keeps its upload until deleted |
+| A job sits at "scanning" with an empty log and Cancel does nothing | fixed in v1.0.89 (an unselected dropdown on iPhone Safari stopped the job worker). On older versions run `docker restart <container>`, then ↻ Retry the job; v1.0.89+ falls back to defaults, cancels stuck jobs immediately and restarts the worker itself |
 | Editor: can't play the loaded video / draw tool "stuck" | the editor opens in ▶ Play mode since v1.0.84 (native video controls work); pick a category or ✏ Draw to add zones, Esc returns to Play |
 | Review: want to watch the video with the detections | "Preview video & edit boxes" has a ▶ Play button since v1.0.84 — boxes move live; pause to edit them |
 

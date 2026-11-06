@@ -25,6 +25,7 @@ over the GPU.
 
 import argparse
 import json
+import math
 import os
 import queue
 import secrets
@@ -318,6 +319,9 @@ def server_path_error(p):
     return None
 
 
+OPTIONS_FILE = "options.json"
+
+
 def new_job(video_path, options, name):
     jid = uuid.uuid4().hex[:12]
     jdir = os.path.join(JOBS_DIR, jid)
@@ -327,8 +331,17 @@ def new_job(video_path, options, name):
         "options": options, "phase": "queued", "progress": 0.0,
         "eta": None, "size": 0,
         "log": [], "error": None, "output": None, "created": time.time(),
-        "cancel": threading.Event(), "stats": {},
+        "cancel": threading.Event(), "stats": {}, "qgen": 0,
     }
+    # keep the job's settings beside its upload: a scan that never finished
+    # has no report to recover them from, and a Retry after a restart then
+    # ran with DEFAULT settings (all categories) instead of the user's own
+    try:
+        with open(os.path.join(jdir, OPTIONS_FILE), "w",
+                  encoding="utf-8") as f:
+            json.dump(options, f)
+    except (OSError, TypeError, ValueError):
+        pass
     with JOBS_LOCK:
         JOBS[jid] = job
     return job
@@ -529,129 +542,274 @@ def build_args(job, for_render=False):
     if for_render:
         argv += ["--from-report", os.path.join(jdir, "report.json")]
     parser = openscrub.build_parser()
+    argv = _sanitize_argv(parser, argv, job)
+
+    # argparse's error()/exit() call sys.exit — a SystemExit that, raised in
+    # the job worker THREAD, killed that thread without a traceback: the job
+    # sat at "scanning" with an empty log forever, Cancel did nothing, and
+    # every later job queued behind it (a real iPhone job: Safari submitted
+    # engine="" and `--engine ''` is an invalid choice). Inside the server a
+    # bad setting must fail THE JOB, loudly — never the process's only worker.
+    def _no_exit(message=None, *a, **k):
+        raise ValueError("invalid job settings — %s" % (message or "rejected"))
+    parser.error = _no_exit
+    parser.exit = lambda status=0, message=None: _no_exit(message)
     return openscrub._prep_args(parser.parse_args(argv), parser)
 
 
-def worker():
-    while True:
-        jid, action = WORK_Q.get()
-        with JOBS_LOCK:
-            job = JOBS.get(jid)
-        if job is None:
+def _sanitize_argv(parser, argv, job=None):
+    """Repair option VALUES the browser sent that the engine's parser would
+    reject: a choice outside its list (iOS Safari can report a <select> with
+    no selection as value ""), or a number that isn't one / isn't finite
+    ("None", "", "NaN" from an empty input). Each falls back to the engine's
+    own default — the same thing the CLI uses when the flag is omitted —
+    with a NOTE in the job log, so one odd form value can't sink a scan.
+    The choice lists and defaults come from the parser itself, so this can
+    never drift from the engine. Detection SCOPE is not repaired here:
+    categories/windows are free-form and are validated by the engine."""
+    out = list(argv)
+    i = 0
+    while i < len(out) - 1:
+        a = parser._option_string_actions.get(out[i])
+        if a is None or a.nargs is not None:     # positional / flag / list
+            i += 1
             continue
-        cb = WebCallbacks(job)
+        v = out[i + 1]
+        bad = bool(a.choices) and v not in a.choices
+        if not bad and a.type in (int, float):
+            try:
+                bad = not math.isfinite(a.type(v))
+            except (TypeError, ValueError):
+                bad = True
+        if not bad:
+            i += 2
+            continue
+        if a.default is None:          # no engine default: omit the flag
+            del out[i:i + 2]
+            msg = "omitted"
+        else:
+            out[i + 1] = str(a.default)
+            msg = "using the default %r" % (a.default,)
+            i += 2
+        if job is not None and isinstance(job.get("log"), list):
+            job["log"].append("NOTE: setting %s=%r is not valid — %s"
+                              % (a.option_strings[0], v, msg))
+    return out
+
+
+# The single job worker. WORKER["current"] is the job it is running right
+# now (read by Cancel and the watchdog); WORKER["thread"] is the live thread.
+WORKER = {"current": None, "thread": None}
+_ACTIVE_PHASES = ("queued", "scanning", "rendering", "queued_render")
+
+
+def enqueue(job, action):
+    """Queue a job action. Each enqueue bumps the job's generation, and the
+    worker skips any queue entry whose generation is stale — so cancelling
+    a queued job (which bumps it too) really removes it from the line, and
+    a Retry after a Cancel can't run the scan twice."""
+    with JOBS_LOCK:
+        job["qgen"] = job.get("qgen", 0) + 1
+        gen = job["qgen"]
+    WORK_Q.put((job["id"], action, gen))
+
+
+def worker():
+    """Run queued jobs forever. NOTHING may end this loop: it is the
+    server's only worker, and when it died (a SystemExit from argparse —
+    which a thread swallows silently) the job froze at "scanning" with an
+    empty log, Cancel was ignored and every later job queued forever until
+    the container was restarted. Every per-job failure, BaseException
+    included, now fails that job loudly and the loop carries on."""
+    while True:
         try:
-            if action == "scan":
-                job["phase"] = "scanning"
-                args = build_args(job)
-                state = openscrub.run_scan(args, cb)
-                openscrub.write_report(os.path.join(job["dir"], "report.json"),
-                                      args, state)
-                job["stats"] = state["stats"]
-                def _pregen(jid=jid):
-                    """One pass through the video with a single decoder:
-                    thumbnails come out in seconds instead of minutes.
-                    Sorting by reference time keeps seeks short and forward-
-                    only, which is what codecs are fast at."""
-                    try:
-                        jb = JOBS.get(jid)
-                        doc = _load_job_report(jb)
-                        rs = doc["render_state"]
-                        todo = []
-                        for k, d in enumerate(doc["detections"]):
-                            cch = os.path.join(jb["dir"], f"thumb2_{k}.jpg")
-                            if os.path.exists(cch):
-                                continue
-                            tref = min(max(d.get("last_seen", d["t_start"]),
-                                           d["t_start"]), d["t_end"])
-                            todo.append((tref, k, d, cch))
-                        todo.sort()
-                        cap = cv2.VideoCapture(jb["video"])
-                        cur = -1
-                        frame = None
-                        for tref, k, d, cch in todo:
-                            fidx = min(int(tref * rs["fps"]),
-                                       len(rs["cum"]) - 1)
-                            if fidx != cur:
-                                if 0 <= fidx - cur <= 12:
-                                    while cur < fidx:   # cheap forward decode
-                                        ok, frame = cap.read()
-                                        if not ok:
-                                            frame = None
-                                            break
-                                        cur += 1
-                                else:
-                                    cap.set(cv2.CAP_PROP_POS_FRAMES, fidx)
+            item = WORK_Q.get()
+        except BaseException:          # pragma: no cover — queue can't fail
+            time.sleep(1)
+            continue
+        if item is None:               # explicit stop (tests); the watchdog
+            WORK_Q.task_done()         # starts a fresh worker in production
+            return
+        try:
+            jid, action = item[0], item[1]
+            gen = item[2] if len(item) > 2 else None
+            with JOBS_LOCK:
+                job = JOBS.get(jid)
+                stale = (job is None
+                         or (gen is not None and gen != job.get("qgen", 0))
+                         or job.get("phase") == "cancelled")
+                if not stale:
+                    WORKER["current"] = jid
+            if not stale:
+                _run_job(job, action)
+        except BaseException as e:     # belt and braces: never die
+            print(f"[web] worker: unexpected {type(e).__name__}: {e}",
+                  flush=True)
+        finally:
+            WORKER["current"] = None
+            WORK_Q.task_done()
+
+
+def _run_job(job, action):
+    jid = job["id"]
+    cb = WebCallbacks(job)
+    try:
+        if action == "scan":
+            job["phase"] = "scanning"
+            job["log"].append("— scan started —")
+            args = build_args(job)
+            state = openscrub.run_scan(args, cb)
+            openscrub.write_report(os.path.join(job["dir"], "report.json"),
+                                  args, state)
+            job["stats"] = state["stats"]
+            def _pregen(jid=jid):
+                """One pass through the video with a single decoder:
+                thumbnails come out in seconds instead of minutes.
+                Sorting by reference time keeps seeks short and forward-
+                only, which is what codecs are fast at."""
+                try:
+                    jb = JOBS.get(jid)
+                    doc = _load_job_report(jb)
+                    rs = doc["render_state"]
+                    todo = []
+                    for k, d in enumerate(doc["detections"]):
+                        cch = os.path.join(jb["dir"], f"thumb2_{k}.jpg")
+                        if os.path.exists(cch):
+                            continue
+                        tref = min(max(d.get("last_seen", d["t_start"]),
+                                       d["t_start"]), d["t_end"])
+                        todo.append((tref, k, d, cch))
+                    todo.sort()
+                    cap = cv2.VideoCapture(jb["video"])
+                    cur = -1
+                    frame = None
+                    for tref, k, d, cch in todo:
+                        fidx = min(int(tref * rs["fps"]),
+                                   len(rs["cum"]) - 1)
+                        if fidx != cur:
+                            if 0 <= fidx - cur <= 12:
+                                while cur < fidx:   # cheap forward decode
                                     ok, frame = cap.read()
-                                    cur = fidx if ok else cur
                                     if not ok:
                                         frame = None
-                            if frame is None:
-                                continue
-                            ox, oy = rs["cum"][fidx]
-                            h, wd = frame.shape[:2]
-                            pad = 24
-                            x1 = max(0, int(d["cbox"][0] + ox) - pad)
-                            y1 = max(0, int(d["cbox"][1] + oy) - pad)
-                            x2 = min(wd, int(d["cbox"][2] + ox) + pad)
-                            y2 = min(h, int(d["cbox"][3] + oy) + pad)
-                            crop = frame[y1:y2, x1:x2].copy()
-                            if crop.size == 0:
-                                continue
-                            inner = crop[pad:-pad or None, pad:-pad or None]
-                            if not inner.size or float(inner.std()) <= 8:
-                                continue   # blank: leave for the on-demand
-                                           # path, which tries other moments
-                            cv2.rectangle(crop, (pad, pad),
-                                          (crop.shape[1] - pad,
-                                           crop.shape[0] - pad),
-                                          (0, 0, 255), 2)
-                            cv2.imwrite(cch, crop,
-                                        [cv2.IMWRITE_JPEG_QUALITY, 80])
-                        cap.release()
-                        jb["log"].append("thumbnails pre-generated "
-                                         f"({len(todo)})")
-                    except Exception:
-                        pass
-                threading.Thread(target=_pregen, daemon=True).start()
-                try:
-                    prov = _load_job_report(job).get("provenance", {})
-                    if (prov.get("vfr_normalized")
-                            and os.path.exists(prov.get("input", ""))):
-                        job["video"] = prov["input"]
-                        job["log"].append(
-                            "using CFR-normalized file for previews/thumbnails")
+                                        break
+                                    cur += 1
+                            else:
+                                cap.set(cv2.CAP_PROP_POS_FRAMES, fidx)
+                                ok, frame = cap.read()
+                                cur = fidx if ok else cur
+                                if not ok:
+                                    frame = None
+                        if frame is None:
+                            continue
+                        ox, oy = rs["cum"][fidx]
+                        h, wd = frame.shape[:2]
+                        pad = 24
+                        x1 = max(0, int(d["cbox"][0] + ox) - pad)
+                        y1 = max(0, int(d["cbox"][1] + oy) - pad)
+                        x2 = min(wd, int(d["cbox"][2] + ox) + pad)
+                        y2 = min(h, int(d["cbox"][3] + oy) + pad)
+                        crop = frame[y1:y2, x1:x2].copy()
+                        if crop.size == 0:
+                            continue
+                        inner = crop[pad:-pad or None, pad:-pad or None]
+                        if not inner.size or float(inner.std()) <= 8:
+                            continue   # blank: leave for the on-demand
+                                       # path, which tries other moments
+                        cv2.rectangle(crop, (pad, pad),
+                                      (crop.shape[1] - pad,
+                                       crop.shape[0] - pad),
+                                      (0, 0, 255), 2)
+                        cv2.imwrite(cch, crop,
+                                    [cv2.IMWRITE_JPEG_QUALITY, 80])
+                    cap.release()
+                    jb["log"].append("thumbnails pre-generated "
+                                     f"({len(todo)})")
                 except Exception:
                     pass
-                if job["options"].get("skip_review"):
-                    job["log"].append("review skipped — rendering all detections")
-                    job["phase"] = "review"
-                    WORK_Q.put((jid, "render"))
-                else:
-                    job["phase"] = "review"
-                job["progress"] = 0.5
-                job["eta"] = None
-            elif action == "render":
-                job["phase"] = "rendering"
-                args = build_args(job, for_render=True)
-                res = openscrub.run_pipeline(args, cb)
-                job["output"] = res["output"]
-                # refresh report with output hash
-                dets, rstate, prov = openscrub.load_report(
-                    os.path.join(job["dir"], "report.json"))
-                job["phase"] = "done"
-                job["progress"] = 1.0
-                job["eta"] = None
-        except openscrub.PipelineCancelled:
-            job["phase"] = "cancelled"
-            job["error"] = "cancelled by user"
-        except Exception as e:
+            threading.Thread(target=_pregen, daemon=True).start()
+            try:
+                prov = _load_job_report(job).get("provenance", {})
+                if (prov.get("vfr_normalized")
+                        and os.path.exists(prov.get("input", ""))):
+                    job["video"] = prov["input"]
+                    job["log"].append(
+                        "using CFR-normalized file for previews/thumbnails")
+            except Exception:
+                pass
+            if job["options"].get("skip_review"):
+                job["log"].append("review skipped — rendering all detections")
+                job["phase"] = "queued_render"
+                enqueue(job, "render")
+            else:
+                job["phase"] = "review"
+            job["progress"] = 0.5
+            job["eta"] = None
+        elif action == "render":
+            job["phase"] = "rendering"
+            args = build_args(job, for_render=True)
+            res = openscrub.run_pipeline(args, cb)
+            job["output"] = res["output"]
+            # refresh report with output hash
+            dets, rstate, prov = openscrub.load_report(
+                os.path.join(job["dir"], "report.json"))
+            job["phase"] = "done"
+            job["progress"] = 1.0
+            job["eta"] = None
+    except openscrub.PipelineCancelled:
+        job["phase"] = "cancelled"
+        job["error"] = "cancelled by user"
+    except BaseException as e:
+        # BaseException, not Exception: a SystemExit (argparse) or any other
+        # non-Exception escaping here used to kill the worker thread silently
+        msg = str(e) or type(e).__name__
+        if isinstance(e, SystemExit):
+            msg = "the job stopped unexpectedly (exit %s)" % (e.code,)
+        job["phase"] = "error"
+        job["error"] = msg
+        job["log"].append(f"ERROR: {msg}")
+    finally:
+        job["eta"] = None       # a dead/paused job must not show "~N left"
+
+
+def start_worker():
+    t = threading.Thread(target=worker, daemon=True, name="job-worker")
+    WORKER["thread"] = t
+    t.start()
+    return t
+
+
+def check_worker():
+    """Watchdog step: if the worker thread is gone, fail the job it was
+    running (it can never finish now) and start a fresh worker so the
+    queue keeps moving. Returns True when it had to restart one."""
+    t = WORKER.get("thread")
+    if t is not None and t.is_alive():
+        return False
+    jid = WORKER.get("current")
+    with JOBS_LOCK:
+        job = JOBS.get(jid) if jid else None
+        if job is not None and job.get("phase") in _ACTIVE_PHASES:
             job["phase"] = "error"
-            job["error"] = str(e)
-            job["log"].append(f"ERROR: {e}")
-        finally:
-            job["eta"] = None       # a dead/paused job must not show "~N left"
-            WORK_Q.task_done()
+            job["eta"] = None
+            job["error"] = ("the job worker stopped unexpectedly — the "
+                            "server restarted it; Retry re-runs the scan "
+                            "with the file already on the server")
+            job["log"].append("ERROR: " + job["error"])
+    WORKER["current"] = None
+    if t is not None:
+        print("[web] job worker was not running — restarted it", flush=True)
+    start_worker()
+    return True
+
+
+def _worker_watchdog():
+    while True:
+        time.sleep(5)
+        try:
+            check_worker()
+        except Exception as e:
+            print(f"[web] worker watchdog: {e}", flush=True)
 
 
 # ----------------------------------------------------------------------------
@@ -741,7 +899,7 @@ def create_job():
                 job["size"] = os.path.getsize(path)
             except OSError:
                 pass
-            WORK_Q.put((job["id"], "scan"))
+            enqueue(job, "scan")
             jobs.append(job["id"])
     elif request.form.get("server_path"):
         p = os.path.realpath(request.form["server_path"].strip())
@@ -764,7 +922,7 @@ def create_job():
             job["size"] = os.path.getsize(p)
         except OSError:
             pass
-        WORK_Q.put((job["id"], "scan"))
+        enqueue(job, "scan")
         jobs.append(job["id"])
     else:
         return jsonify({"error": "no file uploaded and no server path"}), 400
@@ -874,7 +1032,7 @@ def job_retry(jid):
         job["phase"] = "queued"
         job["log"].append("— retrying scan (reusing the file already on "
                           "the server — nothing is re-uploaded) —")
-    WORK_Q.put((jid, "scan"))
+    enqueue(job, "scan")
     return jsonify({"ok": True})
 
 
@@ -903,8 +1061,21 @@ def job_preview(jid):
 
 @app.route("/api/jobs/<jid>/cancel", methods=["POST"])
 def job_cancel(jid):
+    """Cancel a job. The job the worker is RUNNING stops cooperatively at
+    its next checkpoint. Any other active job (still queued, or orphaned by
+    a worker that died) is cancelled on the spot — before, Cancel only set
+    a flag the worker checks mid-scan, so a job the worker never picked up
+    could never be cancelled (or deleted: delete refuses active jobs)."""
     job = JOBS.get(jid) or abort(404)
     job["cancel"].set()
+    with JOBS_LOCK:
+        if (WORKER.get("current") != jid
+                and job.get("phase") in _ACTIVE_PHASES):
+            job["qgen"] = job.get("qgen", 0) + 1   # void its queue entry
+            job["phase"] = "cancelled"
+            job["error"] = "cancelled by user"
+            job["eta"] = None
+            job["log"].append("— cancelled —")
     return jsonify({"ok": True})
 
 
@@ -1505,7 +1676,7 @@ def job_render(jid):
     job["phase"] = "queued_render"
     job["cancel"].clear()
     job["error"] = None
-    WORK_Q.put((jid, "render"))
+    enqueue(job, "render")
     return jsonify({"ok": True})
 
 
@@ -3524,15 +3695,26 @@ def rehydrate_jobs():
                 size = os.path.getsize(up)
             except OSError:
                 size = 0
+            opts = {}
+            try:
+                with open(os.path.join(jdir, OPTIONS_FILE),
+                          encoding="utf-8") as f:
+                    opts = json.load(f)
+                if not isinstance(opts, dict):
+                    opts = {}
+            except (OSError, ValueError):
+                opts = {}
             job = {
                 "id": jid, "dir": jdir, "video": up,
-                "name": os.path.basename(up), "options": {},
+                "name": os.path.basename(up), "options": opts,
                 "phase": "error", "progress": 0.0, "size": size,
                 "log": ["(recovered after server restart — the scan had "
                         "not completed)"],
                 "error": "recovered after a server restart before the "
-                         "scan finished — Retry re-runs it with default "
-                         "settings (the uploaded file was kept), or "
+                         "scan finished — Retry re-runs it with "
+                         + ("its original settings" if opts else
+                            "default settings")
+                         + " (the uploaded file was kept), or "
                          "Delete frees its disk space",
                 "output": None, "created": os.path.getmtime(jdir),
                 "cancel": threading.Event(), "stats": {},
@@ -3653,7 +3835,8 @@ def main():
     signal.signal(signal.SIGTERM, _on_sigterm)
     threading.Thread(target=_autolock_watcher, daemon=True).start()
     rehydrate_jobs()
-    threading.Thread(target=worker, daemon=True).start()
+    start_worker()
+    threading.Thread(target=_worker_watchdog, daemon=True).start()
     if args.retain_days > 0:
         threading.Thread(target=retention_loop, args=(args.retain_days,),
                          daemon=True).start()

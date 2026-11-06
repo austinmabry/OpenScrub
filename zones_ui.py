@@ -1150,6 +1150,13 @@ async function startScan(){
    +"installed and can't be fetched automatically — it will detect "
    +"NOTHING this scan.\n\nDownload one in Settings → Detection "
    +"models.\n\nStart anyway?"))return;
+ // iOS Safari can hand back a <select> with NO selection (value ""),
+ // e.g. after restoring the page — the server then got engine:"" (a real
+ // job hung on it). Put any such select back on its page default first.
+ document.querySelectorAll("select").forEach(s=>{
+  if(s.selectedIndex<0&&s.options.length){
+   const d=[...s.options].findIndex(op=>op.defaultSelected);
+   s.selectedIndex=d>=0?d:0;}});
  const o={
   engine:$("engine").value,device:$("device").value,encoder:$("encoder").value,
   mode:$("mode").value,coverage:$("coverage").value,sample_interval:+$("si").value,scan_trigger:+$("st").value,

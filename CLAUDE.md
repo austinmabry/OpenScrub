@@ -26,7 +26,7 @@ target is Windows 10 + NVIDIA RTX 3060.
 | `THIRD_PARTY_NOTICES.md` | License + copyright notice + full license text for every third-party MODEL FILE OpenScrub uses — required because the Docker images REDISTRIBUTE the prefetched models (MIT/Apache-2.0 both require shipping the notice). Copyright lines are VERIFIED from upstream license files (2026-11-05); where an upstream names no holder (SFace, VitTrack) it says so instead of inventing one, and the plate model's training data is stated as unpublished (an earlier, untraceable "Roboflow CC BY 4.0" registry claim was removed). Ships in all three images (/src), the sdist, the wheel (as `openscrub_THIRD_PARTY_NOTICES.md`) and the Windows spec. test_third_party_notices_cover_every_baked_model ties each prefetch entry to a notice by filename + sha256 — adding a model to docker/prefetch_models.py REQUIRES a notice. Per-user registry copies refresh descriptive fields (`_REGISTRY_DOC_FIELDS`) from the shipped registry, never pins/URLs/recommended. |
 | `openscrub_update.py` | `openscrub-update` command + web self-update backend: PyPI version check, sha256-verified sdist download, data-preserving folder update (PRESERVE set), TOFU pin carry-forward. Ships in the wheel. |
 | `openscrub_vault.py` | At-rest encryption for the job store: scrypt keystore, chunked AES-256-GCM files (`.osvault`), lock/unlock tree walkers. NO password reset by design. Ships in the wheel. Lock-on-shutdown lives in openscrub_web: a SIGTERM handler (docker stop; locks then os._exit — sys.exit is swallowed by cheroot) + an atexit hook (Ctrl+C; uses the import-time `_HERE` constant because `__file__` is gone during interpreter teardown — both failure modes were real and verified). Encryption must finish inside the container stop grace period (`docker stop -t 120`). |
-| `test_openscrub.py` | pytest suite (52 tests). Must stay green. |
+| `test_openscrub.py` | pytest suite (119 tests). Must stay green. |
 | `deploy/` | App-store submission kit: winget/CasaOS/Runtipi/TrueNAS/Umbrel/Portainer/CapRover/Coolify manifests + a novice-friendly submission guide (deploy/README.md). Platforms with their own reverse proxy get `--http` in the command; direct-port platforms keep default TLS. Bump pinned versions at submission time. |
 | `tools/make_icons.py` | Regenerates every icon/logo asset from `assets/badge_master.png`. |
 | `tools/make_wordmark.py` | Regenerates the typeset Poppins wordmarks (navy + white). |
@@ -816,6 +816,25 @@ defined — there was a real UnboundLocalError from ordering once.
   for GitHub/social use. The app sections are wrapped in `#appzone`/
   `#settingsview` — APP_CSS scopes its button/input/h2 overrides to
   those ids so editor styling stays untouched.
+- JOB WORKER (one thread, `worker()`): NOTHING may end its loop. A real
+  iPhone job froze at "scanning" with an empty log, Cancel ignored, every
+  later job queued forever: iOS Safari reported the engine `<select>` as
+  value "", `--engine ''` is an invalid argparse choice, argparse called
+  sys.exit, and the SystemExit silently killed the worker THREAD (threads
+  swallow SystemExit — no traceback). v1.0.89 defenses, all pinned by
+  tests: `_sanitize_argv` repairs every single-value option against the
+  engine parser's OWN choices/types (invalid choice or non-finite number →
+  parser default + a "NOTE: setting … is not valid" log line);
+  build_args overrides `parser.error`/`exit` to raise ValueError (job
+  fails, loudly); `_run_job` catches BaseException; `check_worker`
+  watchdog (5s) fails the orphaned job and restarts a dead worker.
+  Queue entries are (jid, action, gen) via `enqueue()` — Cancel of a job
+  the worker is NOT running (queued or orphaned) marks it cancelled at
+  once and bumps `qgen`, so the stale entry is skipped and a Retry runs
+  exactly once. Job options persist as `options.json` in the job dir so a
+  report-less job rehydrates with its ORIGINAL settings for Retry.
+  Client half: startScan resets any select with selectedIndex<0 to its
+  defaultSelected option. Never add a sys.exit path reachable from a job.
 - REQUEST PATHS (CodeQL py/path-injection): every route that turns a
   request value into a filesystem path calls `server_path_error` AND
   repeats its single-`startswith` containment guard INLINE before the
@@ -926,7 +945,7 @@ python -c "import ast; ast.parse(open('openscrub.py').read())"   # each edited .
 #   PAGE now holds TWO <script> blocks (editor + app) sharing one global
 #   scope — join them so duplicate top-level declarations are caught too:
 #   python -c "import openscrub_web as w, re; open('/tmp/p.js','w').write('\n'.join(re.findall(r'<script>(.*?)</script>', w.PAGE, re.S)))" && node --check /tmp/p.js
-python -m pytest test_openscrub.py -q                             # 51 tests, all green
+python -m pytest test_openscrub.py -q                             # 119 tests, all green
 python -m build          # FULL build (sdist->wheel), NEVER just `-w`:
                          # the wheel is built FROM the sdist in CI, so any
                          # file the wheel force-includes must be in the

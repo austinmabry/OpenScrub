@@ -6,6 +6,8 @@ the gate for any change."""
 import json
 import os
 import subprocess
+import threading
+import time
 
 # the plate category self-heals by DOWNLOADING its model (issue #18) —
 # never from inside the test suite: e2e runs with default categories
@@ -3211,6 +3213,154 @@ def test_job_video_stream_supports_range():
     finally:
         shutil.rmtree(job["dir"], ignore_errors=True)
         w.JOBS.pop(job["id"], None)
+
+
+def test_bad_web_settings_fall_back_and_never_exit(tmp_path, monkeypatch):
+    """A real iPhone job hung forever: Safari submitted engine:"" (a select
+    reporting no selection), argparse rejected `--engine ''` with
+    sys.exit, and the SystemExit silently killed the server's only job
+    worker. Invalid choices / non-numbers now fall back to the engine's own
+    defaults with a log NOTE, and any remaining parser error is a normal
+    exception (fails the job) — never a SystemExit."""
+    import openscrub_web as w
+    job = {"video": str(tmp_path / "x.mp4"), "dir": str(tmp_path), "log": [],
+           "options": {"engine": "", "device": None, "mode": "smudge",
+                       "pad": None, "detect_scale": "nan",
+                       "face_threshold": "", "scan_speed": "fastest"}}
+    a = w.build_args(job)
+    assert (a.engine, a.device, a.mode) == ("auto", "auto", "blur")
+    assert a.pad == 8 and a.detect_scale == 0.5     # fastest still applies
+    assert a.face_threshold == 0.6
+    assert any("--engine" in l and "not valid" in l for l in job["log"])
+    # good values pass through untouched
+    job["options"] = {"engine": "tesseract", "pad": 3, "mode": "box"}
+    a = w.build_args(job)
+    assert (a.engine, a.pad, a.mode) == ("tesseract", 3, "box")
+
+    def boom(args, parser):
+        parser.error("synthetic rejection")
+    monkeypatch.setattr(openscrub, "_prep_args", boom)
+    with pytest.raises(ValueError, match="invalid job settings"):
+        w.build_args(job)
+
+
+def test_web_worker_survives_a_dying_job_and_cancel_clears_the_queue(
+        monkeypatch):
+    """One job raising SystemExit must fail THAT job loudly while the worker
+    carries on with the next one. A job cancelled while still queued is
+    cancelled at once (Cancel used to wait for a worker that never came)
+    and its queue entry is voided, so a Retry runs the scan exactly once."""
+    import shutil
+    import openscrub_web as w
+    while True:                        # start from an empty queue
+        try:
+            w.WORK_Q.get_nowait()
+            w.WORK_Q.task_done()
+        except Exception:
+            break
+    ran = []
+
+    def fake_build_args(job, for_render=False):
+        ran.append(job["id"])
+        if job["name"] == "dies.mov":
+            raise SystemExit(2)
+        raise RuntimeError("second job ran")
+    monkeypatch.setattr(w, "build_args", fake_build_args)
+    a = w.new_job("", {"engine": ""}, "dies.mov")
+    b = w.new_job("", {}, "next.mov")
+    c = w.new_job("", {}, "cancelled.mov")
+    client = w.app.test_client()
+    saved = dict(w.WORKER)
+    try:
+        for j in (a, b, c):
+            w.enqueue(j, "scan")
+        r = client.post(f"/api/jobs/{c['id']}/cancel")
+        assert r.status_code == 200
+        assert c["phase"] == "cancelled", \
+            "a queued job must be cancelled immediately"
+        # retry after cancel: requeued once; the voided entry is skipped
+        c["video"] = os.path.join(c["dir"], "input.mp4")
+        with open(c["video"], "wb") as f:
+            f.write(b"\x00" * 16)
+        assert client.post(f"/api/jobs/{c['id']}/retry").status_code == 200
+        w.WORK_Q.put(None)             # stop marker: worker exits after
+        t = threading.Thread(target=w.worker, daemon=True)
+        t.start()
+        t.join(10)
+        assert not t.is_alive()
+        assert a["phase"] == "error" and "stopped unexpectedly" in a["error"]
+        assert any(l.startswith("ERROR:") for l in a["log"])
+        assert b["phase"] == "error" and b["error"] == "second job ran", \
+            "the worker must survive job A and run job B"
+        assert ran.count(c["id"]) == 1, "retried job must run exactly once"
+        assert ran == [a["id"], b["id"], c["id"]]
+    finally:
+        w.WORKER.update(saved)
+        for j in (a, b, c):
+            shutil.rmtree(j["dir"], ignore_errors=True)
+            w.JOBS.pop(j["id"], None)
+
+
+def test_worker_watchdog_fails_orphan_and_restarts(monkeypatch):
+    """If the worker thread is ever gone, the job it was running can never
+    finish: the watchdog fails it (so Cancel/Delete/Retry work) and starts
+    a fresh worker so the queue moves again."""
+    import shutil
+    import openscrub_web as w
+    started = []
+    monkeypatch.setattr(w, "start_worker", lambda: started.append(1))
+    job = w.new_job("", {}, "orphan.mov")
+    job["phase"] = "scanning"
+    dead = threading.Thread(target=lambda: None)
+    dead.start()
+    dead.join()
+    saved = dict(w.WORKER)
+    try:
+        w.WORKER.update(thread=dead, current=job["id"])
+        assert w.check_worker() is True
+        assert job["phase"] == "error" and "Retry" in job["error"]
+        assert started == [1]
+        live = threading.Thread(target=time.sleep, args=(2,))
+        live.start()
+        w.WORKER.update(thread=live, current=None)
+        assert w.check_worker() is False and started == [1]
+    finally:
+        w.WORKER.update(saved)
+        shutil.rmtree(job["dir"], ignore_errors=True)
+        w.JOBS.pop(job["id"], None)
+
+
+def test_job_options_survive_restart_for_retry():
+    """A scan that never finished has no report to recover settings from;
+    Retry after a restart used to run with DEFAULTS (every category) instead
+    of what the user chose. Options are now saved with the upload."""
+    import shutil
+    import openscrub_web as w
+    opts = {"categories": "face", "scan_speed": "fastest"}
+    job = w.new_job("", opts, "clip.mov")
+    jid, jdir = job["id"], job["dir"]
+    try:
+        with open(os.path.join(jdir, "input.mov"), "wb") as f:
+            f.write(b"\x00" * 64)
+        assert os.path.exists(os.path.join(jdir, w.OPTIONS_FILE))
+        w.JOBS.pop(jid)                # simulate the restart
+        w.rehydrate_jobs()
+        back = w.JOBS[jid]
+        assert back["phase"] == "error" and back["options"] == opts
+        assert "original settings" in back["error"]
+    finally:
+        w.JOBS.pop(jid, None)
+        shutil.rmtree(jdir, ignore_errors=True)
+
+
+def test_editor_repairs_unselected_selects_before_submit():
+    """Client half of the engine:"" hang: startScan puts any <select> left
+    with no selection back on its page default before building options."""
+    import zones_ui
+    page = zones_ui.ZONES_PAGE
+    i = page.index("async function startScan")
+    body = page[i:page.index("const o={", i)]
+    assert "selectedIndex<0" in body and "defaultSelected" in body
 
 
 def test_rehydrate_surfaces_reportless_upload_as_failed_job():
