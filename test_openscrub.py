@@ -122,6 +122,15 @@ def test_memory_fuzzy_recall_never_scans_the_full_history():
     assert m.recall("5015550143") == "phone"
 
 
+def test_indexed_memory_preserves_first_remembered_fuzzy_match():
+    m = openscrub.PhiMemory(threshold=50)
+    m.add("alpha", "first", primary=True)
+    m.add("alpha", "first", primary=True)
+    m.add("alphaaa", "second", primary=True)
+    m.add("alphaaa", "second", primary=True)
+    assert m.recall("alphaa") == "first"
+
+
 def test_probe_vfr(tmp_path):
     cfr = make_video(str(tmp_path / "cfr.mp4"), [(150, "hello world")])
     is_vfr, avg = openscrub.probe_vfr(cfr)
