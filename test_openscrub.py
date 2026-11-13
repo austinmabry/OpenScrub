@@ -104,6 +104,24 @@ def test_memory_two_sighting_gate():
     assert "face" not in m.items
 
 
+def test_memory_fuzzy_recall_never_scans_the_full_history():
+    m = openscrub.PhiMemory()
+    for i in range(2000):
+        m.add("unrelated-token-%04d" % i, "name", primary=True)
+        m.add("unrelated-token-%04d" % i, "name", primary=True)
+    m.add("Henderson", "name", primary=True)
+    m.add("Henderson", "name", primary=True)
+    m.add("5015550142", "phone", primary=True)
+
+    class NoFullIteration(dict):
+        def items(self):
+            raise AssertionError("recall walked the complete remembered-string history")
+
+    m.items = NoFullIteration(m.items)
+    assert m.recall("Henders0n") == "name"
+    assert m.recall("5015550143") == "phone"
+
+
 def test_probe_vfr(tmp_path):
     cfr = make_video(str(tmp_path / "cfr.mp4"), [(150, "hello world")])
     is_vfr, avg = openscrub.probe_vfr(cfr)
