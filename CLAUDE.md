@@ -908,8 +908,10 @@ defined — there was a real UnboundLocalError from ordering once.
   quotes. `qmPlace` (APP_JS) keeps the bubble on screen via --qw/--qx
   and flips it below (`.below`) near the viewport top; the click handler
   preventDefault()s so a "?" inside a checkbox label opens the tip
-  instead of ticking the box. "dense faces" is a no-op today (faces are
-  always per-frame when selected) — its tip says so.
+  instead of ticking the box. The old "dense faces" checkbox was REMOVED
+  in v1.0.93 (a no-op: faces are always per-frame when selected);
+  build_args still honours `dense_faces` in old saved job options and
+  the CLI keeps `--dense-faces`.
 - Progress ETA is computed SERVER-side per STAGE
   (`WebCallbacks.progress`): whole-stage average rate + a light EMA on
   the published seconds (`eta` in the job JSON; cleared on stage change,

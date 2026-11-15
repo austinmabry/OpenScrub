@@ -195,7 +195,6 @@ details .inner .full{grid-column:1/-1}
   <div class="full"><label>Always blur (extra names) <span class="qm" data-tip="Names that must always be blurred, one per line, even if the name detector doesn't recognize them as names (unusual spellings, nicknames). Needs the name category to be checked. For any other exact word or phrase, use the specific text category instead.">?</span></label>
    <textarea id="extra" rows="2"></textarea></div>
   <div class="full" style="display:flex;gap:14px;flex-wrap:wrap;font-size:12px">
-   <label style="display:inline"><input type="checkbox" id="densefaces"> dense faces <span class="qm" data-tip="Older setting with no extra effect today: faces are always checked on every frame whenever the face category is on.">?</span></label>
    <label style="display:inline"><input type="checkbox" id="faceheads"> cover turned heads <span class="qm" data-tip="Also blur the back of turned heads - hair and head shape can identify people too. Works from person detections, so it needs a person model (Settings, Detection models).">?</span></label>
    <label style="display:inline"><input type="checkbox" id="audiopii"> detect spoken PII <span class="qm" data-tip="Transcribe the audio on this machine (nothing is uploaded) and suggest mute spans where names, numbers or addresses are spoken, for the categories you checked. Suggestions appear in review for you to accept, and a transcript lets you mute anything they missed. Makes scans slower.">?</span></label>
    <label style="display:inline"><input type="checkbox" id="skiprev"> skip review <span class="qm" data-tip="Render straight after the scan, blurring every detection without the review step. Faster, but nothing is checked by a person - false detections stay blurred and nothing missed gets added. Only for footage you've already checked or low-risk material.">?</span></label>
@@ -1190,7 +1189,7 @@ async function startScan(){
   out_quality:$("outqual").value,
   allow_names:$("allow").value,extra_names:$("extra").value,
   phrases:cats.includes("phrase")?$("phrases").value:"",
-  dense_faces:$("densefaces").checked,face_heads:$("faceheads").checked,
+  face_heads:$("faceheads").checked,
   audio_pii:$("audiopii").checked,skip_review:$("skiprev").checked,
   no_memory:$("nomem").checked,preview_mode:$("pmode").checked,
   draw_scores:$("drawscores").checked,
