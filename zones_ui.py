@@ -127,6 +127,18 @@ details .inner .full{grid-column:1/-1}
 
  <div class="card"><h2 id="cattitle">Categories</h2>
   <div id="cats"></div>
+  <div id="phrasebox" hidden style="margin:6px 0 4px">
+   <label for="phrases" style="font-size:12.5px;font-weight:600">Specific
+    text to blur <span style="font-weight:400" class="mutd">(one per line)</span></label>
+   <textarea id="phrases" rows="3" style="width:100%;margin-top:3px"
+    placeholder="Acme Corp&#10;Project Bluebird&#10;555-0142"
+    oninput="summary()"></textarea>
+   <div class="mutd" style="margin-top:2px;font-size:11.5px">Plain text &mdash; no special
+    syntax. Capital letters, spacing and punctuation don't matter, and text
+    of 4+ characters is also found inside longer words. Applies to every
+    window where <b>specific text</b> is checked. Text that wraps onto a
+    second line on screen: enter each part on its own line.</div>
+  </div>
   <div class="note">Categories and zones belong to the <b>selected window</b>.
    Click a color square to pick the class you draw; drawing a zone switches
    its category on. Checked categories with no zones cover the whole frame
@@ -271,13 +283,13 @@ const CATS={name:"#3b82f6",dob:"#22c55e",phone:"#f59e0b",ssn:"#ef4444",
             apikey:"#0891b2",ipaddr:"#65a30d",plate:"#7c3aed",
             person:"#0ea5e9",qrcode:"#a16207",screen:"#475569",
             anytext:"#84cc16",bank:"#b45309",crypto:"#7e22ce",
-            passport:"#0f766e",
+            passport:"#0f766e",phrase:"#6366f1",
             face:"#ec4899",
             ignore:"#334155",trackobj:"#eab308"};
 const DN={person:"person (full body)",qrcode:"QR / barcode",
           anytext:"all text (blur every text region)",
           bank:"bank (IBAN/routing/SWIFT)",crypto:"crypto address",
-          passport:"passport / ID (MRZ)",
+          passport:"passport / ID (MRZ)",phrase:"specific text",
           screen:"screens (tv/laptop/phone)",ignore:"ignore (never blur)",
           trackobj:"track object (blur it)"};
 const RULER=24,WROW=20,AROW=34;
@@ -657,6 +669,8 @@ function renderCats(){
     +'</div>';
   }
  }
+ // the specific-text box shows whenever ANY window uses the category
+ $("phrasebox").hidden=!unionCats().includes("phrase");
  const nTrk=(w.track||[]).length;
  const tact=S.cls==="trackobj"?"active":"";
  h+='<div class="catrow '+tact+'" style="border-top:1px solid #0f172a;margin-top:5px;padding-top:6px">'
@@ -674,7 +688,8 @@ function renderCats(){
  winBar();
 }
 function togCat(c,on){const w=selWin();if(on)w.cats[c]=true;else delete w.cats[c];
- renderCats();summary();}
+ renderCats();summary();
+ if(on&&c==="phrase"&&!$("phrases").value.trim())$("phrases").focus();}
 function setCls(c){S.cls=c;S.selZone=null;
  // picking a zone class IS the intent to draw — switch modes for the user
  // (play is the default, so without this the first zone needs two clicks
@@ -1133,6 +1148,10 @@ async function startScan(){
   }catch(e){}
  }
  const cats=unionCats();
+ if(cats.includes("phrase")&&!$("phrases").value.trim()){
+  alert("Specific text is checked but no text is entered — type the "
+   +"words or phrases to blur (one per line), or uncheck the category.");
+  $("phrases").focus();return;}
  const nTrk=S.wins.reduce((a,w)=>a+((w.track||[]).length),0);
  if(!cats.length&&!nTrk
    &&!confirm("No categories are enabled and no objects are marked for "
@@ -1168,6 +1187,7 @@ async function startScan(){
   out_format:$("outfmt").value,
   out_quality:$("outqual").value,
   allow_names:$("allow").value,extra_names:$("extra").value,
+  phrases:cats.includes("phrase")?$("phrases").value:"",
   dense_faces:$("densefaces").checked,face_heads:$("faceheads").checked,
   audio_pii:$("audiopii").checked,skip_review:$("skiprev").checked,
   no_memory:$("nomem").checked,preview_mode:$("pmode").checked,

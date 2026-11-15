@@ -75,6 +75,14 @@ consoles) — but the engine is general-purpose.
   regex categories**: add your own (claim numbers, case IDs, employee
   IDs, account formats) in the web UI and each one becomes a first-class
   category with its own color, zones, and review section.
+- **Redact specific text — no regex needed** — tick the **specific text**
+  category and type the words or phrases to blur, one per line (a client
+  name, a project codename, an account number). Capital letters, spacing
+  and punctuation don't matter, phrases may span several words, common
+  OCR misreads (0/O, 1/l) still match, and text of 4+ characters is also
+  found inside longer words. With spoken-PII detection on, the same text
+  is suggested for muting when it's said aloud. CLI: `--categories phrase
+  --phrase "Acme Corp"` (repeatable) or `--phrases list.txt`.
 - **Redact names** — via named-entity recognition plus heuristics, with no
   list required (though you can supply an allowlist to *keep* specific names
   visible and a blocklist to *always* remove others).
@@ -788,6 +796,7 @@ Two reasoning layers prevent "flash of PII" from intermittent OCR misses:
 | Random capitalized words blurred | install spaCy so the pair heuristic turns off, or --heuristic-names off |
 | Text slips through during very fast scrolling | --scan-trigger 40 and/or --sample-interval 0.25 |
 | Benign numbers blurred by a custom regex category | tighten its pattern |
+| Want to blur one exact name/word/phrase | use the **specific text** category and type it — no regex needed; text of 4+ characters also matches inside longer words, so keep very short entries to whole words |
 | A person isn't detected (small/distant) | lower --person-threshold to 0.35, or pick the larger seg model |
 | Non-people masked by the person category | raise --person-threshold to 0.6 |
 | Blur box clips edges of text | --pad 12 |

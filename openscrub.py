@@ -37,7 +37,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.90"
+VERSION = "1.0.91"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -735,7 +735,7 @@ class PhiMemory:
     one differing digit (so benign numbers don't collide with MRNs)."""
 
     IMMEDIATE = {"dob", "phone", "ssn", "email", "mrn", "address",
-                 "qrcode", "screen", "anytext",
+                 "qrcode", "screen", "anytext", "phrase",
                  "apikey", "ipaddr", "card", "plate", "person"}
 
     def __init__(self, threshold=82, name_sightings=2):
@@ -824,17 +824,98 @@ class PhiMemory:
         return None
 
 
-def detect_phi(words, lines, t, offset, namer, mrn_re, custom_res=()):
+# ----------------------------------------------------------------------------
+# "Specific text" category (id "phrase"): blur exactly the text the user
+# typed — no regex knowledge needed. Matching is deliberately forgiving of
+# how OCR actually reads a frame, because a missed match is a leak:
+#   * case, spacing and punctuation are ignored ("ACME, Corp." = "acme corp")
+#   * a phrase may span several OCR words, and OCR may split one word or
+#     weld two together ("Ac me" / "AcmeCorp") — words are compared as one
+#     joined run of letters and digits
+#   * the classic OCR confusions 0/o and 1/l/i/| are treated as equal
+#   * text of 4+ characters is also found INSIDE longer words ("Acme" in
+#     "AcmeCorp's") — over-blur beats under-blur; shorter text must be a
+#     whole word so "Al" doesn't blur every "also"
+# Matching works per OCR line; text that wraps onto a second line needs
+# each part entered separately.
+# ----------------------------------------------------------------------------
+_PHRASE_FOLD = str.maketrans({"0": "o", "1": "l", "i": "l", "|": "l"})
+PHRASE_PARTIAL_MIN = 4
+
+
+_POSSESSIVE = re.compile(r"['\u2019]s\W*$", re.I)
+
+
+def _phrase_norm(s):
+    s = _POSSESSIVE.sub("", s.casefold())      # "Al's" counts as "Al"
+    return "".join(ch for ch in s if ch.isalnum() or ch == "|"
+                   ).translate(_PHRASE_FOLD)
+
+
+def load_phrases(terms=(), path=None):
+    """Specific-text terms from --phrase values and a --phrases file (one
+    per line). Returns [(display text, match key)], de-duplicated; terms
+    with no letters or digits can never match and are dropped."""
+    raw = list(terms or [])
+    if path:
+        with open(path, encoding="utf-8") as f:
+            raw += f.read().splitlines()
+    out, seen = [], set()
+    for t in raw:
+        t = " ".join(str(t).split())
+        key = _phrase_norm(t)
+        if key and key not in seen:
+            seen.add(key)
+            out.append((t, key))
+    return out
+
+
+def phrase_spans(tokens, phrases):
+    """Pure (unit-tested): word strings in reading order + load_phrases()
+    output -> sorted [(first word index, last word index)] of matches."""
+    joined, starts, ends, owner = "", [], [], []
+    for i, tok in enumerate(tokens):
+        n = _phrase_norm(tok)
+        starts.append(len(joined))
+        joined += n
+        ends.append(len(joined))
+        owner.extend([i] * len(n))
+    spans = set()
+    for _, key in phrases:
+        partial = len(key) >= PHRASE_PARTIAL_MIN
+        pos = joined.find(key)
+        while pos != -1:
+            a, b = pos, pos + len(key)
+            wi, wj = owner[a], owner[b - 1]
+            if partial or (starts[wi] == a and ends[wj] == b):
+                spans.add((wi, wj))
+            pos = joined.find(key, pos + 1)
+    return sorted(spans)
+
+
+def detect_phi(words, lines, t, offset, namer, mrn_re, custom_res=(),
+               phrases=()):
     """offset = cumulative scroll (dx, dy) at this frame; boxes are converted
     to content coordinates by subtracting it. custom_res: sequence of
     (category_id, compiled_regex) for user-defined categories — each is
-    checked independently of the built-in category chain."""
+    checked independently of the built-in category chain. phrases:
+    load_phrases() output for the "phrase" (specific text) category."""
     dets = []
     ox, oy = offset
 
     def add(box, cat, txt, conf):
         cbox = (int(box[0] - ox), int(box[1] - oy), int(box[2] - ox), int(box[3] - oy))
         dets.append(Detection(t, t, cbox, cat, txt, round(float(conf), 3), (ox, oy)))
+
+    if phrases:
+        for ln in lines:
+            ents = ln["words"]
+            for wi, wj in phrase_spans([e[0] for e in ents], phrases):
+                grp = ents[wi:wj + 1]
+                add((min(e[1][0] for e in grp), min(e[1][1] for e in grp),
+                     max(e[1][2] for e in grp), max(e[1][3] for e in grp)),
+                    "phrase", " ".join(e[0] for e in grp),
+                    min(e[2] for e in grp))
 
     for txt, box, conf in words:
         for cid, cre in custom_res:
@@ -5961,7 +6042,7 @@ _SPEECH_CHECKS = (
 )
 
 
-def _speech_suggestions(words, cats, nlp=None, custom_res=()):
+def _speech_suggestions(words, cats, nlp=None, custom_res=(), phrases=()):
     """Pure (unit-tested): whisper word stream [(start, end, token)] ->
     spoken-PII suggestions [{t0, t1, category, text}]. The transcript is
     scanned with the SAME battle-tested patterns the visual text engine
@@ -6010,6 +6091,16 @@ def _speech_suggestions(words, cats, nlp=None, custom_res=()):
             s, e = pos + m.start(), pos + m.end()
             add(s, e, cid, text[s:e])
             pos = e
+    if "phrase" in cats and phrases:
+        # specific text the user typed, spoken aloud — same forgiving
+        # matcher as the on-screen pass (whisper splits/joins words and
+        # adds punctuation just like OCR does)
+        for wi, wj in phrase_spans([w[2] for w in words], phrases):
+            out.append({"t0": round(max(0.0, words[wi][0] - 0.5), 2),
+                        "t1": round(words[wj][1] + 0.5, 2),
+                        "category": "phrase",
+                        "text": "".join(w[2] for w in words[wi:wj + 1]
+                                        ).strip()[:80]})
     if "name" in cats and nlp is not None:
         try:
             for ent in nlp(text).ents:
@@ -6039,7 +6130,7 @@ def _speech_suggestions(words, cats, nlp=None, custom_res=()):
 
 
 def transcribe_audio_pii(video, cats, cb, model_size="base", nlp=None,
-                         custom_res=()):
+                         custom_res=(), phrases=()):
     """Fully LOCAL speech-to-PII: extract the audio, transcribe with
     faster-whisper (word timestamps, VAD), and run the text engine's
     patterns over the transcript. Spoken names, numbers and addresses
@@ -6089,7 +6180,7 @@ def transcribe_audio_pii(video, cats, cb, model_size="base", nlp=None,
             for wd in (seg.words or []):
                 words.append((float(wd.start), float(wd.end), wd.word))
         sugg = _speech_suggestions(words, cats, nlp=nlp,
-                                   custom_res=custom_res)
+                                   custom_res=custom_res, phrases=phrases)
         cb.log("      spoken-PII: %d word(s) transcribed, %d suggested "
                "span(s)" % (len(words), len(sugg)))
         for s in sugg[:12]:
@@ -6659,6 +6750,16 @@ def build_parser():
                          "interval while the screen is static, tighten it "
                          "under heavy change, and scan sooner when "
                          "scrolling fast. 'off' uses the fixed values.")
+    ap.add_argument("--phrase", action="append", default=[],
+                    metavar="TEXT",
+                    help="text to find and blur for the 'phrase' (specific "
+                         "text) category, repeatable: --categories phrase "
+                         "--phrase \"Acme Corp\". Case, spacing and "
+                         "punctuation are ignored; 4+ characters also match "
+                         "inside longer words")
+    ap.add_argument("--phrases", metavar="FILE",
+                    help="text file of phrases for the 'phrase' category, "
+                         "one per line (same matching as --phrase)")
     ap.add_argument("--custom-regex", action="append", default=[],
                     metavar="ID=PATTERN",
                     help="user-defined regex category (repeatable), e.g. "
@@ -7054,6 +7155,17 @@ def run_scan(args, cb=None):
     if custom_res:
         cb.log("      custom categories: "
                + ", ".join(c for c, _ in custom_res))
+    # "specific text" — the user's own list of words/phrases to blur
+    phrases = []
+    if "phrase" in cats:
+        phrases = load_phrases(getattr(args, "phrase", None) or (),
+                               getattr(args, "phrases", None))
+        if phrases:
+            cb.log("      specific text: %d term(s) to find" % len(phrases))
+        else:
+            cb.log("      specific text: no text entered — category "
+                   "inactive. Type the text to find (web) or pass "
+                   "--phrase / --phrases.")
 
     # FAIL-CLOSED GUARD (issue #18): a selected category whose detector
     # has no model detects NOTHING. Say so LOUDLY per category — and when
@@ -7067,8 +7179,10 @@ def run_scan(args, cb=None):
         inert += [c for c in ("person", "screen") if c in cats]
     if "mrn" in cats and mrn_re is None:
         inert.append("mrn")          # its own log line already fired above
+    if "phrase" in cats and not phrases:
+        inert.append("phrase")       # its own log line already fired above
     for c in inert:
-        if c != "mrn":
+        if c not in ("mrn", "phrase"):
             cb.log("      WARNING: the '%s' category is selected but has "
                    "no model — it will detect NOTHING this scan. Download "
                    "one in Settings → Detection models (one click)." % c)
@@ -7078,7 +7192,8 @@ def run_scan(args, cb=None):
         raise RuntimeError(
             "nothing to detect: every selected category (%s) is inactive "
             "— each needs a detection model (or, for regex categories, a "
-            "pattern) that is not installed. Download a model in Settings "
+            "pattern; for specific text, the text to find) that is not "
+            "installed or entered. Download a model in Settings "
             "→ Detection models (a quality tier installs one too), then "
             "Retry this job — the uploaded file is kept."
             % ", ".join(sorted(inert)))
@@ -7627,7 +7742,7 @@ def run_scan(args, cb=None):
                                       getattr(args, "ocr_upscale", "auto"))
                 lines = group_lines(words)
                 found = detect_phi(words, lines, t, (cx, cy), namer, mrn_re,
-                                   custom_res)
+                                   custom_res, phrases)
                 found = [d for d in found if d.category in cats]
             else:
                 words, found = [], []   # detector-only scan: no text pass
@@ -8183,7 +8298,7 @@ def run_scan(args, cb=None):
             getattr(args, "original_video", None) or args.video, cats, cb,
             model_size=getattr(args, "audio_pii_model", "base") or "base",
             nlp=getattr(namer, "nlp", None) if namer else None,
-            custom_res=custom_res)
+            custom_res=custom_res, phrases=phrases)
 
     return {"fps": fps, "cum": cum, "bands": bands, "detections": detections,
             "zdropped": zdropped, "audio_suggestions": audio_sugg,

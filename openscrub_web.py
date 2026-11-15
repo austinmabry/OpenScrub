@@ -520,6 +520,14 @@ def build_args(job, for_render=False):
                     argv += ["--zones", ZONES_PATH]
         except Exception:
             pass
+    # "specific text" terms travel as a file in the job dir (never on the
+    # command line, where process listings would show them)
+    ptext = (o.get("phrases") or "")
+    if isinstance(ptext, str) and ptext.strip():
+        ppath = os.path.join(jdir, "phrases.txt")
+        with open(ppath, "w", encoding="utf-8") as f:
+            f.write(ptext.strip() + "\n")
+        argv += ["--phrases", ppath]
     server_allow = os.path.join(JOBS_DIR, "allowlist.txt")
     for kind in ("allow_names", "extra_names"):
         text = (o.get(kind) or "").strip()
@@ -1952,7 +1960,7 @@ function txWordClick(i){
                 mode:(document.getElementById("beAMode")||{}).value||"mute"});
  renderTranscript();renderAudioSugg();beTLDraw();
 }
-const CATDN={mrn:"regex",person:"person (full body)",manual:"tracked object",qrcode:"QR / barcode",screen:"screen (tv/laptop/phone)",anytext:"all text",bank:"bank number",crypto:"crypto address",passport:"passport / MRZ"};   // display names — ids are a compat surface
+const CATDN={mrn:"regex",person:"person (full body)",manual:"tracked object",qrcode:"QR / barcode",screen:"screen (tv/laptop/phone)",anytext:"all text",bank:"bank number",crypto:"crypto address",passport:"passport / MRZ",phrase:"specific text"};   // display names — ids are a compat surface
 async function refreshModelPanel(){
  // always visible: model choice lives on the settings page now, so users
  // can set up face/plate models before ticking the categories on a job
@@ -3284,7 +3292,7 @@ CUSTOM_CATS_PATH = os.path.join(_data_root(), "custom_categories.json")
 BUILTIN_CATS = {"name", "dob", "phone", "ssn", "mrn", "email", "address",
                 "card", "apikey", "ipaddr", "plate", "face", "person",
                 "qrcode", "screen", "anytext", "manual", "bank", "crypto",
-                "passport"}
+                "passport", "phrase"}
 
 
 def load_custom_cats():

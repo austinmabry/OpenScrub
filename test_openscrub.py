@@ -421,6 +421,79 @@ def test_custom_regex_category(tmp_path):
     assert hits, "custom category should appear in the report"
 
 
+def test_phrase_matcher_is_forgiving_of_ocr():
+    """'Specific text' must find what the user typed the way OCR actually
+    reads it: any case/punctuation, phrases across words, words OCR split
+    or welded, 0/o and 1/l confusions, possessives, and 4+ character text
+    inside longer words — while short text stays whole-word only."""
+    P = openscrub.load_phrases(["Acme Corp", "Al", "Project Bluebird",
+                                "555-0142", "  acme   CORP ", "!!!"])
+    assert [k for _, k in P] == ["acmecorp", "al", "projectblueblrd",
+                                 "555ol42"], "dedupe + drop empty terms"
+    m = lambda toks: openscrub.phrase_spans(toks, P)
+    assert m(["Contact", "ACME,", "Corp.", "today"]) == [(1, 2)]
+    assert m(["Ac", "me", "Corp"]) == [(0, 2)]              # OCR split
+    assert m(["AcmeCorp's", "office"]) == [(0, 0)]          # OCR welded
+    assert m(["Pr0ject", "B1uebird"]) == [(0, 1)]          # confusables
+    assert m(["call", "555", "0142"]) == [(1, 2)]
+    assert m(["also", "Al’s", "AL."]) == [(1, 1), (2, 2)]  # whole word
+    assert m(["Bluebirds", "here"]) == []     # partial needs the WHOLE term
+    assert m(["nothing", "to", "see"]) == []
+    assert openscrub.phrase_spans(["a"], []) == []
+
+
+def test_phrase_category_end_to_end(tmp_path):
+    """Typed text is found on screen, blurred as one box spanning the
+    phrase's words, and reported under the 'phrase' category."""
+    v = make_video(str(tmp_path / "p.mp4"),
+                   [(200, "Contact Acme Corp today"),
+                    (300, "Nothing else to see")])
+    _, dets = run(v, "--categories", "phrase", "--phrase", "acme corp")
+    hits = [d for d in dets if d["category"] == "phrase"]
+    assert hits, "specific text should be detected"
+    assert any("acme" in d["text"].lower() for d in hits)
+    assert all("nothing" not in d["text"].lower() for d in hits)
+    # nothing entered: the category can't find anything — refuse, loudly
+    with pytest.raises(RuntimeError, match="nothing to detect"):
+        run(v, "--categories", "phrase")
+
+
+def test_phrase_spoken_suggestions():
+    """With spoken-PII on, the same typed text is suggested as a mute span
+    when it's heard in the audio (whisper splits/punctuates like OCR)."""
+    words = [(0.0, 0.4, " We"), (0.4, 0.8, " met"), (0.8, 1.2, " Acme"),
+             (1.2, 1.6, " Corp."), (1.6, 2.0, " today")]
+    P = openscrub.load_phrases(["acme corp"])
+    sugg = openscrub._speech_suggestions(words, {"phrase"}, phrases=P)
+    assert [(s["category"], s["t0"], s["t1"]) for s in sugg] == \
+        [("phrase", 0.3, 2.1)]
+    assert openscrub._speech_suggestions(words, {"name"}, phrases=P) == []
+
+
+def test_phrase_category_wired_through_web(tmp_path):
+    """Editor: the category, its text box and the empty-box guard exist;
+    server: the text reaches the engine as a FILE (never argv) and the id
+    can't be claimed by a custom category."""
+    import zones_ui
+    import openscrub_web as w
+    page = zones_ui.ZONES_PAGE
+    assert 'phrase:"#6366f1"' in page and 'phrase:"specific text"' in page
+    assert 'id="phrasebox"' in page and 'id="phrases"' in page
+    assert 'phrases:cats.includes("phrase")' in page
+    assert 'Specific text is checked but no text is entered' in page
+    assert 'phrase:"specific text"' in w.PAGE          # review heading
+    assert "phrase" in w.BUILTIN_CATS
+    job = {"video": str(tmp_path / "x.mp4"), "dir": str(tmp_path), "log": [],
+           "options": {"categories": "phrase",
+                       "phrases": "Acme Corp\nProject Bluebird\n"}}
+    a = w.build_args(job)
+    assert a.phrases == str(tmp_path / "phrases.txt")
+    assert [t for t, _ in openscrub.load_phrases(path=a.phrases)] == \
+        ["Acme Corp", "Project Bluebird"]
+    job["options"]["phrases"] = "   "
+    assert w.build_args(job).phrases is None
+
+
 def test_deep_backtrack_finds_true_onset(tmp_path):
     """A region whose first frame lies beyond the RAM backtrack buffer must
     still get its true onset via the post-scan deep file search — and must
