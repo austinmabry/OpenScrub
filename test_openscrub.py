@@ -466,6 +466,24 @@ def test_custom_category_rejects_patterns_matching_empty_text(tmp_path,
     assert 'Could not add the category"+(why?": "+why' in w.PAGE
 
 
+def test_plate_threshold_exposed_in_editor_and_clamped(tmp_path):
+    """The editor's Advanced panel sets the plate confidence cutoff (users
+    saw hands/labels flagged as plates and had no web control). The server
+    clamps it to 0.05-0.95 — a cutoff of 1.0+ detects nothing at all, a
+    silent fail-open — and empty/garbage falls back to the 0.35 default."""
+    import zones_ui
+    import openscrub_web as w
+    page = zones_ui.ZONES_PAGE
+    assert 'id="pthr"' in page and 'value="0.35"' in page
+    assert 'plate_threshold:$("pthr").value.trim()===""?null' in page
+    job = {"video": str(tmp_path / "x.mp4"), "dir": str(tmp_path), "log": [],
+           "options": {}}
+    for given, want in ((0.5, 0.5), (5, 0.95), (-1, 0.05), (None, 0.35),
+                        ("abc", 0.35), (float("nan"), 0.35), ("0.6", 0.6)):
+        job["options"] = {"plate_threshold": given}
+        assert w.build_args(job).plate_threshold == want, given
+
+
 def test_phrase_matcher_is_forgiving_of_ocr():
     """'Specific text' must find what the user typed the way OCR actually
     reads it: any case/punctuation, phrases across words, words OCR split

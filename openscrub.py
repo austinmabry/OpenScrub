@@ -7137,6 +7137,13 @@ def run_scan(args, cb=None):
     plater = (PlateDetector(cb, model_path=getattr(args, "plate_model", None),
                             thresh=getattr(args, "plate_threshold", 0.35))
               if "plate" in cats else None)
+    if plater is not None and getattr(args, "plate_threshold", 0.35) > 0.35:
+        # raising the cutoff trades false plates (hands, labels, signs)
+        # for missed ones — and a missed plate is never blurred. Say so.
+        cb.log("      plate threshold %.2f (default 0.35): fewer false "
+               "plates, but real plates the detector is less sure of are "
+               "NOT blurred — check the output carefully"
+               % args.plate_threshold)
     # Issue #18: a plate-only job on a fresh install ran with NO plate
     # model — the category was silently inert and the job "succeeded"
     # having looked for nothing. The recommended registry model is MIT

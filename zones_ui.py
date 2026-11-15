@@ -176,6 +176,7 @@ details .inner .full{grid-column:1/-1}
   <div><label>Bridge gap (s)</label><input type="number" id="bgap" value="4" step="0.5"></div>
   <div><label>Face threshold</label><input type="number" id="fthr" value="0.6" step="0.05" min="0" max="1"></div>
   <div><label>Face expand</label><input type="number" id="fex" value="0.15" step="0.05"></div>
+  <div><label>Plate threshold <span class="qm" data-tip="How sure the plate detector must be before it blurs something (0.05-0.95, default 0.35). Raise it if hands, labels or signs keep getting flagged as plates; lower it if real plates are missed. Higher values mean more missed plates - a false plate can be rejected in review, but a missed plate is never blurred, so raise it in small steps and check the output.">?</span></label><input type="number" id="pthr" value="0.35" step="0.05" min="0.05" max="0.95"></div>
   <div><label>Face mask shape</label><select id="fshape"><option>ellipse</option>
    <option>rect</option></select></div>
   <div><label>Detection scale</label><input type="number" id="dscale" value="1.0" step="0.1" min="0.2" max="1"></div>
@@ -1188,6 +1189,7 @@ async function startScan(){
   mode:$("mode").value,coverage:$("coverage").value,sample_interval:+$("si").value,scan_trigger:+$("st").value,
   pad:+$("pad").value,bridge_gap:+$("bgap").value,
   face_expand:+$("fex").value,face_threshold:+$("fthr").value,
+  plate_threshold:$("pthr").value.trim()===""?null:+$("pthr").value,
   face_shape:$("fshape").value,detect_scale:+$("dscale").value,
   scan_speed:$("sspeed").value,
   hdr_output:$("hdrout").value,codec:$("vcodec").value,

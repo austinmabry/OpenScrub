@@ -797,6 +797,7 @@ Two reasoning layers prevent "flash of PII" from intermittent OCR misses:
 | Random capitalized words blurred | install spaCy so the pair heuristic turns off, or --heuristic-names off |
 | Text slips through during very fast scrolling | --scan-trigger 40 and/or --sample-interval 0.25 |
 | Benign numbers blurred by a custom regex category | tighten its pattern |
+| Hands, labels or signs flagged as license plates | raise **Plate threshold** in Advanced (default 0.35) in small steps — fewer false plates, but plates the detector is less sure of are then missed, so check the output; lower it if real plates are missed |
 | Want to blur one exact name/word/phrase | use the **specific text** category and type it — no regex needed; text of 4+ characters also matches inside longer words, so keep very short entries to whole words |
 | A person isn't detected (small/distant) | lower --person-threshold to 0.35, or pick the larger seg model |
 | Non-people masked by the person category | raise --person-threshold to 0.6 |

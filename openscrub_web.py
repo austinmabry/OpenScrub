@@ -442,7 +442,7 @@ def build_args(job, for_render=False):
             "--bridge-gap", str(o.get("bridge_gap", 4.0)),
             "--face-expand", str(o.get("face_expand", 0.15)),
             "--face-threshold", str(o.get("face_threshold", 0.6)),
-            "--plate-threshold", str(o.get("plate_threshold", 0.35)),
+            "--plate-threshold", _plate_threshold(o.get("plate_threshold")),
             "--detect-scale", str(o.get("detect_scale", 1.0)),
             "--skip-start", str(o.get("skip_start", 0)),
             "--skip-end", str(o.get("skip_end", 0)),
@@ -563,6 +563,19 @@ def build_args(job, for_render=False):
     parser.error = _no_exit
     parser.exit = lambda status=0, message=None: _no_exit(message)
     return openscrub._prep_args(parser.parse_args(argv), parser)
+
+
+def _plate_threshold(v):
+    """Editor's plate confidence cutoff, clamped to 0.05-0.95: above that
+    the detector finds (almost) nothing — a silent fail-OPEN — and below
+    it everything is a plate. Unset/garbage -> the engine default."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return "0.35"
+    if not math.isfinite(f):
+        return "0.35"
+    return str(min(0.95, max(0.05, f)))
 
 
 def _sanitize_argv(parser, argv, job=None):
