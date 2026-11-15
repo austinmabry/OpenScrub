@@ -131,6 +131,69 @@ def test_indexed_memory_preserves_first_remembered_fuzzy_match():
     assert m.recall("alphaa") == "first"
 
 
+def test_batched_memory_recall_matches_reference_scan():
+    """The indexed + batched recall must return EXACTLY what the original
+    linear scan returned (same scores, thresholds, first-remembered tie
+    break, name gating) — a privacy tool can't trade recall for speed.
+    Differential check against a verbatim copy of the old algorithm."""
+    import random
+    import string
+    from rapidfuzz import fuzz
+
+    def reference(m, word):
+        n = m.norm(word)
+        if len(n) < 3 or n in openscrub.STOPWORDS:
+            return None
+        if n in m.items:
+            return m._gated(n, m.items[n])
+        if n.isdigit():
+            for k, cat in m.items.items():
+                if (k.isdigit() and len(k) == len(n)
+                        and sum(a != b for a, b in zip(k, n)) <= 1):
+                    return m._gated(k, cat)
+            return None
+        if len(n) >= 4:
+            for k, cat in m.items.items():
+                if (not k.isdigit() and abs(len(k) - len(n)) <= 2
+                        and fuzz.ratio(k, n) >= m.threshold):
+                    return m._gated(k, cat)
+        return None
+
+    rng = random.Random(7)
+
+    def mutate(s):
+        s = list(s)
+        for _ in range(rng.randint(0, 3)):
+            i = rng.randrange(len(s))
+            op = rng.random()
+            if op < 0.4:
+                s[i] = rng.choice("abcdeh0123")
+            elif op < 0.7:
+                s.insert(i, rng.choice("abcdeh"))
+            elif len(s) > 3:
+                s.pop(i)
+        return "".join(s)
+
+    for thr in (50, 82, 90):
+        m = openscrub.PhiMemory(threshold=thr)
+        pool = []
+        for _ in range(300):        # tiny alphabet => many ties
+            if pool and rng.random() < 0.3:
+                w = mutate(rng.choice(pool))
+            elif rng.random() < 0.3:
+                w = "".join(rng.choice(string.digits)
+                            for _ in range(rng.randint(3, 11)))
+            else:
+                w = "".join(rng.choice("abcdeh")
+                            for _ in range(rng.randint(3, 12)))
+            m.add(w, rng.choice(["name", "phone", "ssn", "plate"]),
+                  primary=rng.random() < 0.7)
+            pool.append(w)
+        for _ in range(400):
+            q = mutate(rng.choice(pool))
+            assert m.recall(q) == reference(m, q), (thr, q)
+
+
 def test_probe_vfr(tmp_path):
     cfr = make_video(str(tmp_path / "cfr.mp4"), [(150, "hello world")])
     is_vfr, avg = openscrub.probe_vfr(cfr)

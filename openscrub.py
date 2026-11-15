@@ -24,7 +24,6 @@ import argparse
 import copy
 import datetime
 import hashlib
-import heapq
 import json
 import os
 import re
@@ -748,9 +747,14 @@ class PhiMemory:
         self.counts = {}   # normalized text -> primary-detector sightings
         # Recall used to scan every remembered string for every OCR word.
         # Long recordings therefore got progressively slower as memory grew.
-        # Length buckets preserve the exact matching rules while keeping each
-        # fuzzy search local to only plausible candidates.
-        self.by_length = {}  # normalized length -> [(insertion order, text)]
+        # Length buckets (contributed by Tuomas Aho) keep each search local
+        # to plausible candidates, and every bucket is matched in ONE
+        # compiled rapidfuzz batch call instead of a Python loop — the
+        # per-string fuzzy comparisons were the real cost. Matching rules
+        # are unchanged: same scores, same thresholds, and the FIRST
+        # remembered match still wins (lowest insertion serial).
+        self._alpha = {}    # length -> ([text], [insertion serial])
+        self._digits = {}   # length -> [text], insertion-ordered
         self._memory_serial = 0
 
     @staticmethod
@@ -764,8 +768,12 @@ class PhiMemory:
         if len(n) >= 3 and n not in STOPWORDS:
             if n not in self.items:
                 self.items[n] = category
-                self.by_length.setdefault(len(n), []).append(
-                    (self._memory_serial, n))
+                if n.isdigit():
+                    self._digits.setdefault(len(n), []).append(n)
+                else:
+                    keys, serials = self._alpha.setdefault(len(n), ([], []))
+                    keys.append(n)
+                    serials.append(self._memory_serial)
                 self._memory_serial += 1
             if primary:
                 self.counts[n] = self.counts.get(n, 0) + 1
@@ -785,22 +793,34 @@ class PhiMemory:
             return None
         if n in self.items:
             return self._gated(n, self.items[n])
+        from rapidfuzz import process
+        from rapidfuzz.distance import Hamming
         if n.isdigit():
-            for _, k in self.by_length.get(len(n), ()):
-                if (k.isdigit()
-                        and sum(a != b for a, b in zip(k, n)) <= 1):
+            # same length, at most one differing digit; first remembered wins
+            keys = self._digits.get(len(n))
+            if keys:
+                hits = process.extract(n, keys, scorer=Hamming.distance,
+                                       score_cutoff=1, limit=None,
+                                       processor=None)
+                if hits:
+                    k = keys[min(h[2] for h in hits)]
                     return self._gated(k, self.items[k])
             return None
         if len(n) >= 4:
-            buckets = [self.by_length.get(size, ())
-                       for size in range(max(3, len(n) - 2), len(n) + 3)]
-            # Each bucket is insertion-ordered; merging their serials retains
-            # the old dict-wide "first remembered match wins" tie-break without
-            # walking unrelated string lengths.
-            for _, k in heapq.merge(*buckets):
-                if (not k.isdigit()
-                        and self.fuzz.ratio(k, n) >= self.threshold):
-                    return self._gated(k, self.items[k])
+            best = None                     # (insertion serial, text)
+            for size in range(max(3, len(n) - 2), len(n) + 3):
+                bucket = self._alpha.get(size)
+                if not bucket:
+                    continue
+                keys, serials = bucket
+                for _, _, i in process.extract(
+                        n, keys, scorer=self.fuzz.ratio,
+                        score_cutoff=self.threshold, limit=None,
+                        processor=None):
+                    if best is None or serials[i] < best[0]:
+                        best = (serials[i], keys[i])
+            if best is not None:
+                return self._gated(best[1], self.items[best[1]])
         return None
 
 
