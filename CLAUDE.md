@@ -26,7 +26,7 @@ target is Windows 10 + NVIDIA RTX 3060.
 | `THIRD_PARTY_NOTICES.md` | License + copyright notice + full license text for every third-party MODEL FILE OpenScrub uses — required because the Docker images REDISTRIBUTE the prefetched models (MIT/Apache-2.0 both require shipping the notice). Copyright lines are VERIFIED from upstream license files (2026-11-05); where an upstream names no holder (SFace, VitTrack) it says so instead of inventing one, and the plate model's training data is stated as unpublished (an earlier, untraceable "Roboflow CC BY 4.0" registry claim was removed). Ships in all three images (/src), the sdist, the wheel (as `openscrub_THIRD_PARTY_NOTICES.md`) and the Windows spec. test_third_party_notices_cover_every_baked_model ties each prefetch entry to a notice by filename + sha256 — adding a model to docker/prefetch_models.py REQUIRES a notice. Per-user registry copies refresh descriptive fields (`_REGISTRY_DOC_FIELDS`) from the shipped registry, never pins/URLs/recommended. |
 | `openscrub_update.py` | `openscrub-update` command + web self-update backend: PyPI version check, sha256-verified sdist download, data-preserving folder update (PRESERVE set), TOFU pin carry-forward. Ships in the wheel. |
 | `openscrub_vault.py` | At-rest encryption for the job store: scrypt keystore, chunked AES-256-GCM files (`.osvault`), lock/unlock tree walkers. NO password reset by design. Ships in the wheel. Lock-on-shutdown lives in openscrub_web: a SIGTERM handler (docker stop; locks then os._exit — sys.exit is swallowed by cheroot) + an atexit hook (Ctrl+C; uses the import-time `_HERE` constant because `__file__` is gone during interpreter teardown — both failure modes were real and verified). Encryption must finish inside the container stop grace period (`docker stop -t 120`). |
-| `test_openscrub.py` | pytest suite (129 tests). Must stay green. |
+| `test_openscrub.py` | pytest suite (130 tests). Must stay green. |
 | `deploy/` | App-store submission kit: winget/CasaOS/Runtipi/TrueNAS/Umbrel/Portainer/CapRover/Coolify manifests + a novice-friendly submission guide (deploy/README.md). Platforms with their own reverse proxy get `--http` in the command; direct-port platforms keep default TLS. Bump pinned versions at submission time. |
 | `tools/make_icons.py` | Regenerates every icon/logo asset from `assets/badge_master.png`. |
 | `tools/make_wordmark.py` | Regenerates the typeset Poppins wordmarks (navy + white). |
@@ -902,6 +902,14 @@ defined — there was a real UnboundLocalError from ordering once.
   fail-open), garbage -> 0.35; run_scan logs a loud trade-off NOTE when
   it's above the 0.35 default. Added after a fork user saw hands/labels
   flagged as plates with no web control (issue #21).
+- HELP TIPS: every Advanced control has a `<span class="qm" data-tip=…>?`
+  (test_every_advanced_setting_has_a_help_tip enforces it — a new
+  Advanced setting needs one). data-tip text must contain no double
+  quotes. `qmPlace` (APP_JS) keeps the bubble on screen via --qw/--qx
+  and flips it below (`.below`) near the viewport top; the click handler
+  preventDefault()s so a "?" inside a checkbox label opens the tip
+  instead of ticking the box. "dense faces" is a no-op today (faces are
+  always per-frame when selected) — its tip says so.
 - Progress ETA is computed SERVER-side per STAGE
   (`WebCallbacks.progress`): whole-stage average rate + a light EMA on
   the published seconds (`eta` in the job JSON; cleared on stage change,
@@ -979,7 +987,7 @@ python -c "import ast; ast.parse(open('openscrub.py').read())"   # each edited .
 #   PAGE now holds TWO <script> blocks (editor + app) sharing one global
 #   scope — join them so duplicate top-level declarations are caught too:
 #   python -c "import openscrub_web as w, re; open('/tmp/p.js','w').write('\n'.join(re.findall(r'<script>(.*?)</script>', w.PAGE, re.S)))" && node --check /tmp/p.js
-python -m pytest test_openscrub.py -q                             # 129 tests, all green
+python -m pytest test_openscrub.py -q                             # 130 tests, all green
 python -m build          # FULL build (sdist->wheel), NEVER just `-w`:
                          # the wheel is built FROM the sdist in CI, so any
                          # file the wheel force-includes must be in the

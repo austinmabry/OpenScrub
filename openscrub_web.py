@@ -1813,10 +1813,12 @@ progress{width:100%;height:12px;accent-color:var(--acc)}
  font-size:10.5px;font-weight:700;cursor:help;margin-left:5px;
  position:relative;vertical-align:middle;user-select:none}
 .qm:hover::after,.qm.open::after{content:attr(data-tip);position:absolute;
- left:50%;transform:translateX(-50%);bottom:135%;background:#0f172a;
+ left:calc(50% + var(--qx,0px));transform:translateX(-50%);bottom:135%;
+ background:#0f172a;
  border:1px solid #334155;color:#e5e7eb;padding:9px 11px;border-radius:9px;
- width:250px;font-size:12px;font-weight:400;line-height:1.4;z-index:90;
+ width:var(--qw,250px);box-sizing:border-box;font-size:12px;font-weight:400;line-height:1.4;z-index:90;
  box-shadow:0 8px 24px rgba(0,0,0,.6);white-space:normal;text-align:left}
+.qm.below::after{bottom:auto;top:135%}
 footer{text-align:center;color:#64748b;font-size:12px;padding:18px 12px 26px}
 .hdrtag{display:none}
 @media(min-width:900px){.hdrtag{display:inline}}
@@ -2866,10 +2868,23 @@ function bulkSet(blur){selSet.forEach(i=>applyDet(i,blur));clearSel();}
 document.addEventListener("pointerdown",e=>{
  if(menuEl&&!e.target.closest(".selmenu")
     &&!e.target.closest("#detwrap"))clearSel();});
+// "?" help tips: keep the bubble fully on screen (a tip beside a phone's
+// screen edge used to be cut off), and a tap on a "?" inside a checkbox
+// label must open the tip, not tick the box
+function qmPlace(q){
+ const w=Math.min(250,window.innerWidth-24),r=q.getBoundingClientRect(),
+       c=r.left+r.width/2;
+ let dx=0;
+ if(c-w/2<12)dx=12-(c-w/2);
+ else if(c+w/2>window.innerWidth-12)dx=(window.innerWidth-12)-(c+w/2);
+ q.style.setProperty("--qw",w+"px");q.style.setProperty("--qx",dx+"px");
+ q.classList.toggle("below",r.top<260);}   // no room above: open downward
+document.addEventListener("mouseover",e=>{
+ const q=e.target.closest&&e.target.closest(".qm");if(q)qmPlace(q);});
 document.addEventListener("click",e=>{
  const q=e.target.closest(".qm");
  document.querySelectorAll(".qm.open").forEach(x=>{if(x!==q)x.classList.remove("open");});
- if(q)q.classList.toggle("open");});
+ if(q){e.preventDefault();qmPlace(q);q.classList.toggle("open");}});
 document.addEventListener("keydown",e=>{
  if(e.key==="Escape"){clearSel();
   const lb=document.getElementById("lb");if(lb)lb.remove();}});

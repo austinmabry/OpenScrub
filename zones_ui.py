@@ -80,6 +80,8 @@ details .inner{background:var(--card);border-radius:0 0 10px 10px;
 details .inner label{display:block;color:var(--mut);font-size:11px;margin-bottom:2px}
 details .inner input,details .inner select,details .inner textarea{
  width:100%;min-width:0}
+details .inner input[type=checkbox]{width:auto;margin:0 4px 0 0;
+ vertical-align:middle}   /* the 100% rule above stacked each box over its label */
 details .inner .full{grid-column:1/-1}
 .prevwrap{position:relative;background:#000;border-radius:10px;overflow:hidden;
  display:flex;justify-content:center}
@@ -156,34 +158,31 @@ details .inner .full{grid-column:1/-1}
  </div>
 
  <details><summary>Advanced settings &#9656;</summary><div class="inner">
-  <div><label>OCR engine</label><select id="engine"><option>auto</option>
-   <option>paddle</option><option>tesseract</option></select></div>
-  <div><label>OCR device</label><select id="device"><option>auto</option>
+  <div><label>OCR engine <span class="qm" data-tip="Which text reader finds names, numbers and other text on screen. Auto (recommended) picks the best one installed: PaddleOCR on the NVIDIA image, the same PP-OCR models via ONNX elsewhere, Tesseract as a last resort. Paddle and ONNX read equally well; Tesseract is slower and misses more. If a choice isn't installed, OpenScrub falls back automatically and says so in the log. Only matters for text categories.">?</span></label><select id="engine"><option>auto</option>
+   <option>paddle</option><option>onnx</option><option>tesseract</option></select></div>
+  <div><label>OCR device <span class="qm" data-tip="Run the text reader on the GPU or the CPU. Auto uses the GPU when one is available. Choose cpu only if GPU text reading errors out on your machine - results are the same, just slower.">?</span></label><select id="device"><option>auto</option>
    <option>cpu</option><option>gpu</option></select></div>
-  <div><label>Encoder</label><select id="encoder"><option>auto</option>
+  <div><label>Encoder <span class="qm" data-tip="What builds the output video. Auto tries an NVIDIA GPU (nvenc), then an Intel GPU (qsv), then the CPU (x264), testing each first. Pick x264 if a GPU encoder fails - it always works, just slower. Only affects render speed, never how well things are hidden.">?</span></label><select id="encoder"><option>auto</option>
    <option>nvenc</option><option>qsv</option><option>x264</option></select></div>
-  <div><label>Default redaction</label><select id="mode"><option>blur</option>
+  <div><label>Default redaction <span class="qm" data-tip="How redacted areas look unless a category overrides it (the per-category menus in the category list). Strongest to weakest: box (solid black, can't be undone), inpaint (filled in with surrounding background), mosaic (pixelated), blur (soft, the most natural look but the weakest - modern tools can partly reverse a light blur). Use box for anything high-stakes.">?</span></label><select id="mode"><option>blur</option>
    <option>box</option><option>mosaic</option><option>inpaint</option></select></div>
-  <div><label>Person cover <span title="tight = silhouette-hugging (best
-   looking). box = full detection box (hides body shape). concealed =
-   oversized gliding box that also hides height, build and walking gait
-   — use for witness/identity protection.">&#9432;</span></label>
+  <div><label>Person cover <span class="qm" data-tip="How people and tracked objects are covered. tight hugs the body outline (best looking). box covers the whole detection box (hides body shape). concealed is an oversized, smoothly moving box that also hides height, build and walking style - use it for witness or identity protection, ideally with box redaction.">?</span></label>
    <select id="coverage"><option>tight</option><option>box</option>
    <option>concealed</option></select></div>
-  <div><label>Sample interval (s)</label><input type="number" id="si" value="0.5" step="0.1" min="0.1"></div>
-  <div><label>Scan trigger (px)</label><input type="number" id="st" value="60" step="5"></div>
-  <div><label>Blur buffer (px)</label><input type="number" id="pad" value="8"></div>
-  <div><label>Bridge gap (s)</label><input type="number" id="bgap" value="4" step="0.5"></div>
-  <div><label>Face threshold</label><input type="number" id="fthr" value="0.6" step="0.05" min="0" max="1"></div>
-  <div><label>Face expand</label><input type="number" id="fex" value="0.15" step="0.05"></div>
+  <div><label>Sample interval (s) <span class="qm" data-tip="How often (in seconds) the video is checked for on-screen text. Default 0.5. Lower catches text that flashes by briefly but scans slower; higher is faster but can miss short-lived text. Faces, plates and people are checked separately and aren't affected.">?</span></label><input type="number" id="si" value="0.5" step="0.1" min="0.1"></div>
+  <div><label>Scan trigger (px) <span class="qm" data-tip="For screen recordings: also check for text after the screen scrolls this many pixels, even before the next timed check. Default 60. Lower keeps up with fast scrolling but scans more often; raise it if a scroll-heavy video scans very slowly.">?</span></label><input type="number" id="st" value="60" step="5"></div>
+  <div><label>Blur buffer (px) <span class="qm" data-tip="Extra margin (in pixels) blurred around each detected word, face or plate, so edges and letters don't peek out. Default 8. Raise it if you see edges of text or faces around the blur; lower it only if blurs cover too much of what's nearby.">?</span></label><input type="number" id="pad" value="8"></div>
+  <div><label>Bridge gap (s) <span class="qm" data-tip="If the same text disappears for a moment (the reader missed it for a frame or two) and comes back in the same place, keep the blur on across the gap - up to this many seconds. Default 4. Raise it for flickery or low-quality video; lower it if blurs linger after text has really gone.">?</span></label><input type="number" id="bgap" value="4" step="0.5"></div>
+  <div><label>Face threshold <span class="qm" data-tip="How sure the face detector must be before it blurs something (0-1, default 0.6). Lower it to catch small, distant, turned or partly hidden faces - you may get a few false faces, which you can reject in review. Raise it only if many non-faces are being flagged; a missed face is never blurred.">?</span></label><input type="number" id="fthr" value="0.6" step="0.05" min="0" max="1"></div>
+  <div><label>Face expand <span class="qm" data-tip="Grow each detected face box by this fraction before blurring (0.15 = 15% larger). Default 0.15. Raise it if hairlines, ears or chins show around the edge of face blurs.">?</span></label><input type="number" id="fex" value="0.15" step="0.05"></div>
   <div><label>Plate threshold <span class="qm" data-tip="How sure the plate detector must be before it blurs something (0.05-0.95, default 0.35). Raise it if hands, labels or signs keep getting flagged as plates; lower it if real plates are missed. Higher values mean more missed plates - a false plate can be rejected in review, but a missed plate is never blurred, so raise it in small steps and check the output.">?</span></label><input type="number" id="pthr" value="0.35" step="0.05" min="0.05" max="0.95"></div>
-  <div><label>Face mask shape</label><select id="fshape"><option>ellipse</option>
+  <div><label>Face mask shape <span class="qm" data-tip="Shape of face blurs. ellipse follows the face's oval (looks natural, less background blurred). rect is a classic rectangle that also covers the corners - a little safer for faces at odd angles.">?</span></label><select id="fshape"><option>ellipse</option>
    <option>rect</option></select></div>
-  <div><label>Detection scale</label><input type="number" id="dscale" value="1.0" step="0.1" min="0.2" max="1"></div>
-  <div><label>HDR output</label><select id="hdrout"><option value="match">match source</option>
+  <div><label>Detection scale <span class="qm" data-tip="Run face detection on a smaller copy of each frame to scan faster (1.0 = full size, 0.5 = half). The output video is unaffected. Lower values can miss small or distant faces - keep 1.0 unless faces are large and close-up. The Scan speed setting can lower this too.">?</span></label><input type="number" id="dscale" value="1.0" step="0.1" min="0.2" max="1"></div>
+  <div><label>HDR output <span class="qm" data-tip="Only matters for HDR video (e.g. recent iPhones). match source keeps the output HDR with its full brightness and color. tone-map to SDR converts it to standard video, which looks right on every screen and app. Standard (SDR) input is always output as SDR.">?</span></label><select id="hdrout"><option value="match">match source</option>
    <option value="sdr">tone-map to SDR</option></select></div>
-  <div><label>Codec</label><select id="vcodec"><option>h264</option><option>hevc</option></select></div>
-  <div><label>Output format</label><select id="outfmt"><option>mp4</option>
+  <div><label>Codec <span class="qm" data-tip="Video compression for the output. h264 plays everywhere (default). hevc (H.265) makes smaller files but some older devices and browsers can't play it. HDR output always uses HEVC.">?</span></label><select id="vcodec"><option>h264</option><option>hevc</option></select></div>
+  <div><label>Output format <span class="qm" data-tip="File type of the output. mp4 plays almost everywhere (default). mov suits Apple apps like Final Cut and QuickTime. mkv suits editors and media servers that prefer it.">?</span></label><select id="outfmt"><option>mp4</option>
    <option>mov</option><option>mkv</option></select></div>
   <div><label>Output quality <span class="qm" data-tip="File size vs quality. Archival is visually lossless but LARGE (a 12s phone clip can be 100MB+) - great for records, too big to text. Balanced is about a third of that size; Share-friendly about an eighth, still clean enough for messaging and uploads. Redaction strength is identical in all three.">?</span></label>
    <select id="outqual">
@@ -191,24 +190,18 @@ details .inner .full{grid-column:1/-1}
     <option value="balanced">Balanced (~1/3 size)</option>
     <option value="share">Share-friendly (~1/8 size)</option>
    </select></div>
-  <div class="full"><label>Allow names (keep visible, one per line)</label>
+  <div class="full"><label>Allow names (keep visible, one per line) <span class="qm" data-tip="Names that should stay visible, one per line - for example a presenter, host or your own staff. Applies to the name category only. Words you mark safe during review are remembered under Settings, Learned safe words, and apply to every scan automatically.">?</span></label>
    <textarea id="allow" rows="2"></textarea></div>
-  <div class="full"><label>Always blur (extra names)</label>
+  <div class="full"><label>Always blur (extra names) <span class="qm" data-tip="Names that must always be blurred, one per line, even if the name detector doesn't recognize them as names (unusual spellings, nicknames). Needs the name category to be checked. For any other exact word or phrase, use the specific text category instead.">?</span></label>
    <textarea id="extra" rows="2"></textarea></div>
   <div class="full" style="display:flex;gap:14px;flex-wrap:wrap;font-size:12px">
-   <label style="display:inline"><input type="checkbox" id="densefaces"> dense faces</label>
-   <label style="display:inline" title="Derive a head region from every
-    person detection (needs a person model) — covers the BACK of a turned
-    head, which face detectors can't see"><input type="checkbox"
-    id="faceheads"> cover turned heads</label>
-   <label style="display:inline" title="Transcribe the audio LOCALLY
-    (whisper) and suggest mute spans for spoken names/numbers — review
-    before applying; nothing leaves this machine"><input type="checkbox"
-    id="audiopii"> detect spoken PII</label>
-   <label style="display:inline"><input type="checkbox" id="skiprev"> skip review</label>
-   <label style="display:inline"><input type="checkbox" id="nomem"> disable memory</label>
-   <label style="display:inline"><input type="checkbox" id="pmode"> preview mode</label>
-   <label style="display:inline"><input type="checkbox" id="drawscores"> face scores</label>
+   <label style="display:inline"><input type="checkbox" id="densefaces"> dense faces <span class="qm" data-tip="Older setting with no extra effect today: faces are always checked on every frame whenever the face category is on.">?</span></label>
+   <label style="display:inline"><input type="checkbox" id="faceheads"> cover turned heads <span class="qm" data-tip="Also blur the back of turned heads - hair and head shape can identify people too. Works from person detections, so it needs a person model (Settings, Detection models).">?</span></label>
+   <label style="display:inline"><input type="checkbox" id="audiopii"> detect spoken PII <span class="qm" data-tip="Transcribe the audio on this machine (nothing is uploaded) and suggest mute spans where names, numbers or addresses are spoken, for the categories you checked. Suggestions appear in review for you to accept, and a transcript lets you mute anything they missed. Makes scans slower.">?</span></label>
+   <label style="display:inline"><input type="checkbox" id="skiprev"> skip review <span class="qm" data-tip="Render straight after the scan, blurring every detection without the review step. Faster, but nothing is checked by a person - false detections stay blurred and nothing missed gets added. Only for footage you've already checked or low-risk material.">?</span></label>
+   <label style="display:inline"><input type="checkbox" id="nomem"> disable memory <span class="qm" data-tip="Turn off text memory. Normally, once a name or number is found it's blurred everywhere it reappears in the video, even where the reader alone would miss it. Turning it off means less is blurred; only use it if memory is spreading a false detection around.">?</span></label>
+   <label style="display:inline"><input type="checkbox" id="pmode"> preview mode <span class="qm" data-tip="Draw colored outlines around what was detected instead of blurring it - for checking detection on test footage. The output is NOT redacted. Never share a preview-mode video.">?</span></label>
+   <label style="display:inline"><input type="checkbox" id="drawscores"> face scores <span class="qm" data-tip="With preview mode on, label each face outline with the detector's confidence score - use it to pick a good Face threshold for your footage.">?</span></label>
   </div>
  </div></details>
 

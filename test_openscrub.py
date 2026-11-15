@@ -484,6 +484,31 @@ def test_plate_threshold_exposed_in_editor_and_clamped(tmp_path):
         assert w.build_args(job).plate_threshold == want, given
 
 
+def test_every_advanced_setting_has_a_help_tip():
+    """Every control in the editor's Advanced panel carries a '?' tip that
+    explains it; tips stay on screen and a tap on a '?' inside a checkbox
+    label opens the tip instead of ticking the box."""
+    import zones_ui
+    import openscrub_web as w
+    page = zones_ui.ZONES_PAGE
+    adv = page[page.index("<summary>Advanced settings"):
+               page.index("</div></details>")]
+    blocks = re.split(r"\n  <div", adv)[1:]
+    controls = re.findall(r'id="([a-z]+)"', adv)
+    assert len(controls) >= 26
+    for cid in controls:
+        holder = next(b for b in blocks if 'id="%s"' % cid in b)
+        if 'class="full" style="display:flex' in holder:   # checkbox row
+            lab = re.search(r'<label[^>]*><input[^>]*id="%s"[^>]*>(.*?)</label>'
+                            % cid, holder, re.S).group(1)
+        else:
+            lab = re.search(r"<label>(.*?)</label>", holder, re.S).group(1)
+        m = re.search(r'class="qm" data-tip="([^"]+)"', lab)
+        assert m and len(m.group(1)) > 40, "no help tip for #" + cid
+    assert "function qmPlace" in w.PAGE and "e.preventDefault();qmPlace(q)" \
+        in w.PAGE
+
+
 def test_phrase_matcher_is_forgiving_of_ocr():
     """'Specific text' must find what the user typed the way OCR actually
     reads it: any case/punctuation, phrases across words, words OCR split
