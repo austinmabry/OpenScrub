@@ -74,7 +74,8 @@ consoles) — but the engine is general-purpose.
   (Luhn-validated), API keys/tokens, and IP addresses — plus **custom
   regex categories**: add your own (claim numbers, case IDs, employee
   IDs, account formats) in the web UI and each one becomes a first-class
-  category with its own color, zones, and review section.
+  category with its own color, zones, and review section. Patterns can
+  span several words on a line (`Case No\. \d+`, `Acme\s+Corp`).
 - **Redact specific text — no regex needed** — tick the **specific text**
   category and type the words or phrases to blur, one per line (a client
   name, a project codename, an account number). Capital letters, spacing

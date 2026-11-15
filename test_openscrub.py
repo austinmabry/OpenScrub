@@ -5,6 +5,7 @@ the gate for any change."""
 
 import json
 import os
+import re
 import subprocess
 import threading
 import time
@@ -419,6 +420,50 @@ def test_custom_regex_category(tmp_path):
                   "--custom-regex", r"claim=CLM-\d+")
     hits = [d for d in dets if d["category"] == "claim"]
     assert hits, "custom category should appear in the report"
+
+
+def test_custom_regex_spans_words_on_a_line(tmp_path):
+    """A regex containing a space used to NEVER match: OCR hands the
+    engine one word at a time. Line-level matching now finds multi-word
+    patterns and blurs the union of the words, while single-word matches
+    are still reported exactly once."""
+    words = [("Client:", (10, 10, 70, 30), 0.9),
+             ("Acme", (80, 10, 130, 30), 0.9),
+             ("Corp", (138, 10, 185, 30), 0.8),
+             ("ref", (300, 10, 330, 30), 0.9),
+             ("CLM-123456", (340, 10, 450, 30), 0.9)]
+    lines = openscrub.group_lines(words)
+    res = [("client", re.compile(r"Acme\s+Corp")),
+           ("claim", re.compile(r"CLM-\d+"))]
+    dets = openscrub.detect_phi(words, lines, 0.0, (0, 0), None, None, res)
+    cl = [d for d in dets if d.category == "client"]
+    assert [(d.text, tuple(d.cbox)) for d in cl] == \
+        [("Acme Corp", (80, 10, 185, 30))]
+    assert cl[0].confidence == 0.8
+    claims = [d for d in dets if d.category == "claim"]
+    assert len(claims) == 1 and tuple(claims[0].cbox) == (340, 10, 450, 30)
+    # and through the whole pipeline on a real frame
+    v = make_video(str(tmp_path / "m.mp4"), [(200, "Client Acme Corp today")])
+    _, rep = run(v, "--categories", "client",
+                 "--custom-regex", r"client=(?i)acme\s+corp")
+    assert any(d["category"] == "client" and "acme" in d["text"].lower()
+               for d in rep), "multi-word regex should be detected"
+
+
+def test_custom_category_rejects_patterns_matching_empty_text(tmp_path,
+                                                              monkeypatch):
+    """`\\d*`, `x|` or `\\b` 'match' every OCR word with zero characters,
+    so the category would blur the whole screen — refuse it at add time,
+    with the reason shown to the user."""
+    import openscrub_web as w
+    monkeypatch.setattr(w, "CUSTOM_CATS_PATH", str(tmp_path / "cc.json"))
+    c = w.app.test_client()
+    for bad in (r"\d*", "x|", r"\b"):
+        r = c.post("/api/custom_cats", json={"name": "t1", "regex": bad})
+        assert r.status_code == 400 and b"empty text" in r.data, bad
+    r = c.post("/api/custom_cats", json={"name": "t1", "regex": r"CLM-\d+"})
+    assert r.status_code == 200
+    assert 'Could not add the category"+(why?": "+why' in w.PAGE
 
 
 def test_phrase_matcher_is_forgiving_of_ocr():

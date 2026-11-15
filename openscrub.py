@@ -917,10 +917,37 @@ def detect_phi(words, lines, t, offset, namer, mrn_re, custom_res=(),
                     "phrase", " ".join(e[0] for e in grp),
                     min(e[2] for e in grp))
 
+    # Custom regex categories. Each OCR WORD is tested on its own (the
+    # original behaviour — patterns anchored to a single token keep
+    # working), and each OCR LINE as a whole, so a pattern that spans
+    # words ("Acme\s+Corp", "Case No\. \d+") can match. Before v1.0.91
+    # only the per-word pass existed, so any regex containing a space
+    # silently never fired. A line match blurs the union of the words it
+    # touches; one already caught by the per-word pass isn't added twice.
+    seen_word = set()
     for txt, box, conf in words:
         for cid, cre in custom_res:
             if cre.search(txt):
                 add(box, cid, txt, conf)
+                seen_word.add((cid, tuple(box)))
+    if custom_res:
+        for ln in lines:
+            ents = ln["words"]
+            for cid, cre in custom_res:
+                for m in cre.finditer(ln["text"]):
+                    s, e = m.span()
+                    if e <= s:
+                        continue            # empty match: nothing to cover
+                    grp = [en for en in ents if en[3] < e and en[4] > s]
+                    if not grp or (len(grp) == 1 and (cid, tuple(grp[0][1]))
+                                   in seen_word):
+                        continue
+                    add((min(en[1][0] for en in grp),
+                         min(en[1][1] for en in grp),
+                         max(en[1][2] for en in grp),
+                         max(en[1][3] for en in grp)),
+                        cid, " ".join(en[0] for en in grp),
+                        min(en[2] for en in grp))
 
     for i, (txt, box, conf) in enumerate(words):
         m_card = RE_CARD.search(txt)

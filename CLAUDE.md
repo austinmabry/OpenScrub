@@ -26,7 +26,7 @@ target is Windows 10 + NVIDIA RTX 3060.
 | `THIRD_PARTY_NOTICES.md` | License + copyright notice + full license text for every third-party MODEL FILE OpenScrub uses — required because the Docker images REDISTRIBUTE the prefetched models (MIT/Apache-2.0 both require shipping the notice). Copyright lines are VERIFIED from upstream license files (2026-11-05); where an upstream names no holder (SFace, VitTrack) it says so instead of inventing one, and the plate model's training data is stated as unpublished (an earlier, untraceable "Roboflow CC BY 4.0" registry claim was removed). Ships in all three images (/src), the sdist, the wheel (as `openscrub_THIRD_PARTY_NOTICES.md`) and the Windows spec. test_third_party_notices_cover_every_baked_model ties each prefetch entry to a notice by filename + sha256 — adding a model to docker/prefetch_models.py REQUIRES a notice. Per-user registry copies refresh descriptive fields (`_REGISTRY_DOC_FIELDS`) from the shipped registry, never pins/URLs/recommended. |
 | `openscrub_update.py` | `openscrub-update` command + web self-update backend: PyPI version check, sha256-verified sdist download, data-preserving folder update (PRESERVE set), TOFU pin carry-forward. Ships in the wheel. |
 | `openscrub_vault.py` | At-rest encryption for the job store: scrypt keystore, chunked AES-256-GCM files (`.osvault`), lock/unlock tree walkers. NO password reset by design. Ships in the wheel. Lock-on-shutdown lives in openscrub_web: a SIGTERM handler (docker stop; locks then os._exit — sys.exit is swallowed by cheroot) + an atexit hook (Ctrl+C; uses the import-time `_HERE` constant because `__file__` is gone during interpreter teardown — both failure modes were real and verified). Encryption must finish inside the container stop grace period (`docker stop -t 120`). |
-| `test_openscrub.py` | pytest suite (126 tests). Must stay green. |
+| `test_openscrub.py` | pytest suite (128 tests). Must stay green. |
 | `deploy/` | App-store submission kit: winget/CasaOS/Runtipi/TrueNAS/Umbrel/Portainer/CapRover/Coolify manifests + a novice-friendly submission guide (deploy/README.md). Platforms with their own reverse proxy get `--http` in the command; direct-port platforms keep default TLS. Bump pinned versions at submission time. |
 | `tools/make_icons.py` | Regenerates every icon/logo asset from `assets/badge_master.png`. |
 | `tools/make_wordmark.py` | Regenerates the typeset Poppins wordmarks (navy + white). |
@@ -196,8 +196,16 @@ Key classes/functions (locate with grep, line numbers drift):
   shorter keys must align to whole words. Box = union of matched words.
   IMMEDIATE in PhiMemory; selected-with-no-terms joins the inert guard
   (refuses a phrase-only scan); the same matcher runs on the whisper
-  transcript in _speech_suggestions. NOTE custom regex categories still
-  match ONE OCR word at a time — a regex containing a space never fires.
+  transcript in _speech_suggestions.
+- Custom regex categories match per OCR WORD (original behaviour) AND per
+  OCR LINE (`ln["text"]`, words joined by single spaces; char spans map
+  back to words via the entries' start/end) since v1.0.91 — before that
+  a regex containing a space never fired. Line matches blur the union of
+  touched words; a single-word line match already caught per-word is not
+  added twice; empty matches are skipped. Consequence: `.*` now runs to
+  the end of the LINE (over-blur, accepted). /api/custom_cats rejects
+  patterns that can match empty text (`\d*`, `x|`, `\b`), which would
+  blur every word; the editor shows the server's reason.
 - `PhiMemory.recall` is INDEXED (length buckets — contributed by Tuomas
   Aho, tahv0 fork — split alpha/digit) and each bucket is matched in ONE
   rapidfuzz `process.extract` batch (ratio for words, Hamming<=1 for
@@ -965,7 +973,7 @@ python -c "import ast; ast.parse(open('openscrub.py').read())"   # each edited .
 #   PAGE now holds TWO <script> blocks (editor + app) sharing one global
 #   scope — join them so duplicate top-level declarations are caught too:
 #   python -c "import openscrub_web as w, re; open('/tmp/p.js','w').write('\n'.join(re.findall(r'<script>(.*?)</script>', w.PAGE, re.S)))" && node --check /tmp/p.js
-python -m pytest test_openscrub.py -q                             # 126 tests, all green
+python -m pytest test_openscrub.py -q                             # 128 tests, all green
 python -m build          # FULL build (sdist->wheel), NEVER just `-w`:
                          # the wheel is built FROM the sdist in CI, so any
                          # file the wheel force-includes must be in the

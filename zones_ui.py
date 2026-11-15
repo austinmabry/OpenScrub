@@ -1066,8 +1066,15 @@ async function addCustom(){
  const r=await fetch("/api/custom_cats",{method:"POST",
   headers:{"Content-Type":"application/json"},
   body:JSON.stringify({name:n,regex:rx})});
- if(r.ok)location.reload();
- else alert("Could not add the category.");
+ if(r.ok){location.reload();return;}
+ // show the server's reason (bad regex, duplicate name, matches empty
+ // text…) — a bare "could not add" left people guessing
+ let why="";
+ try{const t=await r.text(),m=t.match(/<p>([\s\S]*?)<\/p>/);
+  // DOMParser: decodes entities without running anything in the text
+  why=new DOMParser().parseFromString(m?m[1]:"","text/html")
+   .body.textContent.trim();}catch(e){}
+ alert("Could not add the category"+(why?": "+why:"."));
 }
 async function loadCustomList(){
  try{

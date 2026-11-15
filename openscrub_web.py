@@ -3328,11 +3328,19 @@ def custom_cats():
         abort(409, "a category with that name already exists")
     try:
         import re as _re
-        _re.compile(pattern)
+        _cre = _re.compile(pattern)
     except Exception as e:
         abort(400, "invalid regex: %s" % e)
     if not pattern:
         abort(400, "a regex pattern is required")
+    # a pattern that can match EMPTY text "matches" every OCR word (e.g.
+    # `\d*`, `x|`, `\b`) — the category would blur the whole screen
+    if any(m.end() == m.start()
+           for sample in ("", "Sample text 123, A-1 b.c@d")
+           for m in _cre.finditer(sample)):
+        abort(400, "this pattern can match empty text, so it would blur "
+                   "every word — make it require at least one character "
+                   "(for example use + instead of *)")
     cats.append({"id": cid, "label": name, "regex": pattern,
                  "color": _cat_color(cid)})
     with open(CUSTOM_CATS_PATH, "w", encoding="utf-8") as f:
