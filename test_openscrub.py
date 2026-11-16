@@ -2839,6 +2839,50 @@ def test_face_detector_edge_assist_geometry():
     assert abs(y1 - (120 - 60 * fd.expand)) < 1.5
 
 
+def test_closeup_faces_get_a_larger_blur_margin():
+    """Re-id benchmark (public-domain interview clip): one fully-blurred
+    close-up face was re-identified at 0.63 from the neck and uniform
+    insignia just below the blur, and --coverage concealed can't help (a
+    frame-filling close-up yields no person detection). The face margin
+    now ramps from the user's Face expand (faces <= 15% of the frame) up
+    to 0.45 (>= 30%) — never below the user's own setting."""
+    f = openscrub.face_expand_for
+    ap = pytest.approx
+    assert f(0.15, 50, 60, 600, 400) == ap(0.15)        # 15% of height
+    assert f(0.15, 100, 100, 600, 400) == ap(0.35)      # 25%: ramping
+    assert f(0.15, 160, 180, 600, 400) == ap(0.45)      # 45%: close-up
+    assert f(0.05, 40, 40, 600, 400) == ap(0.05)        # user's lower value kept
+    assert f(0.60, 160, 180, 600, 400) == ap(0.60)      # never below the user's
+    assert f(0.15, 250, 300, 1080, 1920) > 0.15          # portrait: width share counts
+
+    class CB(openscrub.Callbacks):
+        def log(self, msg):
+            pass
+    fd = openscrub.FaceDetector(CB())
+    frame = np.full((400, 600, 3), 90, np.uint8)
+    pad = fd._edge_pad(600, 400)
+
+    class _Stub:
+        def __init__(self, faces):
+            self.faces = faces
+
+        def setInputSize(self, sz):
+            pass
+
+        def detect(self, img):
+            return None, np.array(self.faces, np.float32)
+    fd.net = fd.ort = None
+    # a close-up face (180px of a 400px frame) gets the 0.45 margin
+    fd.yunet, fd.size = _Stub([[pad + 200, pad + 60, 160, 180, 0.9]]), None
+    (x1, y1, x2, y2, _c), = fd.find(frame)
+    assert abs(y2 - min(400, 240 + 180 * 0.45)) < 1.5   # neck/collar covered
+    assert abs(x1 - (200 - 160 * 0.45)) < 1.5
+    # an ordinary face keeps exactly the 0.15 margin it always had
+    fd.yunet, fd.size = _Stub([[pad + 100, pad + 120, 50, 60, 0.9]]), None
+    (x1, y1, x2, y2, _c), = fd.find(frame)
+    assert abs(y2 - (180 + 60 * 0.15)) < 1.5
+
+
 def test_blur_kernel_is_two_thirds_region():
     """Re-identification benchmark, close-up faces (200-750px): a
     1/3-width Gaussian left SFace similarity at 0.57-0.69 — above the

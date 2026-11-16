@@ -37,7 +37,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.95"
+VERSION = "1.0.96"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -5701,6 +5701,31 @@ def _nms_boxes(boxes, thr=0.4):
     return keep
 
 
+# CLOSE-UP FACE EXPANSION. A fixed 15% margin is right for ordinary
+# footage, but in an extreme close-up the neck, collar and clothing just
+# below the blur still carry identity: on the public-domain interview
+# benchmark clip one fully-blurred close-up face was RE-IDENTIFIED (SFace
+# similarity 0.63 >= 0.55) from the neck and uniform insignia under the
+# blur. `--coverage concealed` can't help there — it shapes PERSON masks,
+# and a frame-filling close-up yields no person detection at all. A 0.45
+# margin closed it (0.49, below threshold), but 0.45 everywhere would
+# over-blur ordinary footage. So the margin RAMPS with the face's share of
+# the frame: the user's own expand up to 15% of frame height/width, rising
+# linearly to CLOSEUP_EXPAND at 30%+. It only ever ADDS cover (never below
+# the user's setting) and leaves normal-sized faces exactly as before.
+CLOSEUP_EXPAND = 0.45
+CLOSEUP_SHARE = (0.15, 0.30)
+
+
+def face_expand_for(base, bw, bh, frame_w, frame_h):
+    """Expansion fraction for one face box (pure, unit-tested)."""
+    share = max(bw / max(1.0, frame_w), bh / max(1.0, frame_h))
+    lo, hi = CLOSEUP_SHARE
+    t = min(1.0, max(0.0, (share - lo) / (hi - lo)))
+    top = max(base, CLOSEUP_EXPAND)
+    return base + (top - base) * t
+
+
 class FaceDetector:
     """Face detector with three tiers:
     1. an optional user-installed ONNX model (--face-model / registry:
@@ -5805,7 +5830,8 @@ class FaceDetector:
         log("      face detector: Haar cascade (install note: YuNet is more accurate)")
 
     def find(self, frame, detect_scale=1.0):
-        """-> [(x1, y1, x2, y2, conf)] with 15% expansion. detect_scale<1.0
+        """-> [(x1, y1, x2, y2, conf)] expanded by face_expand_for (15% by
+        default, more for close-ups). detect_scale<1.0
         runs detection on a downscaled copy for speed, mapping boxes back to
         full resolution (output quality is unaffected)."""
         h, w = frame.shape[:2]
@@ -5861,7 +5887,8 @@ class FaceDetector:
                         min(dw, x2) / s, min(dh, y2) / s, conf))
         expanded = []
         for x1, y1, x2, y2, conf in out:
-            ex, ey = (x2 - x1) * self.expand, (y2 - y1) * self.expand
+            e = face_expand_for(self.expand, x2 - x1, y2 - y1, w, h)
+            ex, ey = (x2 - x1) * e, (y2 - y1) * e
             expanded.append((max(0, x1 - ex), max(0, y1 - ey),
                              min(w, x2 + ex), min(h, y2 + ey), conf))
         return expanded
@@ -6767,7 +6794,11 @@ def build_parser():
                          "Output quality is unaffected. Default 1.0 (off).")
     ap.add_argument("--face-expand", type=float, default=0.15,
                     help="expand detected face boxes by this fraction before "
-                         "the blur buffer is applied (default 0.15)")
+                         "the blur buffer is applied (default 0.15). "
+                         "Close-up faces get more automatically: the margin "
+                         "ramps up to 0.45 as a face fills 15-30%% of the "
+                         "frame (never below this value), so the neck and "
+                         "collar under a close-up are covered too")
     ap.add_argument("--coverage", choices=["tight", "box", "concealed"],
                     default="tight",
                     help="person/tracked-object cover: tight = silhouette "
