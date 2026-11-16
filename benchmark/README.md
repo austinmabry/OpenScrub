@@ -71,6 +71,27 @@ people's faces and publish the frames.
 
 ## Measured: text PII
 
+### Latest: v1.0.96 (re-measured 2026-11-16)
+
+OpenScrub v1.0.96, CPU only (4-core cloud container, no GPU; Python
+3.11, OpenCV 5.0.0, onnxruntime 1.31.1, Tesseract 5.3.4), corpus v2
+(8 scenarios, 64 PII + 43 benign samples), 5 frames sampled per planted
+value, engine defaults only. Higher is better for recall and benign
+preservation; lower is better for leak rate:
+
+| OCR engine | PII recall | Frame leak rate | Benign preserved |
+|---|---|---|---|
+| ONNX PP-OCRv5 (the default on CPU/Intel/Windows) | **100.0 %** (64/64) | **0.00 %** (0/320) | **100.0 %** (43/43) |
+| Tesseract | **100.0 %** (64/64) | **0.00 %** (0/320) | 97.7 % (42/43) |
+
+Identical to the v1.0.79 measurement below, including the single
+Tesseract over-blur (same phrase, same cause — see below). It was left
+in on purpose: making it pass would mean teaching the capitalised-pair
+name rule to skip some real two-word names, trading a possible leak
+for a benchmark point.
+
+### Original measurement: v1.0.79
+
 OpenScrub v1.0.79, CPU only (no GPU), corpus v2 (8 scenarios), 5 frames
 sampled per planted value. Higher is better for recall and benign
 preservation; lower is better for leak rate:
@@ -126,6 +147,47 @@ regression test:
   screen, but not a full match, so the blur ended ~0.7 s early.
 
 ## Measured: face re-identification
+
+### Latest: v1.0.96 (re-measured 2026-11-16)
+
+OpenScrub v1.0.96 (the published tag), default settings, SFace matcher,
+same-person threshold 0.55, CPU only (4-core cloud container; OpenCV
+5.0.0). Every row has a valid control, so a 0 % result is meaningful:
+
+| Footage | Faces graded | Re-identified | Still detected as a face | Similarity mean / max | Chance floor | Control |
+|---|---|---|---|---|---|---|
+| Handheld party clip, five subjects, constant motion, 1080p ([Pexels 7100826](https://www.pexels.com/video/7100826/)) ³ | 160 | **0 (0.0 %)** | 1.9 % | 0.144 / 0.319 | 0.267 | 0.878 |
+| The same party clip at native 4K (3840×2160) | 163 ⁴ | **0 (0.0 %)** | 2.4 % | 0.137 / 0.420 | 0.206 | 0.887 |
+| Public-domain interview, large frontal close-ups, 1080×1920 ([Wikimedia Commons](https://commons.wikimedia.org/wiki/File:Interview_with_a_Marshall_Center_professor_(999984).webm)) ⁵ | 176 ⁴ | **0 (0.0 %)** | **0.0 %** | 0.125 / 0.437 | 0.441 | 0.697 |
+| Same party clip (1080p), `--mode mosaic` | 160 | **0 (0.0 %)** | 5.0 % | 0.206 / 0.380 | 0.267 | 0.878 |
+
+**No face was re-identified on any clip**, and the mean
+post-redaction similarity is below the cross-person chance floor in
+every row. The interview row's v1.0.79 residual (below) is gone — that
+is the v1.0.96 close-up margin at work.
+
+*Still detected as a face* means a face detector can still tell a face
+was there (a blurred oval keeps a face's outline), not whose face. Every
+still-detectable crop stayed below the 0.55 threshold (0.03–0.42); the
+highest, 0.42, is a small 4K face (83×101 px) — above that clip's 0.21
+chance floor, well below a match. Mosaic shows the most because its
+tiles keep the face layout.
+
+³ Downscaled for this run from the Pexels 4K original (Lanczos, x264
+CRF 12, 478 frames); the July downscale settings weren't recorded, so
+this is a fresh 1080p input, not a byte-identical rerun of the v1.0.79
+row. ⁴ After openly excluded *degenerate* crops (embedding matches a
+flat patch ≥ 0.5 — no identity to leak): 1 on 4K, 3 on the interview.
+Face counts are higher than in July (e.g. 160 vs 125), most likely
+because the attack's candidate detection varies with the OpenCV version
+(5.0.0 here) and the new 1080p input — more faces attacked, not fewer. ⁵ The Commons original (17,144,078 bytes,
+SHA-1 `a0431e7f…`), decoded once to lossless H.264 because this
+container's OpenCV build cannot decode AV1 (verified pixel-identical,
+1,110 frames at 29.97 fps). The attacker uses a fixed 15 % face margin
+(`closeup_margin=False`), so these crops are comparable across
+versions.
+
+### Original measurement: v1.0.79
 
 OpenScrub v1.0.79, default blur mode, SFace matcher, same-person
 threshold 0.55. "Re-identified" = the redacted face still matched the
