@@ -145,11 +145,51 @@ embeddings match a featureless flat patch at ≥ 0.5 — they carry no
 identity to protect or leak; excluded openly, like unconfirmed
 candidates). The one residual match is an extreme close-up crop where
 the face itself IS covered — the 0.63 similarity rides on the
-subject's uniform insignia and neck below the blur. Face redaction
-covered the face; identifying clothing is what the `person` category
-and `--coverage concealed` exist for. We publish it rather than
-excluding it because the recognizer scored it, and the rule here is
-that the numbers include what the attack found.
+subject's uniform insignia and neck below the blur. We publish it
+rather than excluding it because the recognizer scored it, and the rule
+here is that the numbers include what the attack found. **Fixed in
+v1.0.96** — see *Close-up margin* below. (An earlier version of this
+note pointed to the `person` category and `--coverage concealed` as the
+remedy. That was wrong for this shot: `--coverage` shapes *person*
+masks, and a frame-filling close-up produces no person detection at
+all — a re-run with `--coverage concealed` rendered a byte-identical
+file. The face margin is what covers a close-up's neck and collar.)
+
+### Close-up margin (v1.0.96)
+
+An independent re-run of the interview row reproduced the residual
+exactly and showed the cause: a fixed 15 % face margin leaves the neck
+of an extreme close-up uncovered. Raising `--face-expand` to 0.45
+closed it (0.63 → 0.49), but 0.45 everywhere would over-blur ordinary
+footage. Since v1.0.96 the margin **ramps with the face's share of the
+frame**: the user's `--face-expand` for faces up to 15 % of the frame
+height or width, rising to 0.45 at 30 % and above. Ordinary faces are
+unchanged; it never goes below the user's setting.
+
+Re-measured on the same input, same container, default settings, the
+build immediately before the change vs v1.0.96:
+
+| Interview clip, defaults | v1.0.95 | v1.0.96 |
+|---|---|---|
+| The residual crop (t = 15.02 s, the 0.63 match above) | **0.630** — re-identified | **0.484** — below threshold |
+| Same crop, the 7 frames around it | 0.613 – 0.644 (all ≥ 0.55) | 0.397 – 0.484 (all < 0.55) |
+| Full run: re-identified | 0 / 176 ² | **0 / 176** |
+| Full run: similarity max / mean | 0.463 / 0.167 | **0.437 / 0.125** (max below the 0.441 chance floor) |
+| Full run: still detected as a face | 2.5 % | **0.0 %** |
+
+² In this container the harness graded that face on a slightly
+shorter crop (bottom edge at y = 1271 instead of 1530 — candidate
+geometry drifts with OpenCV point versions), which stops above the
+insignia, so the full run no longer counted it even before the fix.
+That is why the residual crop is also measured directly, at its
+original box, on both renders. The remaining 0.48 is a sliver of
+collar insignia at the crop's bottom edge — slightly above the 0.44
+chance floor, below the 0.55 threshold. Input: the Commons original
+(17,144,078 bytes, SHA-1 `a0431e7f…`), decoded once to **lossless**
+H.264 because this container's OpenCV build cannot decode AV1 (frames
+verified pixel-identical, 1,110 frames at 29.97 fps). The attacker's
+face boxes now use a fixed 15 % margin (`closeup_margin=False`) so a
+change to the redaction can never move the attack's crop geometry.
 
 Mean post-redaction similarity sat **below the cross-person chance
 floor** in every run — a redacted face matches its own original no

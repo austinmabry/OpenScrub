@@ -137,8 +137,14 @@ def confirmed_faces(video, every=0.5, low=0.3, confirm=0.6):
     on count as attack surface — see the module docstring for what the
     low pass alone 'found'. Faces carry their FRAME INDEX so the attack
     can decode reference and redacted in lockstep instead of seeking."""
-    det_low = openscrub.FaceDetector(_Quiet(), thresh=low)
-    det_std = openscrub.FaceDetector(_Quiet(), thresh=confirm)
+    # The ATTACKER's crop geometry is fixed (flat 15% margin), independent
+    # of the pipeline's close-up margin: grading with the redaction's own
+    # (now larger) boxes would move the attack along with the defence and
+    # make results incomparable across versions.
+    det_low = openscrub.FaceDetector(_Quiet(), thresh=low,
+                                     closeup_margin=False)
+    det_std = openscrub.FaceDetector(_Quiet(), thresh=confirm,
+                                     closeup_margin=False)
     cap = cv2.VideoCapture(video)
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     step = max(1, int(round(every * fps)))
@@ -273,7 +279,7 @@ def run(video, out_dir, mode, coverage, categories, extra, redacted=None):
         return None
 
     rec = _sface()
-    det = openscrub.FaceDetector(_Quiet(), thresh=0.5)
+    det = openscrub.FaceDetector(_Quiet(), thresh=0.5, closeup_margin=False)
     rows = []
     track_of = {}
     for ti, tr in enumerate(tracks):

@@ -5738,8 +5738,13 @@ class FaceDetector:
     blur edge. A model that fails to load falls back LOUDLY to YuNet —
     detection never silently disappears."""
 
-    def __init__(self, cb=None, expand=0.15, thresh=0.6, model_path=None):
+    def __init__(self, cb=None, expand=0.15, thresh=0.6, model_path=None,
+                 closeup_margin=True):
         self.expand = expand
+        # closeup_margin=False keeps the flat `expand` on every face — for
+        # MEASUREMENT code (the re-id benchmark's attacker/oracle), whose
+        # crop geometry must not move when the redaction does
+        self.closeup_margin = closeup_margin
         self.thresh = float(thresh)
         log = (cb.log if cb else print)
         self.yunet = None
@@ -5887,7 +5892,8 @@ class FaceDetector:
                         min(dw, x2) / s, min(dh, y2) / s, conf))
         expanded = []
         for x1, y1, x2, y2, conf in out:
-            e = face_expand_for(self.expand, x2 - x1, y2 - y1, w, h)
+            e = (face_expand_for(self.expand, x2 - x1, y2 - y1, w, h)
+                 if self.closeup_margin else self.expand)
             ex, ey = (x2 - x1) * e, (y2 - y1) * e
             expanded.append((max(0, x1 - ex), max(0, y1 - ey),
                              min(w, x2 + ex), min(h, y2 + ey), conf))

@@ -251,7 +251,11 @@ Key classes/functions (locate with grep, line numbers drift):
   the re-id benchmark re-identified one fully-blurred close-up (0.63)
   from the neck + uniform insignia under the blur, and `--coverage
   concealed` can't help — close-ups produce no PERSON detection.
-  test_closeup_faces_get_a_larger_blur_margin pins it.
+  test_closeup_faces_get_a_larger_blur_margin pins it. The benchmark's
+  ATTACKER detectors pass `closeup_margin=False` (flat margin) so crop
+  geometry never moves with the defence. Re-measured (benchmark/README
+  "Close-up margin"): the flagged crop 0.630 -> 0.484, full run max
+  0.463 -> 0.437, still-detectable 2.5% -> 0%.
 - Faces are ALWAYS dense (per-frame detection) whenever the face
   category is selected — on every kind of footage. Scan-cadence face
   adds merged with the OCR hold union a moving person's positions into

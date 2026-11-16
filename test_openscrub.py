@@ -2881,6 +2881,15 @@ def test_closeup_faces_get_a_larger_blur_margin():
     fd.yunet, fd.size = _Stub([[pad + 100, pad + 120, 50, 60, 0.9]]), None
     (x1, y1, x2, y2, _c), = fd.find(frame)
     assert abs(y2 - (180 + 60 * 0.15)) < 1.5
+    # measurement code (the re-id benchmark's attacker) keeps a FIXED
+    # margin, so a stronger redaction can't move the attack's crops
+    fd.closeup_margin = False
+    fd.yunet, fd.size = _Stub([[pad + 200, pad + 60, 160, 180, 0.9]]), None
+    (x1, y1, x2, y2, _c), = fd.find(frame)
+    assert abs(y2 - (240 + 180 * 0.15)) < 1.5
+    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "benchmark", "reid.py"), encoding="utf-8").read()
+    assert src.count("closeup_margin=False") == 3
 
 
 def test_blur_kernel_is_two_thirds_region():
