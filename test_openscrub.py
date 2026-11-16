@@ -509,6 +509,88 @@ def test_every_advanced_setting_has_a_help_tip():
         in w.PAGE
 
 
+def test_ocr_dash_and_slash_lookalikes_are_still_detected():
+    """OCR returns en/em dashes, Unicode hyphens/minus and look-alike
+    slashes; every structured pattern expects '-' and '/'. Before v1.0.94
+    '123–45–6789' slipped past SSN, phone, DOB, card AND custom regex
+    (issue #22, found by Tuomas Aho). read_adaptive — the one point where
+    every OCR engine's text enters detection — now normalizes them."""
+    dashes = ["‐", "‑", "‒", "–", "—", "―",
+              "−", "﹣", "－", "-—"]
+    samples = {"ssn": "123{d}45{d}6789", "phone": "555{d}201{d}0142",
+               "dob": "03{d}15{d}1978", "card": "4111{d}1111{d}1111{d}1111",
+               "cust": "CLM{d}123456"}
+    res = [("cust", re.compile(r"CLM-\d+"))]
+
+    class FakeOCR:
+        def __init__(self, text):
+            self.text = text
+
+        def read(self, frame):
+            return [(self.text, (10, 10, 200, 30), 0.95)]
+    frame = np.zeros((40, 400, 3), np.uint8)
+    for d in dashes:
+        for cat, tpl in samples.items():
+            words = openscrub.read_adaptive(FakeOCR(tpl.format(d=d)), frame,
+                                            "off")
+            dets = openscrub.detect_phi(words, openscrub.group_lines(words),
+                                        0, (0, 0), None, None, res)
+            assert any(x.category == cat for x in dets), (repr(d), cat)
+    for sl in ("⁄", "∕", "／"):
+        words = openscrub.read_adaptive(FakeOCR("03%s15%s1978" % (sl, sl)),
+                                        frame, "off")
+        dets = openscrub.detect_phi(words, openscrub.group_lines(words), 0,
+                                    (0, 0), None, None)
+        assert any(x.category == "dob" for x in dets), repr(sl)
+    # ordinary text is untouched; no digits/letters are ever rewritten
+    assert openscrub.normalize_ocr_text("Bulletin 2010, A-1 b/c") == \
+        "Bulletin 2010, A-1 b/c"
+    # spoken numbers in a transcript get the same treatment
+    words = [(0.0, 0.5, " call"), (0.5, 1.5, " 555–201–0142")]
+    sugg = openscrub._speech_suggestions(words, {"phone"})
+    assert [s["category"] for s in sugg] == ["phone"]
+
+
+def test_text_scan_cadence_notices_small_new_text():
+    """The self-tuning OCR cadence doubled its interval whenever the WHOLE
+    frame barely changed — and a small SSN popping up moves the whole-frame
+    mean by <1 gray level, so text shown for under a second was never
+    scanned (issue #22, found by Tuomas Aho). Local 16px cells now catch
+    it: scan sooner, not later."""
+    base = np.full((360, 640), 245, np.uint8)
+    step = 15
+    assert openscrub.text_scan_stride(base, base.copy(), step) == 30
+    txt = base.copy()
+    cv2.putText(txt, "SSN 123-45-6789", (350, 300), FONT, 0.45, 20, 1)
+    assert float(cv2.absdiff(txt, base).mean()) < 1.0   # globally "static"
+    assert openscrub.text_scan_stride(txt, base, step) == 7
+    speck = base.copy()
+    speck[98:106, 98:106] = 0      # a speck inside ONE 16px cell (96-112)
+    assert openscrub.text_scan_stride(speck, base, step) == 30
+    busy = np.zeros_like(base)
+    assert openscrub.text_scan_stride(busy, base, step) == 7
+
+
+def test_brief_text_on_static_screen_is_scanned(tmp_path):
+    """End to end: an SSN shown for 0.8s on an otherwise static screen was
+    missed entirely before v1.0.94 (the doubled interval jumped over it)."""
+    path = str(tmp_path / "flash.mp4")
+    fps = 30
+    base = np.full((720, 1280, 3), 245, np.uint8)
+    cv2.putText(base, "Quarterly status report", (60, 120), FONT, 0.9,
+                (20, 20, 20), 2)
+    txt = base.copy()
+    cv2.putText(txt, "SSN 123-45-6789", (700, 600), FONT, 0.9, (20, 20, 20), 2)
+    out = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), fps,
+                          (1280, 720))
+    for i in range(3 * fps):
+        out.write(txt if 1.05 <= i / fps < 1.85 else base)
+    out.release()
+    _, dets = run(path, "--categories", "ssn")
+    assert any(d["category"] == "ssn" for d in dets), \
+        "an SSN shown for 0.8s must be scanned and blurred"
+
+
 def test_phrase_matcher_is_forgiving_of_ocr():
     """'Specific text' must find what the user typed the way OCR actually
     reads it: any case/punctuation, phrases across words, words OCR split

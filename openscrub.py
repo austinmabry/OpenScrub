@@ -37,7 +37,7 @@ from dataclasses import dataclass, asdict
 import cv2
 import numpy as np
 
-VERSION = "1.0.93"
+VERSION = "1.0.94"
 
 # ----------------------------------------------------------------------------
 # OCR backends
@@ -55,6 +55,24 @@ class OcrBackend:
 
     def read(self, frame):
         raise NotImplementedError
+
+
+# OCR returns typographic look-alikes for the separators every structured
+# pattern expects: en/em dashes, Unicode hyphens and minus signs for "-",
+# fraction/division/fullwidth slashes for "/". Sometimes it misreads a
+# real hyphen, sometimes the document genuinely uses an en dash — either
+# way "123–45–6789" slipped past the SSN, phone, date, card AND custom
+# regex patterns (a fail-open leak). Normalize every OCR word before any
+# detection sees it. Runs collapse ("-—" -> "-") so a doubled misread
+# can't leave an invalid "--" separator. No characters are guessed or
+# joined across words. Finding credited to Tuomas Aho (tahv0, issue #22).
+_OCR_DASHES = re.compile("[-\u2010-\u2015\u2212\u2e3a\u2e3b\ufe58\ufe63"
+                         "\uff0d]+")
+_OCR_SLASHES = re.compile("[\u2044\u2215\u29f8\uff0f]")
+
+
+def normalize_ocr_text(text):
+    return _OCR_SLASHES.sub("/", _OCR_DASHES.sub("-", text))
 
 
 class TesseractBackend(OcrBackend):
@@ -81,7 +99,7 @@ class TesseractBackend(OcrBackend):
                     or RE_DATE.search(t)
                     or sum(ch.isdigit() for ch in s) >= 6)
         for i in range(len(data["text"])):
-            txt = data["text"][i].strip()
+            txt = normalize_ocr_text(data["text"][i].strip())
             conf = float(data["conf"][i]) if data["conf"][i] not in ("-1", -1) else 0.0
             if not txt:
                 continue
@@ -197,6 +215,13 @@ class PaddleBackend(OcrBackend):
 
 
 def read_adaptive(ocr, frame, mode="auto"):
+    """OCR the frame (every engine) and normalize look-alike separators —
+    the single point where OCR text enters detection."""
+    return [(normalize_ocr_text(t), b, c)
+            for t, b, c in _read_adaptive_raw(ocr, frame, mode)]
+
+
+def _read_adaptive_raw(ocr, frame, mode="auto"):
     """OCR the frame; if the text is small (median word height < 15 px) or
     mode is 'on', re-OCR at 2x and keep whichever pass found more words.
     Upscaling helps small UI fonts but can hurt large text, so it's applied
@@ -6081,6 +6106,7 @@ def _speech_suggestions(words, cats, nlp=None, custom_res=(), phrases=()):
     text = ""
     idx = []                       # char -> word index
     for i, (_, _, tok) in enumerate(words):
+        tok = normalize_ocr_text(tok)   # transcripts carry en dashes too
         idx.extend([i] * len(tok))
         text += tok
     out = []
@@ -7064,6 +7090,35 @@ def reverse_pass(scans, memory, cats, namer, lenient=76):
     return extra
 
 
+def text_scan_stride(small, scan_small, step):
+    """Self-tuning OCR cadence (frames between text scans). Heavy change
+    tightens it (0.5x); a frame that has barely changed since the last
+    scan stretches it (2x) — nothing new to read.
+
+    BUT "barely changed" was judged by the WHOLE frame's mean difference,
+    and a small piece of new text (an SSN popping up in a corner) moves a
+    whole-frame mean by well under 1 gray level. The doubled interval then
+    jumped right over text shown for under a second: a synthetic 0.8s SSN
+    on a static screen was never scanned at all (fail-open). So before
+    stretching, look for LOCAL change: 16x16-pixel cells (half-res frame)
+    whose average moved >= 12 levels; two or more such cells mean
+    something appeared — scan SOONER (0.5x). One cell alone is treated as
+    a compression speck. Approach and finding credited to Tuomas Aho
+    (tahv0, issue #22)."""
+    diff = cv2.absdiff(small, scan_small)
+    act = float(diff.mean())
+    if act > 8.0:
+        return max(2, step // 2)
+    if act >= 1.0:
+        return step
+    cells = cv2.resize(diff, (max(1, diff.shape[1] // 16),
+                              max(1, diff.shape[0] // 16)),
+                       interpolation=cv2.INTER_AREA)
+    if np.count_nonzero(cells >= 12) >= 2:
+        return max(2, step // 2)
+    return step * 2
+
+
 def run_scan(args, cb=None):
     """Scan pass only: OCR + face detection + tracking. Returns a state dict
     consumed by run_render (and serialized into --report files)."""
@@ -7758,11 +7813,7 @@ def run_scan(args, cb=None):
             # it (0.5x) so new content is read sooner. Fast scrolling lowers
             # the scroll trigger so scans fire earlier in the movement.
             if scan_small is not None and scan_small.shape == small.shape:
-                act = float(cv2.absdiff(small, scan_small).mean())
-                if act < 1.0:
-                    step_eff = step * 2
-                elif act > 8.0:
-                    step_eff = max(2, step // 2)
+                step_eff = text_scan_stride(small, scan_small, step)
             speed = (abs(cx - prev_fcx) + abs(cy - prev_fcy)) * fps
             if speed > 300:
                 trig_eff = max(20.0, args.scan_trigger * 0.5)
