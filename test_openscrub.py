@@ -463,6 +463,15 @@ def test_custom_category_rejects_patterns_matching_empty_text(tmp_path,
         assert r.status_code == 400 and b"empty text" in r.data, bad
     r = c.post("/api/custom_cats", json={"name": "t1", "regex": r"CLM-\d+"})
     assert r.status_code == 200
+    # decided by parsing, NEVER by running the request's regex on the
+    # server (code-scanning #22, py/regex-injection / ReDoS)
+    import inspect
+    src = inspect.getsource(w.custom_cats)
+    assert not re.search(r"\.(finditer|search|match|fullmatch|findall|sub)\(",
+                         src)
+    assert w._regex_min_width(r"(?=CLM)") == 0
+    assert w._regex_min_width(r"(?i)acme\s+corp") == 9
+    assert w._regex_min_width("(unclosed") == 0     # unparseable = unsafe
     assert 'Could not add the category"+(why?": "+why' in w.PAGE
 
 

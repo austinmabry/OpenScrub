@@ -205,7 +205,12 @@ Key classes/functions (locate with grep, line numbers drift):
   added twice; empty matches are skipped. Consequence: `.*` now runs to
   the end of the LINE (over-blur, accepted). /api/custom_cats rejects
   patterns that can match empty text (`\d*`, `x|`, `\b`), which would
-  blur every word; the editor shows the server's reason.
+  blur every word; the editor shows the server's reason. That check is
+  STATIC (`_regex_min_width`: parse tree min width, re._parser /
+  sre_parse) — NEVER execute a request-supplied regex in a web route
+  (code-scanning #22, py/regex-injection / ReDoS: the v1.0.91 version
+  test-ran it with finditer; fixed v1.0.95, pinned by the custom-category
+  test). re.compile for syntax checking is fine.
 - OCR SEPARATOR NORMALIZATION (v1.0.94, issue #22 — found by Tuomas
   Aho): `read_adaptive` is the ONE entry point for every engine's OCR
   text and maps look-alike dashes (U+2010-2015, minus, fullwidth, small,

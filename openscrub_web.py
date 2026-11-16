@@ -3338,6 +3338,19 @@ def _cat_color(cid):
     return "#%02x%02x%02x" % (int(r * 255), int(g * 255), int(b * 255))
 
 
+def _regex_min_width(pattern):
+    """Shortest text a regex can match, from its parse tree (0 = it can
+    match empty text). Pure analysis — the pattern is never executed."""
+    try:
+        from re import _parser as sre      # Python 3.11+
+    except ImportError:                      # pragma: no cover — 3.10
+        import sre_parse as sre
+    try:
+        return sre.parse(pattern).getwidth()[0]
+    except Exception:
+        return 0                             # unparseable: treat as unsafe
+
+
 @app.route("/api/custom_cats", methods=["GET", "POST"])
 def custom_cats():
     cats = load_custom_cats()
@@ -3356,16 +3369,18 @@ def custom_cats():
         abort(409, "a category with that name already exists")
     try:
         import re as _re
-        _cre = _re.compile(pattern)
+        _re.compile(pattern)          # syntax check only — never executed
     except Exception as e:
         abort(400, "invalid regex: %s" % e)
     if not pattern:
         abort(400, "a regex pattern is required")
     # a pattern that can match EMPTY text "matches" every OCR word (e.g.
-    # `\d*`, `x|`, `\b`) — the category would blur the whole screen
-    if any(m.end() == m.start()
-           for sample in ("", "Sample text 123, A-1 b.c@d")
-           for m in _cre.finditer(sample)):
+    # `\d*`, `x|`, `\b`) — the category would blur the whole screen.
+    # Decided STATICALLY from the parsed pattern's minimum match width,
+    # never by running the user's regex here: executing request-supplied
+    # patterns on the server is a ReDoS risk (code-scanning #22,
+    # py/regex-injection — the v1.0.91 version test-ran it on samples).
+    if _regex_min_width(pattern) == 0:
         abort(400, "this pattern can match empty text, so it would blur "
                    "every word — make it require at least one character "
                    "(for example use + instead of *)")
