@@ -4,6 +4,7 @@ import io
 import json
 from pathlib import Path
 import queue
+import sys
 
 import cv2
 import numpy as np
@@ -24,6 +25,7 @@ INVALID_OPTIONS = [
     pytest.param('""', id="empty-string"),
     pytest.param("7", id="integer"),
     pytest.param("1" * 4301, id="integer-over-runtime-limit"),
+    pytest.param("[" * (sys.getrecursionlimit() + 100) + "0" + "]" * (sys.getrecursionlimit() + 100), id="nesting-over-runtime-limit"),
     pytest.param("0", id="zero"),
     pytest.param("1.5", id="decimal"),
     pytest.param("true", id="true"),
@@ -54,6 +56,7 @@ def intake(tmp_path, monkeypatch):
     monkeypatch.setitem(web.app.config, "MAX_CONTENT_LENGTH", 1024 * 1024)
     monkeypatch.setenv("OPENSCRUB_MEDIA_ROOT", str(tmp_path))
     monkeypatch.setenv("OPENSCRUB_NO_AUTOFETCH", "1")
+    monkeypatch.setattr(web, "_disk_free", lambda path: 10 * 1024**3)
 
     def forbidden(*args, **kwargs):
         pytest.fail("scan admission must not execute a worker or model inference")
