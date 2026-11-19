@@ -22,8 +22,13 @@ Thanks for helping! A few rules keep this privacy tool trustworthy.
 
 ## Before you open a PR
 
-    python -m pytest test_openscrub.py -q      # must be green
+    python -m pytest -q                        # all discovered tests must be green
     python -m build                            # full sdist->wheel build
+
+The discovered suite includes `test_openscrub.py` and `tests/`. The HDR
+cleanup regressions use synthetic media and real FFmpeg/ffprobe with libx265;
+they skip when those tools are unavailable. Child-reaping observations require
+POSIX, and the injected encoder-exit case also requires `waitid`/`WNOWAIT`.
 
 For web UI changes, also boot `python openscrub_web.py` and click through
 what you touched — and note the PAGE string is a normal (non-raw) Python
