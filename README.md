@@ -467,6 +467,19 @@ a before/after box editor to resize, move, add, or time-bound any blur,
 range, and audio mute/bleep spans. Then render and download the redacted
 video plus the audit report.
 
+**Export location and progress:** After rendering, **Save redacted video as…**
+and **Save audit report as…** open a destination picker in supported Chromium
+browsers on secure origins (HTTPS or localhost). Files stream to the selected
+device with bytes written, elapsed time and an approximate remaining time after
+a few seconds. A pause shows a waiting message; **Finalizing…** remains until
+the destination closes successfully. Unknown response sizes show bytes and
+elapsed time without a percentage or countdown. The browser accepts each chunk
+before the count advances; this is not a guarantee of physical disk durability.
+Direct **Download** links remain available in every browser and report only
+that the browser download started. Without picker support, enable **Ask where
+to save each file** in browser download settings. The destination is on the
+device running the browser, including when OpenScrub runs in Docker.
+
 **Settings** (gear icon): detection model pickers for **Face**,
 **License-plate**, and **Person (full-body blur)** — optional models are
 downloaded on demand with SHA-256 verification and license badges —

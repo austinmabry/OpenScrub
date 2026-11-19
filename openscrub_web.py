@@ -347,7 +347,15 @@ def new_job(video_path, options, name):
     return job
 
 
+def export_filenames(job) -> tuple[str, str]:
+    """Share picker suggestions and attachment names, using the real container."""
+    stem = os.path.splitext(job["name"])[0]
+    ext = os.path.splitext(job.get("output") or "")[1] or ".mp4"
+    return stem + "_redacted" + ext, stem + "_audit.json"
+
+
 def job_public(job):
+    video_name, report_name = export_filenames(job)
     return {k: job[k] for k in ("id", "name", "phase", "progress", "error",
                                 "stats")} | {
         "eta": job.get("eta"),      # .get(): jobs rehydrated from disk lack it
@@ -358,6 +366,8 @@ def job_public(job):
         "log_tail": job["log"][-30:],
         "log_len": len(job["log"]),
         "has_output": bool(job["output"] and os.path.exists(job["output"])),
+        "download_name": video_name,
+        "report_name": report_name,
     }
 
 
@@ -1706,12 +1716,8 @@ def job_download(jid):
     job = JOBS.get(jid) or abort(404)
     if not job["output"] or not os.path.exists(job["output"]):
         abort(404)
-    # download name must carry the REAL container extension: a .mkv render
-    # saved as "_redacted.mp4" looks like the format choice was ignored
-    ext = os.path.splitext(job["output"])[1] or ".mp4"
     return send_file(job["output"], as_attachment=True,
-                     download_name=os.path.splitext(job["name"])[0]
-                     + "_redacted" + ext)
+                     download_name=export_filenames(job)[0])
 
 
 @app.route("/api/jobs/<jid>/report")
@@ -1719,8 +1725,7 @@ def job_report(jid):
     job = JOBS.get(jid) or abort(404)
     return send_file(os.path.join(job["dir"], "report.json"),
                      as_attachment=True,
-                     download_name=os.path.splitext(job["name"])[0]
-                     + "_audit.json")
+                     download_name=export_filenames(job)[1])
 
 
 # ----------------------------------------------------------------------------
@@ -2131,9 +2136,148 @@ function shellHtml(j){
  </div>`;
 }
 
+// Save As exports stay bound to the clicked job even while the picker is open.
+let EXPORT_NAMES={id:null,video:null,report:null};
+const CAN_SAVE_AS=!!(window.isSecureContext&&window.showSaveFilePicker);
+const EXPORTS=new Map();
+function exportControls(id,kind){
+ const label=kind==="video"?"redacted video":"audit report";
+ const path=kind==="video"?"download":"report";
+ const direct=`<a href="api/jobs/${id}/${path}" onclick="exportDownloadStarted('${kind}')">Download ${label}</a>`;
+ return `<div id="export-${kind}" data-job="${id}" style="flex:1 1 260px;min-width:0">
+  ${CAN_SAVE_AS?`<button id="save-${kind}" class="${kind==='report'?'sec':''}" onclick="saveExportAs('${kind}',this)">Save ${label} as…</button>
+   <span style="font-size:12px"> · ${direct}</span>`:direct}
+  <div id="export-${kind}-feedback" hidden>
+   <progress id="export-${kind}-progress" max="1" aria-label="${label} save progress" style="width:100%"></progress>
+   <div id="export-${kind}-status" style="font-size:12px;overflow-wrap:anywhere"></div>
+   <div id="export-${kind}-live" role="status" aria-live="polite" aria-atomic="true"
+    style="position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)"></div>
+  </div></div>`;
+}
+function exportDownloadStarted(kind){
+ if(!CUR)return;
+ const key=CUR+":"+kind;
+ // A direct download cannot observe disk completion or replace a running save.
+ if(EXPORTS.get(key)?.active)return;
+ EXPORTS.set(key,{id:CUR,kind,phase:"download",written:0,total:null,active:false});
+ renderExportProgress();
+}
+function exportDuration(seconds){
+ const s=Math.max(0,Math.floor(seconds));
+ return s>=60?`${Math.floor(s/60)} min ${s%60} s`:`${s} s`;
+}
+function renderExportProgress(){
+ const now=performance.now();
+ for(const kind of ["video","report"]){
+  const box=document.getElementById("export-"+kind),state=EXPORTS.get(CUR+":"+kind);
+  if(!box||box.dataset.job!==CUR)continue;
+  const button=document.getElementById("save-"+kind);
+  if(button)button.disabled=!!state?.active;
+  if(!state)continue;
+  if(state.active&&state.renderedBox===box&&state.renderedPhase===state.phase&&now-state.renderedAt<250)continue;
+  state.renderedBox=box;state.renderedPhase=state.phase;state.renderedAt=now;
+  document.getElementById(`export-${kind}-feedback`).hidden=false;
+  const bar=document.getElementById(`export-${kind}-progress`);
+  if(state.total===null||state.phase==="download")bar.removeAttribute("value");
+  else{bar.max=state.total||1;bar.value=state.written;}
+  bar.hidden=state.phase==="download";
+  let text="Download started — see browser downloads";
+  if(state.phase!=="download"){
+   const amount=Math.max(state.total||0,state.written);
+   const power=amount>0?Math.min(3,Math.floor(Math.log10(amount)/3)):0;
+   const unit=["B","KB","MB","GB"][power],scale=1000**power;
+   const bytes=n=>`${(n/scale).toFixed(power?1:0)} ${unit}`;
+   const elapsed=(now-state.start)/1000;
+   const waiting=state.active&&state.phase!=="finalizing"&&now-state.lastWrite>=5000;
+   let label=state.phase==="saved"?"Saved":state.phase==="failed"?"Save failed":
+    state.phase==="finalizing"?"Finalizing…":state.phase==="choosing"?"Choose a destination…":
+    waiting?"Waiting for data or disk…":`Saving ${kind==="video"?"video":"audit report"}`;
+   const count=state.total===null?bytes(state.written):
+    `${bytes(state.written)} / ${bytes(state.total)} (${state.total?Math.min(100,Math.floor(state.written/state.total*100)):100}%)`;
+   text=`${label} — ${count} · ${exportDuration(((state.end??now)-state.start)/1000)} elapsed`;
+   if(state.phase==="saving"&&!waiting&&elapsed>=3&&state.samples.length>1){
+    // Retain one observation at/before the rolling ten-second boundary.
+    while(state.samples.length>2&&state.samples[1][0]<=now-10000)state.samples.shift();
+    const [t,b]=state.samples[0],rate=(state.written-b)/((now-Math.max(t,now-10000))/1000);
+    if(rate>0){text+=` · ${bytes(rate)}/s`;
+     if(state.total!==null&&state.written<state.total)
+      text+=` · about ${exportDuration((state.total-state.written)/rate)} left`;}
+   }
+   if(state.error)text+=` · ${state.error}. Try Save As again or use Download.`;
+  }
+  document.getElementById(`export-${kind}-status`).textContent=text;
+  // Visual updates run at 250ms; live announcements have their own 2s cadence.
+  if(state.announcedPhase!==state.phase||now-(state.announcedAt??-Infinity)>=2000){
+   document.getElementById(`export-${kind}-live`).textContent=text;
+   state.announcedPhase=state.phase;state.announcedAt=now;
+  }
+ }
+}
+async function saveExportAs(kind,button){
+ const id=CUR,name=EXPORT_NAMES[kind],path=kind==="video"?"download":"report";
+ if(!id||EXPORT_NAMES.id!==id||!name||!["video","report"].includes(kind))return;
+ const key=id+":"+kind,previous=EXPORTS.get(key);
+ if(previous?.active)return;
+ const start=performance.now();
+ const state={id,kind,phase:"choosing",active:true,written:0,total:null,start,
+  lastWrite:start,samples:[[start,0]]};
+ EXPORTS.set(key,state);button.disabled=true;renderExportProgress();
+ let reader,writable,timer;
+ try{
+  // Invoke synchronously from the click, before the first network await.
+  let handle;
+  try{handle=await window.showSaveFilePicker({suggestedName:name});}
+  catch(e){if(e.name!=="AbortError")throw e;
+   if(previous)EXPORTS.set(key,previous);else EXPORTS.delete(key);
+   if(CUR===id){document.getElementById(`export-${kind}-feedback`).hidden=!previous;
+    renderExportProgress();}
+   return;
+  }
+  state.phase="saving";state.start=state.lastWrite=performance.now();
+  state.samples=[[state.start,0]];
+  timer=setInterval(renderExportProgress,250);
+  const response=await fetch(`api/jobs/${encodeURIComponent(id)}/${path}`);
+  if(!response.ok)throw new Error(response.status===423?"encryption vault is locked":`server returned HTTP ${response.status}`);
+  if(!response.body)throw new Error("browser did not provide a file stream");
+  reader=response.body.getReader();
+  const length=response.headers.get("Content-Length"),encoding=response.headers.get("Content-Encoding");
+  // Fetch decodes encoded responses; their transfer length is not a disk total.
+  if((!encoding||encoding.toLowerCase()==="identity")&&length!==null&&/^[0-9]+$/.test(length)){
+   const total=Number(length);if(Number.isSafeInteger(total))state.total=total;
+  }
+  writable=await handle.createWritable();
+  for(;;){
+   const {done,value}=await reader.read();if(done)break;
+   await writable.write(value); // backpressure: accepted bytes only
+   const now=performance.now();state.written+=value.byteLength;state.lastWrite=now;
+   // Coalesce observations to 250ms buckets; keep a bounded ten-second window.
+   if(state.samples.length===1||Math.floor(now/250)!==Math.floor(state.samples[state.samples.length-1][0]/250))
+    state.samples.push([now,state.written]);
+   else state.samples[state.samples.length-1]=[now,state.written];
+   while(state.samples.length>2&&state.samples[1][0]<=now-10000)state.samples.shift();
+  }
+  if(state.total!==null&&state.written!==state.total)throw new Error("received byte count does not match Content-Length");
+  state.phase="finalizing";renderExportProgress();
+  await writable.close();
+  state.phase="saved";
+ }catch(e){
+  state.phase="failed";state.error=e.message||String(e);
+  if(reader)try{await reader.cancel();}catch(_){}
+  if(writable)try{await writable.abort();}catch(_){}
+ }finally{
+  if(timer)clearInterval(timer);
+  if(reader)reader.releaseLock();
+  state.active=false;state.end=performance.now();
+  button.disabled=false;renderExportProgress();
+ }
+}
+
 async function refresh(){
  if(!CUR)return;
- const j=await (await fetch("api/jobs/"+CUR)).json();
+ const id=CUR;
+ const j=await (await fetch("api/jobs/"+id)).json();
+ if(CUR!==id)return;
+ EXPORT_NAMES={id,video:j.download_name,report:j.report_name};
  if(SHELLPH===null){
   detail.insertAdjacentHTML("afterbegin",shellHtml(j));SHELLPH="";
   const im=document.getElementById("pimg");
@@ -2162,7 +2306,8 @@ async function refresh(){
  // incremental log append with stick-to-bottom (respects manual scroll-up)
  const lg=document.getElementById("log");
  const stick=lg.scrollTop+lg.clientHeight>=lg.scrollHeight-40;
- const nl=await (await fetch(`api/jobs/${CUR}/log?from=${LOGN}`)).json();
+ const nl=await (await fetch(`api/jobs/${id}/log?from=${LOGN}`)).json();
+ if(CUR!==id)return;
  if(LOGN===0&&nl.len>400){LOGN=nl.len-400;nl.lines=nl.lines.slice(-400);}
  if(nl.lines.length){
   const NL=String.fromCharCode(10);
@@ -2201,8 +2346,8 @@ async function refresh(){
    loadReview();
   }
   if(j.phase=="done"&&j.has_output)
-   a=`<a href="api/jobs/${CUR}/download"><button>Download redacted video</button></a>
-    <a href="api/jobs/${CUR}/report"><button class="sec">Download audit report</button></a>
+   a=`${exportControls(id,"video")}${exportControls(id,"report")}
+    ${CAN_SAVE_AS?"":'<div style="width:100%;font-size:12px;color:#94a3b8">To choose a destination, enable “Ask where to save each file” in your browser download settings.</div>'}
     <button class="sec" onclick="loadReview()">Re-open review</button>
     <button class="sec" onclick="loadCompare()">Compare before/after</button>
     <button class="sec" onclick="loadBoxEdit()">Preview &amp; edit blur boxes</button>
@@ -2213,6 +2358,7 @@ async function refresh(){
   document.getElementById("actions").innerHTML=a;
   if(j.phase!="scanning")img.style.display="none";
  }
+ renderExportProgress();
  loadJobs();
 }
 

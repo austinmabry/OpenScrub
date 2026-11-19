@@ -17,7 +17,7 @@ Thanks for helping! A few rules keep this privacy tool trustworthy.
 
     git clone https://github.com/austinmabry/OpenScrub
     cd OpenScrub
-    pip install -e . && pip install pytest
+    pip install -e . && pip install pytest build
     # system tools: tesseract-ocr + ffmpeg (see README)
 
 ## Before you open a PR
@@ -29,6 +29,9 @@ The discovered suite includes `test_openscrub.py` and `tests/`. The HDR
 cleanup regressions use synthetic media and real FFmpeg/ffprobe with libx265;
 they skip when those tools are unavailable. Child-reaping observations require
 POSIX, and the injected encoder-exit case also requires `waitid`/`WNOWAIT`.
+Focused regressions belong in `tests/test_<topic>.py`; keep the existing root
+suite. Save As behavior tests execute the real embedded JavaScript with Node.js
+(18+), which must be on PATH for local and CI runs.
 
 For web UI changes, also boot `python openscrub_web.py` and click through
 what you touched — and note the PAGE string is a normal (non-raw) Python
