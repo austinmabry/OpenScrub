@@ -26,7 +26,8 @@ target is Windows 10 + NVIDIA RTX 3060.
 | `THIRD_PARTY_NOTICES.md` | License + copyright notice + full license text for every third-party MODEL FILE OpenScrub uses — required because the Docker images REDISTRIBUTE the prefetched models (MIT/Apache-2.0 both require shipping the notice). Copyright lines are VERIFIED from upstream license files (2026-11-05); where an upstream names no holder (SFace, VitTrack) it says so instead of inventing one, and the plate model's training data is stated as unpublished (an earlier, untraceable "Roboflow CC BY 4.0" registry claim was removed). Ships in all three images (/src), the sdist, the wheel (as `openscrub_THIRD_PARTY_NOTICES.md`) and the Windows spec. test_third_party_notices_cover_every_baked_model ties each prefetch entry to a notice by filename + sha256 — adding a model to docker/prefetch_models.py REQUIRES a notice. Per-user registry copies refresh descriptive fields (`_REGISTRY_DOC_FIELDS`) from the shipped registry, never pins/URLs/recommended. |
 | `openscrub_update.py` | `openscrub-update` command + web self-update backend: PyPI version check, sha256-verified sdist download, data-preserving folder update (PRESERVE set), TOFU pin carry-forward. Ships in the wheel. |
 | `openscrub_vault.py` | At-rest encryption for the job store: scrypt keystore, chunked AES-256-GCM files (`.osvault`), lock/unlock tree walkers. NO password reset by design. Ships in the wheel. Lock-on-shutdown lives in openscrub_web: a SIGTERM handler (docker stop; locks then os._exit — sys.exit is swallowed by cheroot) + an atexit hook (Ctrl+C; uses the import-time `_HERE` constant because `__file__` is gone during interpreter teardown — both failure modes were real and verified). Encryption must finish inside the container stop grace period (`docker stop -t 120`). |
-| `test_openscrub.py` | pytest suite (134 tests). Must stay green. |
+| `test_openscrub.py` | Main pytest suite (134 tests). Must stay green. |
+| `tests/` | Additional pytest files (contributed; first: `test_hdr_decoder_cleanup.py`, 3 tests — real FFmpeg on a synthetic 64x64 10-bit PQ clip, skips without ffmpeg/libx265). Run the WHOLE suite with `python -m pytest -q` (137 tests) — `pytest test_openscrub.py` alone skips this folder. Shipped in the sdist only, never the wheel. |
 | `deploy/` | App-store submission kit: winget/CasaOS/Runtipi/TrueNAS/Umbrel/Portainer/CapRover/Coolify manifests + a novice-friendly submission guide (deploy/README.md). Platforms with their own reverse proxy get `--http` in the command; direct-port platforms keep default TLS. Bump pinned versions at submission time. |
 | `tools/make_icons.py` | Regenerates every icon/logo asset from `assets/badge_master.png`. |
 | `tools/make_wordmark.py` | Regenerates the typeset Poppins wordmarks (navy + white). |
@@ -945,6 +946,18 @@ defined — there was a real UnboundLocalError from ordering once.
   in v1.0.93 (a no-op: faces are always per-frame when selected);
   build_args still honours `dense_faces` in old saved job options and
   the CLI keeps `--dense-faces`.
+- HDR render cleanup (`render_hdr` → `cleanup_partial`, PR #23 by Tuomas
+  Aho, v1.0.97): on cancel or an encoder failure it closes BOTH pipes
+  (decoder stdout and encoder stdin) before terminate+wait — the decoder
+  pipe used to stay open while the exception traceback held it, leaking
+  a pipe per cancelled/failed HDR render in the long-running server.
+  NOTE tests/test_hdr_decoder_cleanup.py's success test locates the
+  `enc.stdin.write` line by parsing render_hdr's source: restructuring
+  that call means updating the test.
+- test_track_person_size_jump_handoff asserts GEOMETRY (post-occlusion
+  samples exist and never adopt the 2.7x look-alike box), not the
+  "refused a … size jump" log line — that line is only emitted when the
+  track is not `held`, so it is frame-timing dependent (PR #23).
 - Progress ETA is computed SERVER-side per STAGE
   (`WebCallbacks.progress`): whole-stage average rate + a light EMA on
   the published seconds (`eta` in the job JSON; cleared on stage change,
@@ -1022,7 +1035,7 @@ python -c "import ast; ast.parse(open('openscrub.py').read())"   # each edited .
 #   PAGE now holds TWO <script> blocks (editor + app) sharing one global
 #   scope — join them so duplicate top-level declarations are caught too:
 #   python -c "import openscrub_web as w, re; open('/tmp/p.js','w').write('\n'.join(re.findall(r'<script>(.*?)</script>', w.PAGE, re.S)))" && node --check /tmp/p.js
-python -m pytest test_openscrub.py -q                             # 134 tests, all green
+python -m pytest -q          # 137 tests (test_openscrub.py + tests/), all green
 python -m build          # FULL build (sdist->wheel), NEVER just `-w`:
                          # the wheel is built FROM the sdist in CI, so any
                          # file the wheel force-includes must be in the
