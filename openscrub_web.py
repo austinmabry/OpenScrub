@@ -1767,6 +1767,13 @@ textarea{height:64px}
 .grid2{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px}
 .grid3{display:grid;grid-template-columns:repeat(auto-fill,minmax(175px,1fr));gap:9px}
 .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.export-grid{width:100%;display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,340px),1fr));gap:12px}
+.export-item{min-width:0}
+.export-toolbar,.export-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.export-toolbar button,.export-toolbar a{white-space:nowrap}
+.export-toolbar a{font-size:12px}
+.export-actions{width:100%}
+@media(max-width:440px){.export-toolbar{flex-direction:column;align-items:flex-start}}
 #appzone button,#settingsview button{background:var(--acc);color:#fff;
  padding:8px 14px;font-size:13px}
 #appzone button.sec,#settingsview button.sec{background:#475569}
@@ -2144,9 +2151,9 @@ function exportControls(id,kind){
  const label=kind==="video"?"redacted video":"audit report";
  const path=kind==="video"?"download":"report";
  const direct=`<a href="api/jobs/${id}/${path}" onclick="exportDownloadStarted('${kind}')">Download ${label}</a>`;
- return `<div id="export-${kind}" data-job="${id}" style="flex:1 1 260px;min-width:0">
-  ${CAN_SAVE_AS?`<button id="save-${kind}" class="${kind==='report'?'sec':''}" onclick="saveExportAs('${kind}',this)">Save ${label} as…</button>
-   <span style="font-size:12px"> · ${direct}</span>`:direct}
+ return `<div id="export-${kind}" data-job="${id}" class="export-item">
+  <div class="export-toolbar">${CAN_SAVE_AS?`<button id="save-${kind}" class="${kind==='report'?'sec':''}" onclick="saveExportAs('${kind}',this)">Save ${label} as…</button>
+   ${direct}`:direct}</div>
   <div id="export-${kind}-feedback" hidden>
    <progress id="export-${kind}-progress" max="1" aria-label="${label} save progress" style="width:100%"></progress>
    <div id="export-${kind}-status" style="font-size:12px;overflow-wrap:anywhere"></div>
@@ -2346,11 +2353,11 @@ async function refresh(){
    loadReview();
   }
   if(j.phase=="done"&&j.has_output)
-   a=`${exportControls(id,"video")}${exportControls(id,"report")}
+   a=`<div class="export-grid">${exportControls(id,"video")}${exportControls(id,"report")}</div>
     ${CAN_SAVE_AS?"":'<div style="width:100%;font-size:12px;color:#94a3b8">To choose a destination, enable “Ask where to save each file” in your browser download settings.</div>'}
-    <button class="sec" onclick="loadReview()">Re-open review</button>
+    <div class="export-actions"><button class="sec" onclick="loadReview()">Re-open review</button>
     <button class="sec" onclick="loadCompare()">Compare before/after</button>
-    <button class="sec" onclick="loadBoxEdit()">Preview &amp; edit blur boxes</button>
+    <button class="sec" onclick="loadBoxEdit()">Preview &amp; edit blur boxes</button></div>
     <div class="warn" style="width:100%">Reminder: scrub the result before
     sharing. This tool is best-effort, not a compliance guarantee.</div>
     <div id="compare" style="width:100%"></div>
