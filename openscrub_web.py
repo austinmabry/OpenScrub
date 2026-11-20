@@ -901,7 +901,12 @@ def set_cookie(resp):
 
 @app.route("/api/jobs", methods=["POST"])
 def create_job():
-    options = json.loads(request.form.get("options", "{}"))
+    try:
+        options = json.loads(request.form.get("options", "{}"))
+    except (ValueError, RecursionError):
+        return jsonify({"error": "Scan options must be a JSON object."}), 400
+    if not isinstance(options, dict):
+        return jsonify({"error": "Scan options must be a JSON object."}), 400
     jobs = []
     files = request.files.getlist("video")
     if files and files[0].filename:
