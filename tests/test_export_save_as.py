@@ -226,3 +226,23 @@ await tick(13000);gate=writeGate;writeGate=deferred();gate.resolve();await flush
 assert.match(status(),/10.0 KB\/s/);assert.equal(progress().value,104000);
 writeGate.resolve();await pending;
 """)
+
+
+@pytest.mark.parametrize("picker", [True, False])
+def test_download_stays_a_button_without_save_picker(picker):
+    """Without the picker (Safari, Firefox, iPhone) Download is the only way
+    out, so it must stay a full button rather than a small text link."""
+    node_bin = shutil.which("node")
+    assert node_bin, "Node.js is required for embedded UI behavior tests (see CONTRIBUTING.md)"
+    source = "let EXPORT_NAMES" + web.APP_JS.split("let EXPORT_NAMES", 1)[1].split("function exportDownloadStarted", 1)[0]
+    script = ("const window={isSecureContext:true" + (",showSaveFilePicker(){}" if picker else "")
+              + "};\n" + source + "\nprocess.stdout.write(JSON.stringify("
+              "[exportControls('alpha','video'),exportControls('alpha','report')]));")
+    result = subprocess.run([node_bin, "-e", script], capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+    video, report = json.loads(result.stdout)
+    for html, label in [(video, "redacted video"), (report, "audit report")]:
+        assert 'href="api/jobs/alpha/' in html
+        has_button = f">Download {label}</button>" in html
+        assert has_button is (not picker)
+        assert (f">Save {label} as…</button>" in html) is picker

@@ -2151,11 +2151,21 @@ function shellHtml(j){
 // Save As exports stay bound to the clicked job even while the picker is open.
 let EXPORT_NAMES={id:null,video:null,report:null};
 const CAN_SAVE_AS=!!(window.isSecureContext&&window.showSaveFilePicker);
+// iPhone/iPad (iPadOS reports as a Mac with touch) have no "ask where to
+// save" browser setting, so the hint about it is hidden there.
+// (typeof guard: the Node test harness for this code has no navigator.)
+const IOS_LIKE=typeof navigator==="object"&&(/iPhone|iPad|iPod/.test(navigator.userAgent||"")||
+ (/Mac/.test(navigator.platform||"")&&navigator.maxTouchPoints>1));
 const EXPORTS=new Map();
 function exportControls(id,kind){
  const label=kind==="video"?"redacted video":"audit report";
  const path=kind==="video"?"download":"report";
- const direct=`<a href="api/jobs/${id}/${path}" onclick="exportDownloadStarted('${kind}')">Download ${label}</a>`;
+ // Without the picker (Safari, Firefox, every iPhone) Download is the ONLY
+ // way out, so it stays a full button — a small text link under big
+ // secondary buttons buried the main deliverable.
+ const href=`href="api/jobs/${id}/${path}" onclick="exportDownloadStarted('${kind}')"`;
+ const direct=CAN_SAVE_AS?`<a ${href}>Download ${label}</a>`:
+  `<a ${href}><button class="${kind==='report'?'sec':''}">Download ${label}</button></a>`;
  return `<div id="export-${kind}" data-job="${id}" class="export-item">
   <div class="export-toolbar">${CAN_SAVE_AS?`<button id="save-${kind}" class="${kind==='report'?'sec':''}" onclick="saveExportAs('${kind}',this)">Save ${label} as…</button>
    ${direct}`:direct}</div>
@@ -2359,7 +2369,7 @@ async function refresh(){
   }
   if(j.phase=="done"&&j.has_output)
    a=`<div class="export-grid">${exportControls(id,"video")}${exportControls(id,"report")}</div>
-    ${CAN_SAVE_AS?"":'<div style="width:100%;font-size:12px;color:#94a3b8">To choose a destination, enable “Ask where to save each file” in your browser download settings.</div>'}
+    ${CAN_SAVE_AS||IOS_LIKE?"":'<div style="width:100%;font-size:12px;color:#94a3b8">To choose a destination, enable “Ask where to save each file” in your browser download settings.</div>'}
     <div class="export-actions"><button class="sec" onclick="loadReview()">Re-open review</button>
     <button class="sec" onclick="loadCompare()">Compare before/after</button>
     <button class="sec" onclick="loadBoxEdit()">Preview &amp; edit blur boxes</button></div>

@@ -27,7 +27,7 @@ target is Windows 10 + NVIDIA RTX 3060.
 | `openscrub_update.py` | `openscrub-update` command + web self-update backend: PyPI version check, sha256-verified sdist download, data-preserving folder update (PRESERVE set), TOFU pin carry-forward. Ships in the wheel. |
 | `openscrub_vault.py` | At-rest encryption for the job store: scrypt keystore, chunked AES-256-GCM files (`.osvault`), lock/unlock tree walkers. NO password reset by design. Ships in the wheel. Lock-on-shutdown lives in openscrub_web: a SIGTERM handler (docker stop; locks then os._exit — sys.exit is swallowed by cheroot) + an atexit hook (Ctrl+C; uses the import-time `_HERE` constant because `__file__` is gone during interpreter teardown — both failure modes were real and verified). Encryption must finish inside the container stop grace period (`docker stop -t 120`). |
 | `test_openscrub.py` | Main pytest suite (134 tests). Must stay green. |
-| `tests/` | Additional pytest files (contributed; first: `test_hdr_decoder_cleanup.py`, 3 tests — real FFmpeg on a synthetic 64x64 10-bit PQ clip, skips without ffmpeg/libx265). Run the WHOLE suite with `python -m pytest -q` (137 tests) — `pytest test_openscrub.py` alone skips this folder. Shipped in the sdist only, never the wheel. |
+| `tests/` | Focused pytest files, mostly contributed by Tuomas Aho: `test_hdr_decoder_cleanup.py` (3 — real FFmpeg on a synthetic 64x64 10-bit PQ clip, skips without ffmpeg/libx265), `test_scan_options.py` (40 — /api/jobs intake), `test_export_save_as.py` (26 — runs the REAL embedded Save As JS under Node.js 18+, sliced out of APP_JS by marker strings: `function shellHtml(j)`/`async function refresh()`/`let EXPORT_NAMES`/`function exportDownloadStarted` — renaming those breaks the tests; Node must be on PATH). Run the WHOLE suite with `python -m pytest -q` (203 tests) — `pytest test_openscrub.py` alone skips this folder. Shipped in the sdist only, never the wheel. |
 | `deploy/` | App-store submission kit: winget/CasaOS/Runtipi/TrueNAS/Umbrel/Portainer/CapRover/Coolify manifests + a novice-friendly submission guide (deploy/README.md). Platforms with their own reverse proxy get `--http` in the command; direct-port platforms keep default TLS. Bump pinned versions at submission time. |
 | `tools/make_icons.py` | Regenerates every icon/logo asset from `assets/badge_master.png`. |
 | `tools/make_wordmark.py` | Regenerates the typeset Poppins wordmarks (navy + white). |
@@ -946,6 +946,25 @@ defined — there was a real UnboundLocalError from ordering once.
   in v1.0.93 (a no-op: faces are always per-frame when selected);
   build_args still honours `dense_faces` in old saved job options and
   the CLI keeps `--dense-faces`.
+- SCAN OPTIONS INTAKE (PR #25, Tuomas Aho, v1.0.97): create_job parses
+  the multipart `options` field and answers JSON 400 "Scan options must
+  be a JSON object." for malformed JSON, over-deep nesting / oversized
+  ints (ValueError/RecursionError) and any non-object value — BEFORE a
+  job dir, input copy or queue entry exists. Omitted options still mean
+  {}; unknown keys pass through (build_args ignores them).
+- EXPORTS / SAVE AS (PR #24, Tuomas Aho, v1.0.97): `export_filenames(job)`
+  is the ONE source of the download names (real container extension) for
+  /download, /report and job_public's `download_name`/`report_name`.
+  Where `showSaveFilePicker` exists (Chromium, secure origin) the done
+  view offers "Save … as…" (picker opened synchronously in the click,
+  fetch streamed into the FileSystemWritable with backpressure, progress/
+  rate/ETA, Content-Length mismatch = failure, bound to the clicked job
+  id) plus a small direct-download link. WITHOUT the picker (Safari,
+  Firefox, every iPhone) Download MUST stay a full button — it is the
+  only way out (maintainer follow-up; the PR had shrunk it to a 12px link;
+  test_download_stays_a_button_without_save_picker). The "Ask where to
+  save each file" hint is hidden on iOS/iPadOS (`IOS_LIKE`; no such
+  setting there). The best-effort reminder stays under the exports.
 - HDR render cleanup (`render_hdr` → `cleanup_partial`, PR #23 by Tuomas
   Aho, v1.0.97): on cancel or an encoder failure it closes BOTH pipes
   (decoder stdout and encoder stdin) before terminate+wait — the decoder
@@ -1035,7 +1054,7 @@ python -c "import ast; ast.parse(open('openscrub.py').read())"   # each edited .
 #   PAGE now holds TWO <script> blocks (editor + app) sharing one global
 #   scope — join them so duplicate top-level declarations are caught too:
 #   python -c "import openscrub_web as w, re; open('/tmp/p.js','w').write('\n'.join(re.findall(r'<script>(.*?)</script>', w.PAGE, re.S)))" && node --check /tmp/p.js
-python -m pytest -q          # 137 tests (test_openscrub.py + tests/), all green
+python -m pytest -q          # 203 tests (test_openscrub.py + tests/), all green
 python -m build          # FULL build (sdist->wheel), NEVER just `-w`:
                          # the wheel is built FROM the sdist in CI, so any
                          # file the wheel force-includes must be in the
